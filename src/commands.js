@@ -58,6 +58,11 @@ export const CMD = {
   sk_rect: C('2-Point Rectangle', 'rect', { sk: 'rect', key: 'R' }),
   sk_circle: C('Center Diameter Circle', 'circle', { sk: 'circle', key: 'C' }),
   sk_ngon: C('Polygon', 'ngon', { sk: 'ngon' }),
+  sk_crect: C('Center Rectangle', 'crect', { sk: 'crect' }),
+  sk_rrect: C('Rounded Rectangle', 'rrect', { sk: 'rrect' }),
+  sk_slot: C('Slot', 'slot', { sk: 'slot' }),
+  sk_ellipse: C('Ellipse', 'ellipse', { sk: 'ellipse' }),
+  sk_select: C('Select (edit shapes)', 'select', { sk: 'select', key: 'Esc' }),
   sk_delete: C('Delete Shape', 'remove', { skAction: 'delete' }),
   finishsketch: C('Finish Sketch', 'finish', { key: '' }),
   // --- placeholders that exist in Fusion ---
@@ -119,13 +124,46 @@ export const TOOLBAR = {
 };
 
 export const SKETCH_TOOLBAR = [
-  { label: 'CREATE', show: ['sk_line', 'sk_rect', 'sk_circle', 'sk_arc', 'sk_ngon'], menu: ['sk_line', 'sk_path', 'sk_rect', 'sk_circle', 'sk_arc', 'sk_ngon', 'sk_spline', '|', 'sk_mirror'] },
+  { label: 'CREATE', show: ['sk_line', 'sk_rect', 'sk_circle', 'sk_arc', 'sk_ngon'], menu: ['sk_line', 'sk_path', '|', 'sk_rect', 'sk_crect', 'sk_rrect', '|', 'sk_circle', 'sk_ellipse', 'sk_arc', '|', 'sk_slot', 'sk_ngon', 'sk_spline', '|', 'sk_mirror'] },
   { label: 'MODIFY', show: ['sk_fillet', 'sk_trim', 'sk_delete'], menu: ['sk_fillet', 'sk_trim', 'sk_offset', '|', 'sk_delete'] },
   { label: 'CONSTRAINTS', show: ['sk_constraint', 'sk_dim'], menu: ['sk_constraint', 'sk_dim'] },
   { label: 'INSPECT', show: ['measure'], menu: ['measure'] },
   { label: 'INSERT', show: ['sk_project'], menu: ['sk_project', 'svg', 'dxf'] },
-  { label: 'SELECT', show: ['select'], menu: ['select'] },
+  { label: 'SELECT', show: ['sk_select'], menu: ['sk_select'] },
   { label: 'FINISH SKETCH', show: ['finishsketch'], menu: [], right: true, finish: true },
 ];
 
 export const WORKSPACES = ['DESIGN', 'GENERATIVE DESIGN', 'RENDER', 'ANIMATION', 'SIMULATION', 'MANUFACTURE', 'DRAWING'];
+
+// One-line descriptions shown in toolbar tooltips.
+const DESC = {
+  sketch: 'Creates a 2D sketch on a plane or flat face. Sketch profiles can then be extruded, revolved, swept or lofted.',
+  extrude: 'Extends sketch profiles or flat faces into 3D. Join, cut, intersect or create a new body.',
+  revolve: 'Spins a sketch profile around its vertical axis to create a round solid.',
+  sweep: 'Moves a profile along an open path to create a solid.',
+  loft: 'Blends between two or more profile sketches.',
+  rib: 'Thickens an open sketch path into a thin rib or web.',
+  coil: 'Creates a helical spring or thread solid.',
+  hole: 'Cuts a simple, counterbore or countersink hole, optionally threaded.',
+  thread: 'Cuts a real helical thread into a cylinder or hole.',
+  box: 'Creates a box primitive.', cylinder: 'Creates a cylinder primitive.', sphere: 'Creates a sphere primitive.', cone: 'Creates a cone primitive.', torus: 'Creates a torus primitive.',
+  pattern: 'Repeats a body in a line or around an axis.', mirror: 'Mirrors a body across a plane.',
+  presspull: 'Pushes or pulls a flat face. Drag the face or type a distance.',
+  fillet: 'Rounds selected edges.', chamfer: 'Bevels selected edges.', shell: 'Hollows a body to a wall thickness, optionally opening faces.',
+  scale: 'Resizes a body uniformly or along each axis.', split: 'Cuts a body in two with a plane or another body.',
+  combine: 'Joins, cuts or intersects two bodies.', move: 'Moves, rotates or copies a body with a 3D gizmo.', remove: 'Deletes the selected body.',
+  parameters: 'Defines named dimensions and expressions that drive the whole timeline.',
+  joint: 'Positions one body against another with rigid, revolute, slider or ball joints.',
+  measure: 'Measures distances, angles, edge lengths and face relationships.',
+  importstl: 'Inserts an STL mesh into the design.', print3d: 'Exports visible bodies as an STL file for slicing.',
+  select: 'Choose what a click selects: whole bodies or individual faces.',
+  sk_line: 'Draws connected line segments. Type a length and angle, press Enter.',
+  sk_rect: 'Draws a rectangle from two corners. Type a width and height, press Tab / Enter.',
+  sk_crect: 'Draws a rectangle from its centre.', sk_rrect: 'Draws a rectangle with rounded corners. Type a corner radius in the R field.',
+  sk_slot: 'Draws a slot between two centre points. Type a length and width.', sk_ellipse: 'Draws an ellipse from its centre. Type the two radii.',
+  sk_circle: 'Draws a circle from its centre. Type a diameter and press Enter.',
+  sk_ngon: 'Draws a regular polygon from its centre.', sk_path: 'Draws an open path for sweeps and ribs.',
+  sk_select: 'Select, move and resize sketch shapes. Click a dimension to type a value.',
+  finishsketch: 'Leaves the sketch and returns to the model.',
+};
+for (const [k, d] of Object.entries(DESC)) if (CMD[k]) CMD[k].desc = d;

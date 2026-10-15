@@ -1,15 +1,16 @@
 import './style.css';
 import * as THREE from 'three';
 import { icon } from './icons.js';
-import { initKernel, rebuild, shapeToPolygon, PLANES, encodeFloats } from './kernel.js';
-import { FEATURES, defOf } from './features.js';
+import { initKernel, rebuild, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri } from './kernel.js';
+import { FEATURES, defOf, LAST } from './features.js';
 import { parseSTL, writeSTL } from './stl.js';
 import { Viewport } from './viewport.js';
-import { findEdgeChains, matchChain, roundPts } from './edges.js';
+import { findEdgeChains, matchChain, roundPts, planarFace, norm as vnorm } from './edges.js';
 import { acct, call, refreshAccount, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, modal } from './account.js';
 import { evalExpr, resolveParams, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
 import { findEdgeChains as chainsOf } from './edges.js';
 import { ficon, uicon } from './ficons.js';
+import { createSketchUI } from './sketchui.js';
 import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR, WORKSPACES } from './commands.js';
 
 const $ = (s) => document.querySelector(s);
@@ -20,20 +21,29 @@ const PRINTERS = {
 };
 
 // ------------------------------------------------------------------ state
-const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [] });
+const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {} });
 let doc = blankDoc();
 let undoStack = [], redoStack = [];
 let result = { bodies: [], errors: {}, snaps: [], sketchUsed: new Set() };
 let dirty = false;
 let tab = 'SOLID';
-let selFeature = null;           // timeline selection
+let selFeature = null;           // timeline selection (primary)
+let selSet = new Set();          // timeline multi-selection
 let paramState = { values: {}, errors: {} };
 let resolvedMap = {};
 let measure = null;
 let navMode = 'orbit';
+let SU = null;
+let profileHover = null;
+const profileCache = new WeakMap();
 let originVis = false;
 let dataOpen = false;
 let lastCmd = null;
+let selPriority = 'body';
+let selFace = null;
+let selEdges = [];
+let edgeHover = null;
+const chainCache = new WeakMap();
 let playTimer = null;
 let dialog = null;               // {index, isNew, pre, mode}
 let sketch = null;               // active sketch session
@@ -43,8 +53,8 @@ const collapsed = { views: true, origin: true };
 let bedName = localStorage.getItem('sketchy.bed') || Object.keys(PRINTERS)[0];
 
 let vp;
-const snapshot = () => ({ features: [...doc.features], marker: doc.marker, nextId: doc.nextId, params: [...(doc.params || [])] });
-const restore = (s) => { doc.features = [...s.features]; doc.marker = s.marker; doc.nextId = s.nextId; doc.params = [...(s.params || [])]; };
+const snapshot = () => ({ features: [...doc.features], marker: doc.marker, nextId: doc.nextId, params: [...(doc.params || [])], appearance: { ...(doc.appearance || {}) } });
+const restore = (s) => { doc.features = [...s.features]; doc.marker = s.marker; doc.nextId = s.nextId; doc.params = [...(s.params || [])]; doc.appearance = { ...(s.appearance || {}) }; };
 function pushUndo(s) { undoStack.push(s); if (undoStack.length > 100) undoStack.shift(); redoStack = []; markDirty(); }
 function markDirty() { dirty = true; $('#doc-dirty').classList.add('on'); scheduleAutosave(); }
 function toast(msg, err = false) {
@@ -75,19 +85,182 @@ function refreshNow() {
     return r.params === f.params ? f : { ...f, params: r.params };
   });
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
-  try { result = rebuild(feats, limit(), { capture: pickF ? dialog.index : -1 }); }
+  try { result = rebuild(feats, limit(), { capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null }); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
+  vp.bodyColors = doc.appearance || {};
   vp.setBodies(result.bodies.filter((b) => !hiddenBodies.has(b.id)));
   for (const id of [...vp.selected]) if (!result.bodies.some((b) => b.id === id)) vp.selected.delete(id);
   vp.refreshMaterials();
   drawSketches();
+  updateProfileView();
+  vp.setPreview(dialog ? result.preview : null);
+  updateManip();
   updatePickEdges();
-  if (dialog) updateFaceHL();
+  if (selFace && !result.bodies.some((b) => b.id === selFace.id)) selFace = null;
+  updateEdgeView();
+  if (dialog) updateFaceHL(); else if (!sketch && !measure) vp.showFaces(selFace ? [selFace] : [], null);
   renderTree(); renderTimeline(); renderRibbon(); renderStatus();
   $('#btn-undo').disabled = !undoStack.length || !!dialog || !!sketch;
   $('#btn-redo').disabled = !redoStack.length || !!dialog || !!sketch;
   if (dialog) renderDialogErrors();
+}
+
+// ---- sketch profile regions
+function profilesFor(sk) {
+  let r = profileCache.get(sk);
+  if (!r) { try { r = profilesOf(sk); } catch { r = []; } profileCache.set(sk, r); }
+  return r;
+}
+function effectiveProfiles(df, sk) {
+  const items = profilesFor(sk);
+  const ids = df.params.profiles?.filter((id) => items.some((i) => i.id === id));
+  return new Set(ids?.length ? ids : items.filter((i) => i.defaultOn).map((i) => i.id));
+}
+function updateProfileView() {
+  if (!vp) return;
+  let sk = null, pickable = false, selected = null;
+  if (sketch && !sketch.picking) { if (sketch.showProfile !== false) sk = curSketch(); }
+  else if (dialog) {
+    const df = doc.features[dialog.index];
+    if (defOf(df)?.fields.some((x) => x.type === 'profiles')) { sk = doc.features.find((k) => k.id === df.params.sketch); pickable = true; if (sk) selected = effectiveProfiles(df, sk); }
+  }
+  if (!sk || sk.type !== 'sketch') { vp.setProfiles([], null); return; }
+  vp.setProfiles(profilesFor(sk), sk.params, pickable);
+  vp.setProfileState(selected, profileHover);
+}
+
+// ---- direct edge selection (hover / click edges, then Fillet or Chamfer)
+function chainsFor(b) {
+  let c = chainCache.get(b);
+  if (!c) { c = chainsOf(b.verts, 3, b.tris); chainCache.set(b, c); }
+  return c;
+}
+function edgeEntries() {
+  const out = [];
+  for (const b of result.bodies) if (!hiddenBodies.has(b.id)) for (const chain of chainsFor(b)) out.push({ body: b.id, chain });
+  return out;
+}
+function resolveSelEdges() {
+  const out = [];
+  for (const e of selEdges) {
+    const b = result.bodies.find((x) => x.id === e.body);
+    const ch = b && matchChain(chainsFor(b), e.pts);
+    if (ch) out.push({ e, chain: ch });
+  }
+  selEdges = out.map((x) => x.e);
+  return out.map((x) => x.chain);
+}
+function updateEdgeView() {
+  if (!vp) return;
+  if (dialog || sketch || measure) { vp.showEdges([], null); return; }
+  const chains = resolveSelEdges();
+  vp.showEdges(chains, edgeHover?.chain || null);
+  if (chains.length) $('#hud').innerHTML = `<b>${chains.length} edge${chains.length > 1 ? 's' : ''} selected</b> — press F to fillet · use Chamfer in MODIFY · Esc to clear`;
+  else if (/edges? selected/.test($('#hud').textContent)) $('#hud').innerHTML = '';
+}
+function toggleSelEdge(en, additive) {
+  const pts = roundPts(en.chain.pts);
+  const same = (e) => e.body === en.body && matchChain([en.chain], e.pts);
+  const has = selEdges.some(same);
+  if (!additive) { selEdges = has && selEdges.length === 1 ? [] : [{ body: en.body, pts }]; }
+  else selEdges = has ? selEdges.filter((e) => !same(e)) : [...selEdges, { body: en.body, pts }];
+  selFace = null; vp.selected.clear(); vp.refreshMaterials(); vp.showFaces([], null);
+  updateEdgeView(); renderTree(); renderRibbon();
+}
+/** All edges around a flat face (its perimeter), as {body, pts} entries. */
+function edgesOfFace(f) {
+  const b = result.bodies.find((x) => x.id === f.id);
+  if (!b) return [];
+  const tri = findFaceTri(b.verts, b.tris, f.point, f.normal);
+  if (tri < 0) return [];
+  const face = planarFace(b.verts, b.tris, tri);
+  if (!face) return [];
+  const V = (i) => [b.verts[i * 3], b.verts[i * 3 + 1], b.verts[i * 3 + 2]];
+  const tris = face.tris.map((t) => [V(b.tris[t * 3]), V(b.tris[t * 3 + 1]), V(b.tris[t * 3 + 2])]);
+  const dist2Seg = (p, a, c) => { const ab = [c[0] - a[0], c[1] - a[1], c[2] - a[2]], ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]]; const l2 = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2 || 1; const t = Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / l2)); return Math.hypot(a[0] + ab[0] * t - p[0], a[1] + ab[1] * t - p[1], a[2] + ab[2] * t - p[2]); };
+  const onBoundary = (p) => tris.some(([a, c, d]) => Math.min(dist2Seg(p, a, c), dist2Seg(p, c, d), dist2Seg(p, d, a)) < 2e-3);
+  const n = f.normal, d0 = n[0] * f.point[0] + n[1] * f.point[1] + n[2] * f.point[2];
+  return chainsFor(b)
+    .filter((ch) => ch.pts.every((p) => Math.abs(n[0] * p[0] + n[1] * p[1] + n[2] * p[2] - d0) < 2e-3 && onBoundary(p)))
+    .map((ch) => ({ body: b.id, pts: roundPts(ch.pts) }));
+}
+
+// ---- on-canvas distance manipulator (extrude arrow + value box)
+function updateManip() {
+  if (!vp) return;
+  const box = $('#manip-label');
+  const hide = () => { vp.setManip(null); box.hidden = true; };
+  if (!dialog) return hide();
+  const df = doc.features[dialog.index], m = defOf(df)?.manip;
+  const rp = resolvedMap[df.id] || df.params;
+  if (!m || (m.show && !m.show(rp))) return hide();
+  if (m.edge) {
+    // arrow from the middle of the first selected edge along the bisector of its two faces
+    const e0 = df.params.edges?.[0];
+    const cap = e0 && result.captured?.find((b) => b.id === e0.body);
+    const ch = cap && matchChain(chainsOf(cap.verts, 3, cap.tris), e0.pts);
+    if (!ch) return hide();
+    const k = Math.floor(ch.pts.length / 2), fr = ch.frames[k] || ch.frames[0];
+    const dir = vnorm([fr.u1[0] + fr.u2[0], fr.u1[1] + fr.u2[1], fr.u1[2] + fr.u2[2]]);
+    const val = +rp[m.key] || 0;
+    vp.setManip(ch.pts[k], dir, val);
+    box.hidden = false;
+    const inp2 = box.querySelector('input');
+    if (document.activeElement !== inp2) inp2.value = df.exprs?.[m.key] ?? String(+val.toFixed(3));
+    return;
+  }
+  const sk = doc.features.find((k) => k.id === df.params[m.sketch]);
+  if (!sk || sk.type !== 'sketch') return hide();
+  const pts = [];
+  if (defOf(df).fields.some((x) => x.type === 'profiles')) {
+    const sel = effectiveProfiles(df, sk);
+    for (const pr of profilesFor(sk)) if (sel.has(pr.id)) pr.polys.forEach((pl) => pts.push(...pl));
+  } else sk.params.shapes.forEach((sh) => pts.push(...shapeToPolygon(sh)));
+  if (!pts.length) return hide();
+  const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+  const u = (Math.min(...xs) + Math.max(...xs)) / 2, v = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const fr = planeFrame(sk.params);
+  const base = [0, 1, 2].map((k) => fr.o[k] + fr.x[k] * u + fr.y[k] * v);
+  const dist = +rp[m.key] || 0;
+  vp.setManip(base, fr.n, rp.symmetric ? dist / 2 : dist);
+  box.hidden = false;
+  const inp = box.querySelector('input');
+  if (document.activeElement !== inp) inp.value = df.exprs?.[m.key] ?? String(+dist.toFixed(3));
+}
+function bindManip() {
+  const box = $('#manip-label'), inp = box.querySelector('input'), cv = $('#gl');
+  const manipFrame = () => {
+    if (box.hidden || !vp.manip) return;
+    const sp = vp.toScreen(vp.manip.label);
+    box.style.left = sp.x + 'px'; box.style.top = sp.y + 'px';
+    box.style.display = sp.behind ? 'none' : '';
+  };
+  vp.onFrame = () => { manipFrame(); if (sketch && !sketch.picking && SU) SU.frame(); };
+  inp.oninput = () => {
+    if (!dialog) return;
+    const df = doc.features[dialog.index], m = defOf(df).manip, fld = defOf(df).fields.find((x) => x.key === m.key);
+    const r = commitNumber(dialog.index, m.key, inp.value.trim() || '0', fld);
+    inp.classList.toggle('bad', !r.ok);
+  };
+  inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') { inp.blur(); closeDialog(true); } else if (e.key === 'Escape') { inp.blur(); closeDialog(false); } };
+  inp.onfocus = () => inp.select();
+  $('#viewport').addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target !== cv || !dialog || !vp.manip || !vp.pickManip(e)) return;
+    const df = doc.features[dialog.index], m = defOf(df).manip, fld = defOf(df).fields.find((x) => x.key === m.key);
+    e.stopPropagation();
+    vp.controls.enabled = false;
+    const sym = !!(resolvedMap[df.id] || df.params).symmetric;
+    const move = (ev) => {
+      let d = vp.manipDistance(ev);
+      if (d == null) return;
+      if (!ev.shiftKey) d = Math.round(d * 2) / 2;
+      commitNumber(dialog.index, m.key, String(+(sym ? d * 2 : d).toFixed(3)), fld);
+    };
+    const up = () => { removeEventListener('pointermove', move); vp.controls.enabled = true; renderDialog(); };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', up, { once: true });
+  }, true);
 }
 
 function updatePickEdges() {
@@ -128,7 +301,7 @@ const CUSTOM = {
   print3d: () => exportSTL(false), print3dsel: () => exportSTL(true),
   printer: () => printerMenu($('#ribbon')),
   buildvol: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); },
-  select: () => {}, finishsketch: () => finishSketch(), cancelpick: () => cancelSketch(),
+  select: (ev) => selectionMenu(ev?.currentTarget), finishsketch: () => finishSketch(), cancelpick: () => cancelSketch(),
 };
 function runCommand(id, ev) {
   const c = CMD[id];
@@ -138,6 +311,8 @@ function runCommand(id, ev) {
   if (c.skAction === 'delete') return sketchDeleteSelected();
   if (sketch && !['select', 'finishsketch', 'cancelpick'].includes(id)) return toast('Finish the sketch first.');
   if (id === 'remove') { lastCmd = id; return deleteSelection(); }
+  if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
+  if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
   if (c.feature) { lastCmd = id; return startFeature(c.feature); }
   CUSTOM[id]?.(ev);
   if (!['select', 'finishsketch', 'cancelpick'].includes(id)) lastCmd = id;
@@ -150,6 +325,28 @@ function deleteSelection() {
 }
 const menuItems = (ids) => ids.map((id) => (id === '|' ? { sep: true } : { label: CMD[id].label, ficon: CMD[id].icon, hint: CMD[id].key, dim: !!CMD[id].off, run: () => runCommand(id) }));
 
+function selectionMenu(anchor) {
+  const r = (anchor || $('#ribbon')).getBoundingClientRect();
+  showMenu(r.left - 60, r.bottom + 2, [
+    { head: 'SELECTION PRIORITY' },
+    { label: 'Body priority', check: selPriority === 'body', run: () => { selPriority = 'body'; selFace = null; vp.showFaces([], null); toast('Click selects whole bodies.'); } },
+    { label: 'Face priority', check: selPriority === 'face', run: () => { selPriority = 'face'; vp.selected.clear(); vp.refreshMaterials(); toast('Click selects flat faces — then press Q, E (pull), H (hole) or Create Sketch.'); } },
+    { sep: true },
+    { head: 'SELECTION MODE' },
+    { label: 'Window selection', check: true, run: () => {} },
+    { label: 'Freeform selection', dim: true, run: () => toast('Not available yet.') },
+    { label: 'Paint selection', dim: true, run: () => toast('Not available yet.') },
+  ]);
+}
+function sketchOnSelectedFace() {
+  const n = selFace.normal.map((c) => (Math.abs(c) < 1e-6 ? 0 : +c.toFixed(6)));
+  const d = n[0] * selFace.point[0] + n[1] * selFace.point[1] + n[2] * selFace.point[2];
+  const nl = Math.hypot(...n), nn = n.map((c) => c / nl);
+  const xdir = Math.abs(nn[2]) > 0.99 ? [1, 0, 0] : [-nn[1] / Math.hypot(nn[0], nn[1]), nn[0] / Math.hypot(nn[0], nn[1]), 0].map((q) => +q.toFixed(6));
+  selFace = null; vp.showFaces([], null);
+  sketch = { picking: true, index: doc.marker };
+  enterSketch(sketch.index, true, { plane: 'custom', origin: n.map((c) => +(c * d).toFixed(4)), normal: nn.map((c) => +c.toFixed(6)), xdir });
+}
 function workspaceMenu() {
   const r = $('#btn-workspace').getBoundingClientRect();
   showMenu(r.left, r.bottom + 2, WORKSPACES.map((w) => ({ label: w, check: w === 'DESIGN', dim: w !== 'DESIGN', run: () => w !== 'DESIGN' && toast(`${w} isn't available in Sketchy.`) })));
@@ -179,7 +376,7 @@ function renderRibbon() {
       const off = c.off || g.allOff;
       const active = (c.sk && sketch?.tool === c.sk) || (MEASURE_MODE[id] && measure?.mode === MEASURE_MODE[id]) || (id === 'buildvol' && vp.opts.bed);
       b.className = 'fbtn' + (off ? ' off' : '') + (active ? ' active' : '') + (g.big ? ' sel-big' : '') + (g.finish ? ' finish' : '');
-      b.title = `${c.label}${c.key ? ` (${c.key})` : ''}`;
+      b.dataset.tip = JSON.stringify({ t: c.label, k: c.key || '', d: c.desc || (c.off ? 'Not available in Sketchy yet.' : '') });
       b.innerHTML = ficon(c.icon, g.big ? 40 : 30) + (g.finish ? '<span>FINISH SKETCH</span>' : '');
       b.disabled = !!dialog && !sketch;
       b.onclick = (ev) => runCommand(id, ev);
@@ -216,18 +413,18 @@ function renderTree() {
     if (result.bodies.length) {
       const anyVis = visBodies > 0;
       folder(1, 'bodies', 'Bodies', 'folder', { eye: anyVis, onEye: () => { result.bodies.forEach((b) => (anyVis ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } }, () => result.bodies.forEach((b) => {
-        R(2, b.name, { kind: 'body', eye: !hiddenBodies.has(b.id), sel: vp.selected.has(b.id), onEye: () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); refresh(); }, click: (ev) => selectBody(b.id, ev.shiftKey) });
+        R(2, b.name, { kind: 'body', ctx: { kind: 'body', id: b.id }, eye: !hiddenBodies.has(b.id), sel: vp.selected.has(b.id), onEye: () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); refresh(); }, click: (ev) => selectBody(b.id, ev.shiftKey) });
       }));
     }
     const sk = doc.features.map((f, i) => [f, i]).filter(([f, i]) => f.type === 'sketch' && i < limit() + (sketch ? 1 : 0));
     if (sk.length) {
       const visOf = (f) => sketchVis[f.id] ?? !result.sketchUsed.has(f.id);
       folder(1, 'sketches', 'Sketches', 'folder', { eye: sk.some(([f]) => visOf(f)), onEye: () => { const v = !sk.some(([f]) => visOf(f)); sk.forEach(([f]) => (sketchVis[f.id] = v)); drawSketches(); renderTree(); } }, () => sk.forEach(([f]) => {
-        R(2, f.name, { kind: 'sketch', eye: visOf(f), sel: selFeature === f.id, onEye: () => { sketchVis[f.id] = !visOf(f); drawSketches(); renderTree(); }, click: () => selectFeature(f.id), dbl: () => editFeature(featureIndex(f.id)) });
+        R(2, f.name, { kind: 'sketch', eye: visOf(f), sel: selSet.has(f.id), ctx: { kind: 'sketch', id: f.id }, onEye: () => { sketchVis[f.id] = !visOf(f); drawSketches(); renderTree(); }, click: (ev) => selectFeature(f.id, ev), dbl: () => editFeature(featureIndex(f.id)) });
       }));
     }
     const joints = doc.features.filter((f, i) => f.type === 'joint' && i < limit());
-    if (joints.length) folder(1, 'joints', 'Joints', 'folder', {}, () => joints.forEach((f) => R(2, f.name, { kind: 'link', sel: selFeature === f.id, click: () => selectFeature(f.id), dbl: () => editFeature(featureIndex(f.id)) })));
+    if (joints.length) folder(1, 'joints', 'Joints', 'folder', {}, () => joints.forEach((f) => R(2, f.name, { kind: 'link', sel: selSet.has(f.id), ctx: { kind: 'feature', id: f.id }, click: (ev) => selectFeature(f.id, ev), dbl: () => editFeature(featureIndex(f.id)) })));
   }
   const KIND = { comp: 'comp', gear: 'gear', folder: 'folder', file: 'file', body: 'body', sketch: 'sketchi', plane: 'plane', axis: 'axis', point: 'point', link: 'link', camera: 'camera' };
   const host = $('#tree');
@@ -242,6 +439,8 @@ function renderTree() {
     if (r.twist) el.onclick = () => { collapsed[r.key] = open(r.key); renderTree(); };
     else if (r.click) el.onclick = r.click;
     if (r.dbl) el.ondblclick = r.dbl;
+    if (r.ctx) el.oncontextmenu = (e) => { e.preventDefault(); treeMenu(e, r.ctx); };
+    if (r.ctx?.kind === 'body') { el.onmouseenter = () => { vp.hover = r.ctx.id; vp.refreshMaterials(); }; el.onmouseleave = () => { vp.hover = null; vp.refreshMaterials(); }; }
     if (r.onEye) el.querySelector('.eyeb').onclick = (e) => { e.stopPropagation(); r.onEye(); };
     host.appendChild(el);
   }
@@ -280,12 +479,13 @@ function renderTimeline() {
   doc.features.forEach((f, i) => {
     if (i === shownMarker && !sketch) host.appendChild(mk());
     const el = document.createElement('div');
-    el.className = 'tl-item' + (i >= shownMarker ? ' off' : '') + (result.errors[f.id] ? ' err' : '') + (selFeature === f.id ? ' sel' : '') + (f.suppressed ? ' supp' : '');
+    el.className = 'tl-item' + (i >= shownMarker ? ' off' : '') + (result.errors[f.id] ? ' err' : '') + (selSet.has(f.id) ? ' sel' : '') + (f.suppressed ? ' supp' : '');
     el.title = f.name + (result.errors[f.id] ? ` — ${result.errors[f.id]}` : '');
     el.innerHTML = ficon(fiName(f), 24);
-    el.onclick = () => selectFeature(f.id);
+    el.onclick = (e) => { if (tlDragged) { tlDragged = false; return; } selectFeature(f.id, e); };
     el.ondblclick = () => editFeature(i);
-    el.oncontextmenu = (e) => { e.preventDefault(); featureMenu(e, i); };
+    el.oncontextmenu = (e) => { e.preventDefault(); if (!selSet.has(f.id)) { selSet = new Set([f.id]); selFeature = f.id; renderTimeline(); } featureMenu(e, i); };
+    el.onpointerdown = (e) => startTimelineDrag(e, el, i);
     host.appendChild(el);
   });
   if (shownMarker >= doc.features.length && doc.features.length && !sketch) host.appendChild(mk());
@@ -307,17 +507,199 @@ function renderTimeline() {
   }
 }
 
-function selectFeature(id) { selFeature = id; renderTimeline(); renderTree(); }
+function selectFeature(id, ev) {
+  const idx = featureIndex(id);
+  if (ev && (ev.ctrlKey || ev.metaKey)) { selSet.has(id) ? selSet.delete(id) : selSet.add(id); }
+  else if (ev && ev.shiftKey && selFeature) {
+    const a = featureIndex(selFeature), [lo, hi] = a < idx ? [a, idx] : [idx, a];
+    selSet = new Set(doc.features.slice(lo, hi + 1).map((f) => f.id));
+  } else selSet = new Set([id]);
+  selFeature = id;
+  renderTimeline(); renderTree();
+}
+
+// ---- feature dependencies (used by suppress, reorder)
+function refsOf(f) {
+  const ids = new Set(doc.features.map((x) => x.id));
+  const out = new Set();
+  const walk = (v) => { if (typeof v === 'string') { if (ids.has(v) && v !== f.id) out.add(v); } else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') Object.values(v).forEach(walk); };
+  walk(f.params);
+  return out;
+}
+function dependentsOf(ids) {
+  const out = new Set();
+  let grew = true;
+  const roots = new Set(ids);
+  while (grew) {
+    grew = false;
+    for (const f of doc.features) {
+      if (roots.has(f.id) || out.has(f.id)) continue;
+      const r = refsOf(f);
+      if ([...r].some((x) => roots.has(x) || out.has(x))) { out.add(f.id); grew = true; }
+    }
+  }
+  return out;
+}
+function dependenciesOf(ids) {
+  const out = new Set();
+  const stack = [...ids];
+  while (stack.length) {
+    const f = doc.features.find((x) => x.id === stack.pop());
+    if (!f) continue;
+    for (const r of refsOf(f)) if (!out.has(r) && !ids.includes(r)) { out.add(r); stack.push(r); }
+  }
+  return out;
+}
+function setSuppressed(ids, flag) {
+  // suppressing also suppresses everything that depends on it; unsuppressing restores dependents and prerequisites
+  const set = new Set(ids);
+  for (const d of dependentsOf(ids)) set.add(d);
+  if (!flag) for (const d of dependenciesOf(ids)) set.add(d);
+  const extra = [...set].filter((id) => !ids.includes(id) && doc.features.find((x) => x.id === id)?.suppressed !== flag).length;
+  mutate(() => { doc.features = doc.features.map((f) => (set.has(f.id) ? { ...f, suppressed: flag } : f)); });
+  if (extra) toast(`${flag ? 'Also suppressed' : 'Also restored'} ${extra} related feature${extra > 1 ? 's' : ''}.`);
+}
+function deleteFeatures(ids) {
+  const set = new Set(ids);
+  mutate(() => {
+    const before = doc.features.slice(0, doc.marker).filter((f) => set.has(f.id)).length;
+    doc.features = doc.features.filter((f) => !set.has(f.id));
+    doc.marker = Math.max(0, doc.marker - before);
+    selSet = new Set(); selFeature = null;
+  });
+}
+function moveFeature(from, to) {
+  if (from === to || from + 1 === to) return;
+  const f = doc.features[from];
+  const dest = to > from ? to - 1 : to;
+  // static dependency check
+  const deps = refsOf(f);
+  const range = to > from ? doc.features.slice(from + 1, dest + 1) : doc.features.slice(dest, from);
+  for (const g of range) {
+    if (to > from && refsOf(g).has(f.id)) return toast(`"${g.name}" depends on "${f.name}", so it can't move past it.`, true);
+    if (to < from && deps.has(g.id)) return toast(`"${f.name}" depends on "${g.name}", so it can't move before it.`, true);
+  }
+  const pre = snapshot();
+  const feats = [...doc.features];
+  feats.splice(from, 1);
+  feats.splice(dest, 0, f);
+  const m = doc.marker;
+  const newMarker = from < m && dest >= m ? m - 1 : from >= m && dest < m ? m + 1 : m;
+  const old = rebuild(doc.features, doc.marker).errors;
+  const res = rebuild(feats, newMarker).errors;
+  const bad = Object.keys(res).filter((k) => !old[k]);
+  if (bad.length) return toast(`Moving "${f.name}" there would break "${doc.features.find((x) => x.id === bad[0])?.name || 'a feature'}".`, true);
+  pushUndo(pre);
+  doc.features = feats; doc.marker = newMarker;
+  refresh();
+}
+let tlDragged = false;
+function startTimelineDrag(e, el, i) {
+  if (e.button !== 0 || sketch || dialog) return;
+  const host = $('#timeline');
+  const sx = e.clientX;
+  let active = false, drop = -1, ind = null;
+  const items = () => [...host.querySelectorAll('.tl-item')];
+  const move = (ev) => {
+    if (!active && Math.abs(ev.clientX - sx) > 6) { active = true; el.style.opacity = '.4'; ind = document.createElement('div'); ind.className = 'tl-drop'; host.appendChild(ind); }
+    if (!active) return;
+    const its = items();
+    drop = its.length;
+    for (let k = 0; k < its.length; k++) { const r = its[k].getBoundingClientRect(); if (ev.clientX < r.left + r.width / 2) { drop = k; break; } }
+    const hr = host.getBoundingClientRect();
+    const ref = its[Math.min(drop, its.length - 1)].getBoundingClientRect();
+    ind.style.left = (drop >= its.length ? ref.right : ref.left) - hr.left + host.scrollLeft - 1 + 'px';
+  };
+  const up = () => {
+    removeEventListener('pointermove', move);
+    ind?.remove();
+    el.style.opacity = '';
+    if (active) { tlDragged = true; setTimeout(() => { tlDragged = false; }, 50); moveFeature(i, drop); }
+  };
+  addEventListener('pointermove', move);
+  addEventListener('pointerup', up, { once: true });
+}
+
+/** Small floating text input used for renaming. */
+function inlineEdit(anchor, value, cb) {
+  document.querySelectorAll('.inline-edit').forEach((x) => x.remove());
+  const r = anchor.getBoundingClientRect();
+  const inp = document.createElement('input');
+  inp.className = 'inline-edit'; inp.value = value;
+  inp.style.left = r.left + 'px'; inp.style.top = r.top + 'px'; inp.style.minWidth = Math.max(140, r.width) + 'px';
+  document.body.appendChild(inp);
+  inp.focus(); inp.select();
+  let done = false;
+  const finish = (ok) => { if (done) return; done = true; const v = inp.value.trim(); inp.remove(); if (ok && v && v !== value) cb(v); };
+  inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') finish(true); else if (e.key === 'Escape') finish(false); };
+  inp.onblur = () => finish(true);
+}
+function renameFeature(id, anchor) {
+  const f = doc.features.find((x) => x.id === id);
+  if (!f) return;
+  inlineEdit(anchor, f.name, (v) => mutate(() => { doc.features = doc.features.map((x) => (x.id === id ? { ...x, name: v } : x)); }));
+}
+const timelineAnchor = (id) => [...document.querySelectorAll('.tl-item')][featureIndex(id)] || $('#timeline');
+
 function featureMenu(ev, i) {
   const f = doc.features[i];
-  showMenu(ev.clientX, ev.clientY, [
-    { label: 'Edit Feature', run: () => editFeature(i) },
-    { label: 'Roll Back Here', run: () => { doc.marker = i + 1; refresh(); } },
-    { label: f.suppressed ? 'Unsuppress' : 'Suppress', run: () => mutate(() => { doc.features[i] = { ...f, suppressed: !f.suppressed }; }) },
+  const multi = selSet.size > 1 && selSet.has(f.id);
+  const ids = multi ? [...selSet] : [f.id];
+  const anySupp = ids.some((id) => doc.features.find((x) => x.id === id)?.suppressed);
+  showMenu(ev.clientX, ev.clientY - 160, [
+    ...(multi ? [] : [
+      { label: f.type === 'sketch' ? 'Edit Sketch' : 'Edit Feature', run: () => editFeature(i) },
+      { label: 'Rename', hint: 'F2', run: () => renameFeature(f.id, timelineAnchor(f.id)) },
+      { label: 'Roll Back Here', run: () => { doc.marker = i + 1; refresh(); } },
+    ]),
+    { label: anySupp ? 'Unsuppress' : 'Suppress', run: () => setSuppressed(ids, !anySupp) },
     { sep: true },
-    { label: 'Delete', run: () => mutate(() => { doc.features.splice(i, 1); if (doc.marker > i) doc.marker--; }) },
+    { label: multi ? `Delete ${ids.length} features` : 'Delete', hint: 'Del', run: () => deleteFeatures(ids) },
   ]);
 }
+
+// ---- browser context menu (bodies, sketches, joints)
+const SWATCHES = ['#c3c7cd', '#e8b04a', '#d9534f', '#5cb85c', '#4a90d9', '#8e6bbf', '#2b2f36', '#f5f5f5'];
+function treeMenu(ev, c) {
+  const bodies = result.bodies;
+  if (c.kind === 'body') {
+    const b = bodies.find((x) => x.id === c.id);
+    if (!b) return;
+    const hidden = hiddenBodies.has(c.id);
+    const isolated = bodies.length > 1 && bodies.every((x) => x.id === c.id || hiddenBodies.has(x.id));
+    selectBody(c.id, false);
+    showMenu(ev.clientX, ev.clientY, [
+      { label: 'Rename', hint: 'F2', run: () => renameBodyOrFeature(c.id) },
+      { label: hidden ? 'Show' : 'Hide', uicon: hidden ? 'eye' : 'eyeOff', run: () => { hidden ? hiddenBodies.delete(c.id) : hiddenBodies.add(c.id); refresh(); } },
+      { label: isolated ? 'Unisolate' : 'Isolate', run: () => { if (isolated) hiddenBodies.clear(); else bodies.forEach((x) => (x.id === c.id ? hiddenBodies.delete(x.id) : hiddenBodies.add(x.id))); refresh(); } },
+      { sep: true },
+      { head: 'APPEARANCE' },
+      ...SWATCHES.map((hex, k) => ({ label: ['Steel', 'Gold', 'Red', 'Green', 'Blue', 'Purple', 'Black', 'White'][k], swatch: hex, run: () => mutate(() => { doc.appearance = { ...(doc.appearance || {}), [c.id]: k === 0 ? undefined : hex }; if (k === 0) delete doc.appearance[c.id]; }) })),
+      { sep: true },
+      { label: 'Properties', uicon: 'help', run: showInfo },
+      { label: 'Delete', hint: 'Del', run: deleteSelection },
+    ]);
+  } else {
+    const f = doc.features.find((x) => x.id === c.id);
+    if (!f) return;
+    selectFeature(c.id);
+    const vis = sketchVis[f.id] ?? !result.sketchUsed.has(f.id);
+    showMenu(ev.clientX, ev.clientY, [
+      { label: f.type === 'sketch' ? 'Edit Sketch' : 'Edit Feature', run: () => editFeature(featureIndex(f.id)) },
+      { label: 'Rename', hint: 'F2', run: () => renameFeature(f.id, timelineAnchor(f.id)) },
+      ...(f.type === 'sketch' ? [{ label: vis ? 'Hide' : 'Show', run: () => { sketchVis[f.id] = !vis; drawSketches(); renderTree(); } }] : []),
+      { label: f.suppressed ? 'Unsuppress' : 'Suppress', run: () => setSuppressed([f.id], !f.suppressed) },
+      { sep: true },
+      { label: 'Delete', run: () => deleteFeatures([f.id]) },
+    ]);
+  }
+}
+function renameBodyOrFeature(bodyId) {
+  // a body is named after the feature that created it
+  const row = [...document.querySelectorAll('#tree .tree-row')].find((r) => r.textContent.includes(result.bodies.find((b) => b.id === bodyId)?.name || '\u0000'));
+  renameFeature(bodyId, row || $('#tree'));
+}
+
 function mutate(fn) { pushUndo(snapshot()); fn(); refresh(); }
 
 // ------------------------------------------------------------------ menus
@@ -330,7 +712,7 @@ function showMenu(x, y, items) {
     const e = document.createElement('div');
     e.className = 'mi' + (it.disabled ? ' disabled' : '') + (it.check !== undefined ? ' check' + (it.check ? ' on' : '') : '');
     if (it.dim) e.style.opacity = '.55';
-    const ic = it.ficon ? ficon(it.ficon, 22) : it.uicon ? uicon(it.uicon, 16) : it.icon ? icon(it.icon, 16) : it.check === undefined ? '<span class="ph"></span>' : '';
+    const ic = it.swatch ? `<span class="swatch" style="background:${it.swatch}"></span>` : it.ficon ? ficon(it.ficon, 22) : it.uicon ? uicon(it.uicon, 16) : it.icon ? icon(it.icon, 16) : it.check === undefined ? '<span class="ph"></span>' : '';
     e.innerHTML = ic + `<span>${esc(it.label)}</span>` + (it.hint ? `<small>${it.hint}</small>` : '');
     e.onclick = () => { m.hidden = true; it.run(); };
     m.appendChild(e);
@@ -409,6 +791,18 @@ function startFeature(key) {
   const pre = snapshot();
   const params = def.make(c);
   if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
+  if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
+    params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
+    if (!params.edges.length) toast('That face has no edges to round.', true);
+    selEdges = []; edgeHover = null; selFace = null; vp.showFaces([], null); updateEdgeView();
+  }
+  if (selFace) {
+    const fc = { point: selFace.point, normal: selFace.normal };
+    if (key === 'presspull') { params.face = fc; params.body = selFace.id; }
+    else if (key === 'hole') { params.pos = [...selFace.point]; params.dir = [...selFace.normal]; }
+    else if (key === 'shell') { params.body = selFace.id; params.open = [fc]; }
+    selFace = null; vp.showFaces([], null);
+  }
   const type = def.type;
   const f = { id: 'f' + doc.nextId++, type, name: uniqueName(def.label.replace(/ \/.*/, '')), params };
   doc.features.splice(doc.marker, 0, f);
@@ -431,7 +825,7 @@ function updateParam(i, key, val) {
 
 function openDialog(index, isNew, pre) {
   dialog = { index, isNew, pre, mode: 'translate', pick: null, focusKey: null, hover: null };
-  const ff = defOf(doc.features[index]).fields.find((x) => x.type === 'face' || x.type === 'faces');
+  const ff = defOf(doc.features[index]).fields.find((x) => x.type === 'face' || x.type === 'faces' || x.type === 'profiles');
   if (ff) dialog.pick = { kind: ff.type, key: ff.key };
   selFeature = doc.features[index].id;
   $('#props-wrap').classList.add('open');
@@ -553,6 +947,25 @@ function renderDialog() {
         bar.appendChild(cb);
       }
       ctl.appendChild(bar);
+    } else if (fld.type === 'ops') {
+      const ico = { join: 'opjoin', cut: 'opcut', intersect: 'opintersect', new: 'opnew', auto: 'opauto' };
+      const bar = document.createElement('div');
+      bar.className = 'opbar';
+      for (const [v, l] of fld.options) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'opbtn' + (val === v ? ' on' : ''); b.title = l; b.innerHTML = ficon(ico[v] || 'opnew', 24);
+        b.onclick = () => { set(v); rerender(); };
+        bar.appendChild(b);
+      }
+      ctl.appendChild(bar);
+      ctl.insertAdjacentHTML('beforeend', `<div class="note">${esc(fld.options.find(([v]) => v === val)?.[1] || '')}</div>`);
+    } else if (fld.type === 'profiles') {
+      const sk = doc.features.find((k) => k.id === f.params.sketch);
+      const items = sk ? profilesFor(sk) : [];
+      const chosen = sk ? effectiveProfiles(f, sk).size : 0;
+      const explicit = !!f.params.profiles?.length;
+      ctl.innerHTML = `<span>${items.length ? (explicit ? `${chosen} selected` : `${chosen} of ${items.length} (auto)`) : 'No closed profiles'}</span> <button class="btn sm" style="margin-left:6px">Reset</button><div class="note">Click inside a shaded region to add or remove it.</div>`;
+      ctl.querySelector('button').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
     } else if (fld.type === 'face' || fld.type === 'faces') {
       const list = fld.type === 'face' ? (val ? [val] : []) : val || [];
       ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm" style="margin-left:6px">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : 'Click flat faces to open (optional). Click again to deselect.'}</div>`;
@@ -580,9 +993,9 @@ function renderDialog() {
       else if (fld.type === 'body') opts = [['', fld.optional || 'Select body…'], ...bodiesBefore(idx).map((b) => [b.id, b.name])];
       else opts = [['', 'Select sketch…'], ...sketchesBefore(idx).map((k) => [k.id, k.name])];
       s.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
-      s.value = val ?? '';
+      s.value = String(val ?? '');
       s.onfocus = () => { dialog.focusKey = fld.key; };
-      s.onchange = () => { set(s.value); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype'].includes(fld.key)) rerender(); else if (def.gizmo) setupGizmo(); };
+      s.onchange = () => { if (fld.boolSelect) { set(s.value === 'true'); return; } if (fld.key === 'sketch' && 'profiles' in f.params) { patchParams(idx, { sketch: s.value, profiles: null }); rerender(); return; } set(s.value); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype'].includes(fld.key)) rerender(); else if (def.gizmo) setupGizmo(); };
       ctl.appendChild(s);
       if (fld.type === 'body') ctl.insertAdjacentHTML('beforeend', '<div class="note">…or click a body in the viewport.</div>');
     }
@@ -616,6 +1029,16 @@ const sameFace = (a, b) => Math.abs(a.normal[0] * b.normal[0] + a.normal[1] * b.
 /** Viewport click while a dialog with a pick mode is open. */
 function dialogPick(e) {
   const pk = dialog.pick, i = dialog.index, f = doc.features[i];
+  if (pk.kind === 'profiles') {
+    const id = vp.pickProfile(e);
+    const sk = doc.features.find((k) => k.id === f.params.sketch);
+    if (!id || !sk) return;
+    const cur = effectiveProfiles(f, sk);
+    cur.has(id) ? cur.delete(id) : cur.add(id);
+    patchParams(i, { profiles: [...cur] });
+    renderDialog();
+    return;
+  }
   if (pk.kind === 'point') {
     const sn = vp.pickSnap(e);
     if (!sn) return;
@@ -660,9 +1083,11 @@ function closeDialog(ok) {
   const { pre } = dialog;
   vp.hideGizmo();
   vp.showFaces([], null);
+  profileHover = null;
   if (ok) {
     const f = doc.features[dialog.index];
     if (result.errors[f.id] && !confirm('This feature has an error:\n' + result.errors[f.id] + '\n\nKeep it anyway?')) return;
+    if (f.type === 'extrude' && f.params.extent === 'distance') LAST.extrude = Math.abs((resolvedMap[f.id] || f.params).distance) || undefined;
     pushUndo(pre);
   } else restore(pre);
   dialog = null;
@@ -705,7 +1130,7 @@ function enterSketch(index, isNew, plane) {
     doc.marker = index + 1;
     pre.marker = index;
   }
-  sketch = { index, isNew, pre, savedMarker: isNew ? doc.marker : wasMarker, tool: 'rect', sel: -1, pts: null, snap: 1, snapOn: true, sides: 6, grid: null };
+  sketch = { index, isNew, pre, savedMarker: isNew ? doc.marker : wasMarker, tool: isNew ? 'rect' : 'select', sel: -1, hover: -1, pts: null, snap: 'auto', snapOn: true, sides: 6, grid: null };
   applyNavMode();
   doc.marker = Math.max(doc.marker, index + 1);
   selFeature = doc.features[index].id;
@@ -715,32 +1140,33 @@ function enterSketch(index, isNew, plane) {
   const p = doc.features[index].params;
   vp.lookAtPlane(p);
   buildSketchGrid();
-  renderSketchPanel(); setSketchTool('rect'); refresh();
+  renderSketchPanel(); setSketchTool(sketch.tool); refresh();
 }
 const curSketch = () => doc.features[sketch.index];
 function setSketchShapes(shapes, push = true) {
   const f = curSketch();
   doc.features[sketch.index] = { ...f, params: { ...f.params, shapes } };
   refresh();
+  SU?.redraw();
 }
-function buildSketchGrid() {
+function buildSketchGrid(step = SU?.stepNow() ?? 1) {
   if (sketch.grid) { vp.scene.remove(sketch.grid); }
   const p = curSketch().params;
   const g = new THREE.Group();
-  const gr = new THREE.GridHelper(400, 400 / sketch.snap, 0x7d8794, 0xb8bec7);
-  gr.rotation.x = Math.PI / 2;
-  gr.material.transparent = true; gr.material.opacity = 0.5;
-  g.add(gr);
+  const mkGrid = (div, c1, c2, op) => { const gr = new THREE.GridHelper(400 * step, div, c1, c2); gr.rotation.x = Math.PI / 2; gr.material.transparent = true; gr.material.opacity = op; gr.material.depthTest = false; gr.renderOrder = -1; return gr; };
+  g.add(mkGrid(400, 0x9aa3ae, 0xc3c9d1, 0.7), mkGrid(80, 0x6f7a87, 0x8e98a4, 0.75));
   g.matrixAutoUpdate = false;
   g.matrix.copy(vp.planeMatrix(p));
+  g.visible = sketch.gridVisible !== false;
   sketch.grid = g;
   vp.scene.add(g);
 }
 function setSketchTool(t) {
-  sketch.tool = t; sketch.pts = null; sketch.sel = -1;
-  vp.overlay.clear();
-  const hints = { rect: 'Click two opposite corners', circle: 'Click the center, then a point on the circumference', ngon: 'Click the center, then a vertex', path: 'Click points of an open path (sweep / rib centre-line) · Enter or double-click to finish', line: 'Click points · click first point, press Enter or double-click to close' };
-  $('#hud').innerHTML = `<b>Sketch · ${curSketch().name}</b> — ${hints[t]} · Esc to cancel the current shape`;
+  sketch.tool = t; sketch.pts = null; sketch.sel = t === 'select' ? sketch.sel : -1; sketch.hover = -1;
+  SU.activate();
+  const hints = { select: 'Click a shape to select it · drag to move · drag handles to resize · click a dimension to type a value', rect: 'Click the first corner, then the opposite corner · type a width/height and press Tab / Enter', crect: 'Click the centre, then a corner · type a width/height', rrect: 'Click two corners · type W, H and a corner radius R', slot: 'Click the first centre, then the second · type a length and width', ellipse: 'Click the centre, then drag the radii · type A and B', circle: 'Click the centre, then drag out the radius · type a diameter and press Enter', ngon: 'Click the centre, then a vertex · type a radius and press Enter', path: 'Click points of an open path (sweep / rib centre-line) · Enter or double-click to finish', line: 'Click points · type a length and angle · click the first point, press Enter or double-click to close' };
+  $('#hud').innerHTML = `<b>Sketch · ${curSketch().name}</b> — ${hints[t]} · Esc to ${t === 'select' ? 'deselect' : 'stop drawing'}`;
+  drawSketches();
   renderRibbon(); renderSketchPanel();
 }
 function renderSketchPanel() {
@@ -748,14 +1174,15 @@ function renderSketchPanel() {
   const p = curSketch().params;
   const wrap = $('#props-wrap');
   const sh = p.shapes;
-  const fieldsFor = (s) => ({ rect: ['x', 'y', 'w', 'h'], circle: ['cx', 'cy', 'r'], ngon: ['cx', 'cy', 'r', 'n', 'rot'], path: [] }[s.t]);
+  const fieldsFor = (s) => ({ rect: ['x', 'y', 'w', 'h'], circle: ['cx', 'cy', 'r'], ngon: ['cx', 'cy', 'r', 'n', 'rot'], rrect: ['x', 'y', 'w', 'h', 'r'], slot: ['x1', 'y1', 'x2', 'y2', 'w'], ellipse: ['cx', 'cy', 'rx', 'ry'], path: [] }[s.t]);
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('sketch', 20)}SKETCH PALETTE</div><div class="body">
     <div class="mh" style="font-weight:700;margin:0 0 4px">Options</div>
     <div class="row"><label>Sketch plane</label><select id="sp-plane">${[...['XY', 'XZ', 'YZ'], ...(p.plane === 'custom' ? ['custom'] : [])].map((k) => `<option ${k === p.plane ? 'selected' : ''}>${k}</option>`).join('')}</select></div>
     <div class="row"><label>Plane offset</label><input id="sp-off" type="number" step="1" value="${p.offset}"></div>
-    <div class="row"><label>Snap (mm)</label><select id="sp-snap">${[0.1, 0.5, 1, 2, 5, 10].map((v) => `<option ${v === sketch.snap ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+    <div class="row"><label>Snap (mm)</label><select id="sp-snap">${['auto', 0.1, 0.5, 1, 2, 5, 10].map((v) => `<option ${v === sketch.snap ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
     <div class="row"><label>Polygon sides</label><input id="sp-sides" type="number" min="3" max="64" value="${sketch.sides}"></div>
     <label class="chk"><input type="checkbox" id="sp-grid" ${sketch.grid?.visible === false ? '' : 'checked'}> Sketch Grid</label>
+    <label class="chk"><input type="checkbox" id="sp-showprof" ${sketch.showProfile === false ? '' : 'checked'}> Show Profile</label>
     <label class="chk"><input type="checkbox" id="sp-snapon" ${sketch.snapOn === false ? '' : 'checked'}> Snap</label>
     <div style="margin:6px 0"><button class="btn" id="sp-lookat">Look At</button></div>
     <div class="sep"></div><div class="mh" style="font-weight:700;margin-bottom:4px">Shapes (${sh.length})</div><div id="sp-list"></div>
@@ -765,8 +1192,8 @@ function renderSketchPanel() {
   sh.forEach((s, i) => {
     const item = document.createElement('div');
     item.className = 'shape-item' + (i === sketch.sel ? ' sel' : '');
-    item.innerHTML = `${ficon({ rect: 'rect', circle: 'circle', ngon: 'ngon', path: s.open ? 'path' : 'line' }[s.t], 18)}<span>${s.open ? 'Path' : { rect: 'Rectangle', circle: 'Circle', ngon: 'Polygon', path: 'Polyline' }[s.t]} ${i + 1}</span><button class="x" title="Delete">✕</button>`;
-    item.onclick = () => { sketch.sel = i; renderSketchPanel(); drawSketches(); renderRibbon(); };
+    item.innerHTML = `${ficon({ rect: 'rect', circle: 'circle', ngon: 'ngon', rrect: 'rrect', slot: 'slot', ellipse: 'ellipse', path: s.open ? 'path' : 'line' }[s.t], 18)}<span>${s.open ? 'Path' : { rect: 'Rectangle', circle: 'Circle', ngon: 'Polygon', rrect: 'Rounded Rect', slot: 'Slot', ellipse: 'Ellipse', path: 'Polyline' }[s.t]} ${i + 1}</span><button class="x" title="Delete">✕</button>`;
+    item.onclick = () => { sketch.sel = i; if (sketch.tool !== 'select') setSketchTool('select'); renderSketchPanel(); drawSketches(); SU.redraw(); renderRibbon(); };
     item.querySelector('.x').onclick = (e) => { e.stopPropagation(); setSketchShapes(sh.filter((_, k) => k !== i)); sketch.sel = -1; renderSketchPanel(); };
     list.appendChild(item);
     if (i === sketch.sel && fieldsFor(s).length) {
@@ -786,9 +1213,10 @@ function renderSketchPanel() {
     setSketchParam({ plane: e.target.value, origin: undefined, normal: undefined, xdir: undefined }); vp.lookAtPlane(curSketch().params); renderSketchPanel();
   };
   $('#sp-off').oninput = (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setSketchParam({ offset: v }); };
-  $('#sp-snap').onchange = (e) => { sketch.snap = +e.target.value; buildSketchGrid(); };
+  $('#sp-snap').onchange = (e) => { sketch.snap = e.target.value === 'auto' ? 'auto' : +e.target.value; sketch.gridStep = null; };
   $('#sp-sides').oninput = (e) => { sketch.sides = Math.max(3, Math.min(64, Math.round(+e.target.value) || 6)); };
-  $('#sp-grid').onchange = (e) => { if (sketch.grid) sketch.grid.visible = e.target.checked; };
+  $('#sp-grid').onchange = (e) => { sketch.gridVisible = e.target.checked; if (sketch.grid) sketch.grid.visible = e.target.checked; };
+  $('#sp-showprof').onchange = (e) => { sketch.showProfile = e.target.checked; updateProfileView(); };
   $('#sp-snapon').onchange = (e) => { sketch.snapOn = e.target.checked; };
   $('#sp-lookat').onclick = () => vp.lookAtPlane(curSketch().params);
   $('#sp-ok').onclick = finishSketch;
@@ -801,6 +1229,7 @@ function setSketchParam(patch) {
 }
 function sketchDeleteSelected() { if (sketch.sel >= 0) { setSketchShapes(curSketch().params.shapes.filter((_, i) => i !== sketch.sel)); sketch.sel = -1; renderSketchPanel(); } }
 function leaveSketch() {
+  SU?.deactivate();
   if (sketch.grid) vp.scene.remove(sketch.grid);
   vp.overlay.clear(); vp.planeHandles.visible = false; vp.highlightFace(null);
   vp.hideGround = false; vp.grid.visible = vp.opts.grid;
@@ -827,65 +1256,13 @@ function cancelSketch() {
   leaveSketch(); refresh();
 }
 
-const snapPt = (pt) => (sketch.snapOn === false ? pt : pt.map((v) => Math.round(v / sketch.snap) * sketch.snap));
-function sketchPointer(ev, kind) {
-  const p = curSketch().params;
-  const raw = vp.planePoint(ev, p);
-  if (!raw) return;
-  const pt = snapPt(raw);
-  const s = sketch;
-  if (kind === 'move') {
-    s.cursor = pt;
-    if (s.pts) drawPreview();
-    else $('#statusbar').textContent = `u ${pt[0].toFixed(2)}  v ${pt[1].toFixed(2)} mm`;
-    return;
-  }
-  const add = (shape) => { setSketchShapes([...p.shapes, shape]); s.pts = null; vp.overlay.clear(); renderSketchPanel(); };
-  if (s.tool === 'line' || s.tool === 'path') {
-    if (!s.pts) s.pts = [];
-    const first = s.pts[0];
-    if (s.tool === 'line' && first && s.pts.length >= 3 && Math.hypot(first[0] - pt[0], first[1] - pt[1]) < s.snap * 0.5) return closePath();
-    if (!s.pts.length || s.pts[s.pts.length - 1][0] !== pt[0] || s.pts[s.pts.length - 1][1] !== pt[1]) s.pts.push(pt);
-    drawPreview();
-    return;
-  }
-  if (!s.pts) { s.pts = [pt]; return; }
-  const [a] = s.pts;
-  if (s.tool === 'rect') {
-    const w = Math.abs(pt[0] - a[0]), h = Math.abs(pt[1] - a[1]);
-    if (w > 0 && h > 0) add({ t: 'rect', x: Math.min(a[0], pt[0]), y: Math.min(a[1], pt[1]), w, h });
-  } else {
-    const r = Math.hypot(pt[0] - a[0], pt[1] - a[1]);
-    if (r > 0) add(s.tool === 'circle' ? { t: 'circle', cx: a[0], cy: a[1], r } : { t: 'ngon', cx: a[0], cy: a[1], r, n: s.sides, rot: (Math.atan2(pt[1] - a[1], pt[0] - a[0]) * 180) / Math.PI });
-  }
-}
-function closePath() {
-  const s = sketch;
-  const open = s.tool === 'path';
-  if (s.pts && s.pts.length >= (open ? 2 : 3)) setSketchShapes([...curSketch().params.shapes, open ? { t: 'path', open: true, pts: s.pts } : { t: 'path', pts: s.pts }]);
-  s.pts = null; vp.overlay.clear(); renderSketchPanel();
-}
-function drawPreview() {
-  const s = sketch, p = curSketch().params;
-  vp.overlay.clear();
-  const c = s.cursor || s.pts[0];
-  let poly = [], info = '';
-  if (s.tool === 'line' || s.tool === 'path') { poly = [...s.pts, c]; info = `L ${Math.hypot(c[0] - s.pts.at(-1)[0], c[1] - s.pts.at(-1)[1]).toFixed(2)} mm`; }
-  else {
-    const [a] = s.pts;
-    if (s.tool === 'rect') { poly = shapeToPolygon({ t: 'rect', x: Math.min(a[0], c[0]), y: Math.min(a[1], c[1]), w: Math.abs(c[0] - a[0]), h: Math.abs(c[1] - a[1]) }); info = `W ${Math.abs(c[0] - a[0]).toFixed(2)} × H ${Math.abs(c[1] - a[1]).toFixed(2)} mm`; }
-    else { const r = Math.hypot(c[0] - a[0], c[1] - a[1]); poly = shapeToPolygon(s.tool === 'circle' ? { t: 'circle', cx: a[0], cy: a[1], r } : { t: 'ngon', cx: a[0], cy: a[1], r, n: s.sides, rot: (Math.atan2(c[1] - a[1], c[0] - a[0]) * 180) / Math.PI }); info = `R ${r.toFixed(2)} mm  (Ø ${(r * 2).toFixed(2)})`; }
-  }
-  const pts = poly.map((q) => vp.planeTo3D(p, q));
-  const closed = s.tool !== 'line' && s.tool !== 'path';
-  const line = closed ? new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0xf08c00 })) : new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0xf08c00 }));
-  vp.overlay.add(line);
-  $('#statusbar').textContent = info;
-}
+function sketchPointer(ev, kind) { SU.pointer(ev, kind); }
+function closePath() { SU.finishPath(); }
 
 const sketchMat = new THREE.LineBasicMaterial({ color: 0x2b6cb0 });
 const sketchMatActive = new THREE.LineBasicMaterial({ color: 0x0b6bcb });
 const sketchMatSel = new THREE.LineBasicMaterial({ color: 0xf08c00 });
+const sketchMatHover = new THREE.LineBasicMaterial({ color: 0x00a2ff });
 function drawSketches() {
   if (!vp) return;
   vp.sketchGroup.clear();
@@ -897,7 +1274,7 @@ function drawSketches() {
       const poly = shapeToPolygon(s);
       if (poly.length < 2) return;
       const pts = poly.map((q) => vp.planeTo3D(f.params, q));
-      const m = active ? (k === sketch.sel ? sketchMatSel : sketchMatActive) : sketchMat;
+      const m = active ? (k === sketch.sel ? sketchMatSel : k === sketch.hover ? sketchMatHover : sketchMatActive) : sketchMat;
       vp.sketchGroup.add(new (s.open ? THREE.Line : THREE.LineLoop)(new THREE.BufferGeometry().setFromPoints(pts), m));
     });
   });
@@ -1118,7 +1495,7 @@ const projectJSON = (name = doc.name, withThumb = false) => JSON.stringify({ for
 function loadProject(txt) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0 };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {} };
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
   vp.fitted = false; refresh();
@@ -1159,10 +1536,17 @@ function bindViewport() {
   const cv = $('#gl');
   let down = null, rdown = null;
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  // Fusion navigation: middle = pan, Shift + middle = orbit, double-click middle = fit
+  cv.addEventListener('pointerdown', (e) => {
+    if (e.button !== 1) return;
+    if (e.detail === 2) { vp.fit(); return; }
+    vp.controls.mouseButtons.MIDDLE = e.shiftKey ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+  }, true);
   cv.addEventListener('pointerdown', (e) => { if (e.button === 2) rdown = { x: e.clientX, y: e.clientY }; });
   cv.addEventListener('pointerup', (e) => { if (e.button === 2 && rdown && Math.hypot(e.clientX - rdown.x, e.clientY - rdown.y) < 5 && !sketch?.pts) openMarking(e.clientX, e.clientY); rdown = null; });
-  cv.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, b: e.button }; });
+  cv.addEventListener('pointerdown', (e) => { if (sketch && !sketch.picking && e.button === 0) { SU.pointer(e, 'down'); return; } down = { x: e.clientX, y: e.clientY, b: e.button }; });
   cv.addEventListener('pointerup', (e) => {
+    if (sketch && !sketch.picking) { if (e.button === 0) SU.pointer(e, 'up'); return; }
     if (!down || e.button !== 0 || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || vp.gizmo.dragging) { down = null; return; }
     down = null;
     if (sketch?.picking) {
@@ -1172,15 +1556,23 @@ function bindViewport() {
       else if (tg?.curved) toast('Pick a flat (planar) face.', true);
       return;
     }
-    if (sketch) {
-      if (sketch.tool && sketch.tool !== 'select') sketchPointer(e, 'click');
-      return;
-    }
     if (measure) { measureClick(e); return; }
     if (dialog) {
       if (defOf(doc.features[dialog.index])?.pickEdges) { const en = vp.pickEdge(e); if (en) toggleEdge(en); }
       else if (dialog.pick) dialogPick(e);
       else bodyFieldPick(e);
+      return;
+    }
+    const eh = vp.pickEdge(e, edgeEntries());
+    if (eh) { toggleSelEdge(eh, e.shiftKey || e.ctrlKey || e.metaKey); return; }
+    if (selEdges.length && !(e.shiftKey || e.ctrlKey || e.metaKey)) { selEdges = []; updateEdgeView(); }
+    if (selPriority === 'face') {
+      const tg = vp.pickPlanarFace(e);
+      vp.selected.clear(); vp.refreshMaterials();
+      selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal } : null;
+      if (tg?.curved) toast('Only flat faces can be selected.');
+      vp.showFaces(selFace ? [selFace] : [], null);
+      renderTree(); renderRibbon();
       return;
     }
     const hit = vp.pickBody(e);
@@ -1214,7 +1606,7 @@ function bindViewport() {
     addEventListener('pointermove', move);
     addEventListener('pointerup', up, { once: true });
   }, true);
-  cv.addEventListener('dblclick', () => { if (sketch?.tool === 'line' || sketch?.tool === 'path') closePath(); });
+  cv.addEventListener('dblclick', () => { if (sketch && !sketch.picking) SU.dblclick(); });
   let hoverRaf = false;
   cv.addEventListener('pointermove', (e) => {
     if (sketch && !sketch.picking) return sketchPointer(e, 'move');
@@ -1222,6 +1614,12 @@ function bindViewport() {
     if (measure) { measureHover(e); return; }
     if (dialog) {
       if (!defOf(doc.features[dialog.index])?.pickEdges) {
+        if (dialog.pick?.kind === 'profiles') {
+          const id = vp.pickProfile(e);
+          if (id !== profileHover) { profileHover = id; updateProfileView(); }
+          $('#gl').style.cursor = id ? 'pointer' : '';
+          return;
+        }
         if (dialog.pick && dialog.pick.kind !== 'point') {
           hoverRaf = true;
           requestAnimationFrame(() => { hoverRaf = false; if (!dialog) return; const tg = vp.pickPlanarFace(e); dialog.hover = tg?.face ? tg : null; updateFaceHL(); });
@@ -1236,7 +1634,18 @@ function bindViewport() {
     hoverRaf = true;
     requestAnimationFrame(() => {
       hoverRaf = false;
-      const h = sketch ? null : vp.pickBody(e)?.id || null;
+      if (sketch || measure) return;
+      const en = vp.pickEdge(e, edgeEntries());
+      if ((en?.chain || null) !== (edgeHover?.chain || null)) { edgeHover = en; updateEdgeView(); }
+      if (en) { $('#gl').style.cursor = 'pointer'; if (vp.hover) { vp.hover = null; vp.refreshMaterials(); } vp.showFaces(selFace ? [selFace] : [], null); return; }
+      $('#gl').style.cursor = '';
+      if (selPriority === 'face') {
+        const tg = vp.pickPlanarFace(e);
+        vp.showFaces(selFace ? [selFace] : [], tg?.face ? tg : null);
+        if (vp.hover) { vp.hover = null; vp.refreshMaterials(); }
+        return;
+      }
+      const h = vp.pickBody(e)?.id || null;
       if (h !== vp.hover) { vp.hover = h; vp.refreshMaterials(); }
     });
   });
@@ -1347,6 +1756,11 @@ function bindZoomWindow() {
 function closeMarking() { const h = $('#marking'); h.hidden = true; h.innerHTML = ''; }
 function openMarking(x, y) {
   closeMarking();
+  if (!dialog && !sketch && !measure) {
+    const rect = $('#gl').getBoundingClientRect();
+    const en = vp.pickEdge({ clientX: x, clientY: y }, edgeEntries());
+    if (en && !selEdges.some((e) => e.body === en.body && matchChain([en.chain], e.pts))) toggleSelEdge(en, false);
+  }
   const host = $('#marking');
   host.hidden = false;
   const mm = document.createElement('div');
@@ -1357,6 +1771,7 @@ function openMarking(x, y) {
   const items = [];
   if (dialog) items.push({ uicon: 'check', label: 'OK', key: '⏎', run: () => closeDialog(true) }, { uicon: 'close', label: 'Cancel', key: 'Esc', run: () => closeDialog(false) }, { sep: true });
   if (sketch && !sketch.picking) items.push({ ficon: 'finish', label: 'Finish Sketch', run: finishSketch }, { sep: true });
+  if (selEdges.length || selFace) items.push({ ficon: 'fillet', label: selEdges.length ? `Fillet ${selEdges.length} edge${selEdges.length > 1 ? 's' : ''}` : 'Fillet face edges', key: 'F', run: () => runCommand('fillet') }, { ficon: 'chamfer', label: selEdges.length ? 'Chamfer edges' : 'Chamfer face edges', run: () => runCommand('chamfer') }, { sep: true });
   items.push({ uicon: 'zoomwin', label: 'Fit', run: () => vp.fit() }, { uicon: 'camera', label: 'Look At', run: lookAtNearest }, { uicon: 'home', label: 'Home View', run: () => vp.home() },
     { sep: true }, { uicon: 'eye', label: 'Show All', run: showAll }, { sep: true });
   for (const id of ['extrude', 'fillet', 'hole', 'sketch', 'measure', 'parameters', 'importstl']) items.push({ ficon: CMD[id].icon, label: CMD[id].label, key: CMD[id].key, run: () => runCommand(id) });
@@ -1494,6 +1909,30 @@ async function renderDataPanel() {
   }
 }
 
+// ------------------------------------------------------------------ tooltips (Fusion-style rich tips)
+function bindTooltips() {
+  const tip = document.createElement('div');
+  tip.id = 'tip'; tip.hidden = true;
+  document.body.appendChild(tip);
+  let timer = null, cur = null;
+  const hide = () => { clearTimeout(timer); timer = null; tip.hidden = true; cur = null; };
+  document.addEventListener('pointerover', (e) => {
+    const el = e.target.closest?.('[data-tip]');
+    if (!el || el === cur) return;
+    hide(); cur = el;
+    timer = setTimeout(() => {
+      let d; try { d = JSON.parse(el.dataset.tip); } catch { return; }
+      tip.innerHTML = `<b>${esc(d.t)}</b>${d.k ? `<span class="k">${esc(d.k)}</span>` : ''}${d.d ? `<p>${esc(d.d)}</p>` : ''}`;
+      tip.hidden = false;
+      const r = el.getBoundingClientRect();
+      tip.style.left = Math.max(6, Math.min(r.left, innerWidth - tip.offsetWidth - 8)) + 'px';
+      tip.style.top = r.bottom + 6 + 'px';
+    }, 450);
+  });
+  document.addEventListener('pointerout', (e) => { if (cur && !cur.contains(e.relatedTarget)) hide(); });
+  document.addEventListener('pointerdown', hide, true);
+}
+
 function bindKeys() {
   addEventListener('keydown', (e) => {
     const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName);
@@ -1502,25 +1941,35 @@ function bindKeys() {
     if (!$('#marking').hidden) { if (e.key === 'Escape') closeMarking(); return; }
     if (mod && key === 's') { e.preventDefault(); save(false); return; }
     if (mod && key === 'n') { e.preventDefault(); newDoc(); return; }
-    if (typing) { if (e.key === 'Enter' && !document.activeElement.closest('.modal')) document.activeElement.blur(); return; }
+    if (typing) {
+      if (e.key === 'Enter' && !document.activeElement.closest('.modal')) {
+        const inDialog = !!document.activeElement.closest('#props-wrap');
+        document.activeElement.blur();
+        if (inDialog && dialog && !sketch) closeDialog(true);
+      }
+      return;
+    }
     if (mod && key === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     if (mod && key === 'y') { e.preventDefault(); redo(); return; }
     if (e.key === 'Escape') {
       if (navMode !== 'orbit') { setNavMode('orbit'); return; }
+      if (sketch && !sketch.picking) { SU.key(e); return; }
+      if (!dialog && !measure && (selEdges.length || selFace)) { selEdges = []; selFace = null; vp.showFaces([], null); updateEdgeView(); renderRibbon(); return; }
       if (measure) { endMeasure(); return; }
       if (sketch?.pts) { sketch.pts = null; vp.overlay.clear(); } else if (sketch) cancelSketch(); else if (dialog) closeDialog(false);
       return;
     }
-    if (e.key === 'Enter' && (sketch?.tool === 'line' || sketch?.tool === 'path') && sketch.pts) { closePath(); return; }
     if (sketch && !sketch.picking) {
+      if (SU.key(e)) { e.preventDefault(); return; }
       if ((e.key === 'Delete' || e.key === 'Backspace') && sketch.sel >= 0) sketchDeleteSelected();
       const t = { l: 'sk_line', r: 'sk_rect', c: 'sk_circle' }[key];
       if (t && !mod) runCommand(t);
       return;
     }
-    if (dialog) return;
-    if (e.key === 'Delete' || e.key === 'Backspace') { if (vp.selected.size) deleteSelection(); return; }
+    if (dialog) { if (e.key === 'Enter' && !sketch) closeDialog(true); return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') { if (vp.selected.size) deleteSelection(); else if (selSet.size) deleteFeatures([...selSet]); return; }
     if (mod) return;
+    if (e.key === 'F2') { e.preventDefault(); if (vp.selected.size) renameBodyOrFeature([...vp.selected][0]); else if (selFeature) renameFeature(selFeature, timelineAnchor(selFeature)); return; }
     const map = { e: 'extrude', q: 'presspull', f: 'fillet', m: 'move', h: 'hole', j: 'joint', i: 'measure' };
     if (map[key]) runCommand(map[key]);
     else if (key === 's') { e.preventDefault(); openQuickSearch(); }
@@ -1547,7 +1996,13 @@ async function boot() {
   vp.buildBed();
   vp.home();
   $('#loading')?.remove();
-  buildNavBar(); bindViewport(); bindZoomWindow(); bindKeys();
+  SU = createSketchUI({
+    vp, THREE, sketch: () => sketch, params: () => curSketch().params,
+    setShapes: (sh) => setSketchShapes(sh), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
+    evalExpr: (t) => evalExpr(t, (n) => paramState.values[n]), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
+  });
+  buildNavBar(); bindViewport(); bindZoomWindow(); bindKeys(); bindManip();
+  bindTooltips();
   $('#btn-menu').dataset.menu = 1;
   $('#btn-menu').onclick = fileMenu;
   $('#btn-save').onclick = () => save(false);
@@ -1575,6 +2030,6 @@ async function boot() {
   try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length) { loadProject(a); toast('Restored your last session'); } } } catch { /* ignore */ }
   if (localStorage.getItem('sketchy.data') === '1') toggleDataPanel(true);
   refresh();
-  window.__sketchy = { get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
+  window.__sketchy = { moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
 }
 boot();

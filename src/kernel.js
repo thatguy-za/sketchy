@@ -40,6 +40,26 @@ export function shapeToPolygon(s) {
     });
   }
   if (s.t === 'path') return s.pts;
+  if (s.t === 'rrect') {
+    const r = Math.max(0, Math.min(s.r || 0, s.w / 2, s.h / 2));
+    if (r < 1e-6) return [[s.x, s.y], [s.x + s.w, s.y], [s.x + s.w, s.y + s.h], [s.x, s.y + s.h]];
+    const out = [];
+    const corners = [[s.x + s.w - r, s.y + r, -90], [s.x + s.w - r, s.y + s.h - r, 0], [s.x + r, s.y + s.h - r, 90], [s.x + r, s.y + r, 180]];
+    for (const [cx, cy, a0] of corners) for (let i = 0; i <= 10; i++) { const a = ((a0 + (i / 10) * 90) * Math.PI) / 180; out.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); }
+    return out;
+  }
+  if (s.t === 'slot') {
+    const dx = s.x2 - s.x1, dy = s.y2 - s.y1, L = Math.hypot(dx, dy) || 1e-9, r = s.w / 2;
+    const ang = Math.atan2(dy, dx), out = [];
+    for (let i = 0; i <= 24; i++) { const a = ang - Math.PI / 2 + (i / 24) * Math.PI; out.push([s.x2 + Math.cos(a) * r, s.y2 + Math.sin(a) * r]); }
+    for (let i = 0; i <= 24; i++) { const a = ang + Math.PI / 2 + (i / 24) * Math.PI; out.push([s.x1 + Math.cos(a) * r, s.y1 + Math.sin(a) * r]); }
+    void L;
+    return out;
+  }
+  if (s.t === 'ellipse') {
+    const rot = ((s.rot || 0) * Math.PI) / 180, n = 72;
+    return Array.from({ length: n }, (_, i) => { const a = (i / n) * Math.PI * 2, x = Math.cos(a) * s.rx, y = Math.sin(a) * s.ry; return [s.cx + x * Math.cos(rot) - y * Math.sin(rot), s.cy + x * Math.sin(rot) + y * Math.cos(rot)]; });
+  }
   return [];
 }
 
@@ -51,19 +71,64 @@ function shapeToCS(s, t) {
   return t(K.CrossSection.ofPolygons([poly]));
 }
 
-export function sketchSection(f, t) {
-  const parts = f.params.shapes
-    .map((s) => shapeToCS(s, t))
-    .filter((c) => c && c.area() > 1e-9)
-    .sort((a, b) => b.area() - a.area());
-  let acc = null;
-  for (const cs of parts) {
-    if (!acc) { acc = cs; continue; }
-    const inter = t(acc.intersect(cs));
-    const contained = Math.abs(inter.area() - cs.area()) < 1e-6 * Math.max(1, cs.area());
-    acc = t(contained ? acc.subtract(cs) : acc.add(cs));
+/**
+ * Split a sketch into closed regions ("profiles"), like Fusion: every closed area bounded by the sketch
+ * shapes is its own selectable region. Returns [{id, cs, sig, defaultOn}].
+ * Default selection: nested shapes alternate (a circle inside a rectangle is a hole), partial overlaps all count.
+ */
+function profileCells(f, t) {
+  const items = [];
+  f.params.shapes.forEach((s, i) => { if (s.open) return; const cs = shapeToCS(s, t); if (cs && cs.area() > 1e-9) items.push({ i, cs, area: cs.area() }); });
+  const eps = (a) => Math.max(1e-7, 1e-7 * a);
+  let cells = [];
+  for (const { i, cs } of items) {
+    const next = [];
+    let remaining = cs;
+    for (const c of cells) {
+      const inter = t(c.cs.intersect(cs));
+      if (inter.area() > eps(cs.area())) next.push({ sig: [...c.sig, i], cs: inter });
+      const diff = t(c.cs.subtract(cs));
+      if (diff.area() > eps(c.cs.area())) next.push({ sig: c.sig, cs: diff });
+      remaining = t(remaining.subtract(c.cs));
+    }
+    if (remaining.area() > eps(cs.area())) next.push({ sig: [i], cs: remaining });
+    cells = next;
   }
-  return acc;
+  const byIdx = new Map(items.map((x) => [x.i, x]));
+  const nested = (sig) => {
+    const sh = sig.map((i) => byIdx.get(i)).sort((a, b) => b.area - a.area);
+    for (let k = 1; k < sh.length; k++) {
+      const inter = t(sh[k].cs.intersect(sh[k - 1].cs));
+      if (Math.abs(inter.area() - sh[k].area) > 1e-6 * sh[k].area) return false;
+    }
+    return true;
+  };
+  const out = [];
+  for (const c of cells) {
+    const parts = c.cs.decompose().map((p) => t(p)).filter((p) => p.area() > eps(c.cs.area()));
+    const defaultOn = c.sig.length < 2 || !nested(c.sig) || c.sig.length % 2 === 1;
+    parts.map((p) => ({ p, b: p.bounds() })).sort((a, b) => a.b.min[0] - b.b.min[0] || a.b.min[1] - b.b.min[1])
+      .forEach(({ p }, k) => out.push({ id: `${c.sig.join('.')}:${k}`, cs: p, sig: c.sig, defaultOn }));
+  }
+  return out;
+}
+
+/** Union of the chosen profile regions (ids = explicit selection, null = defaults). */
+export function profileSection(f, ids, t) {
+  const cells = profileCells(f, t);
+  const chosen = Array.isArray(ids) && ids.length ? cells.filter((c) => ids.includes(c.id)) : cells.filter((c) => c.defaultOn);
+  if (!chosen.length) return null;
+  return chosen.length === 1 ? chosen[0].cs : t(K.CrossSection.union(chosen.map((c) => c.cs)));
+}
+export const sketchSection = (f, t) => profileSection(f, null, t);
+
+/** Plain-data profile regions for the UI: [{id, defaultOn, area, polys: [[[x,y]..]..]}]. */
+export function profilesOf(f) {
+  const garbage = [];
+  const t = (o) => { garbage.push(o); return o; };
+  try {
+    return profileCells(f, t).map((c) => ({ id: c.id, defaultOn: c.defaultOn, area: c.cs.area(), polys: c.cs.toPolygons() }));
+  } finally { garbage.forEach((o) => { try { o.delete(); } catch { /* shared */ } }); }
 }
 
 const BASIS = { XY: [[1, 0, 0], [0, 1, 0]], XZ: [[1, 0, 0], [0, 0, 1]], YZ: [[0, 1, 0], [0, 0, 1]] };
@@ -311,7 +376,7 @@ function holeTool(p, t) {
 }
 
 /** Find the triangle of a mesh that lies on the stored planar face {point, normal}. */
-function findFaceTri(verts, tris, point, normal) {
+export function findFaceTri(verts, tris, point, normal) {
   let best = -1, bd = Infinity;
   for (let i = 0; i < tris.length / 3; i++) {
     const a = [verts[tris[i * 3] * 3], verts[tris[i * 3] * 3 + 1], verts[tris[i * 3] * 3 + 2]];
@@ -347,6 +412,8 @@ export function rebuild(features, count, opts = {}) {
   const snaps = [];
   const sketchUsed = new Set();
   let captured = null;
+  let preview = null;
+  let curF = null;
   let counter = 0;
   const snap = () => [...live.values()].map((b) => ({ id: b.id, name: b.name, bbox: bboxOf(b.m) }));
   const addBody = (id, m, name) => live.set(id, { id, name: name || `Body${++counter}`, m });
@@ -360,18 +427,23 @@ export function rebuild(features, count, opts = {}) {
     const sk = sketches[f.params.sketch];
     if (!sk) throw new Error('Sketch not found');
     sketchUsed.add(sk.id);
-    const cs = sketchSection(sk, t);
-    if (!cs) throw new Error('Sketch has no closed profile');
+    const cs = profileSection(sk, f.params.profiles, t);
+    if (!cs) throw new Error(f.params.profiles?.length ? 'The selected profiles no longer exist — pick them again' : 'Sketch has no closed profile');
     return { cs, sk };
   };
   const overlaps = (a, b, pad = 1e-3) => a.min.every((v, k) => v <= b.max[k] + pad && a.max[k] >= b.min[k] - pad);
   const applyOp = (f, solid, op, target) => {
+    if (opts.previewId && opts.previewId === f.id) {
+      const me = solid.getMesh();
+      preview = { op, verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts) };
+    }
     if (op === 'auto') {
       let best = null, bv = 0;
       for (const b of live.values()) { const v = t(b.m.intersect(solid)).volume(); if (v > bv) { bv = v; best = b; } }
-      if (best && bv > 1e-6 * Math.max(solid.volume(), 1e-9)) { best.m = t(best.m.subtract(solid)); if (best.m.isEmpty()) live.delete(best.id); return; }
+      if (best && bv > 1e-6 * Math.max(solid.volume(), 1e-9)) { if (preview && curF === f) preview.op = 'cut'; best.m = t(best.m.subtract(solid)); if (best.m.isEmpty()) live.delete(best.id); return; }
       const sb = bboxOf(solid);
       const touch = [...live.values()].find((b) => overlaps(bboxOf(b.m), sb));
+      if (preview && curF === f) preview.op = 'join';
       if (touch) touch.m = t(touch.m.add(solid)); else addBody(f.id, solid, f.name);
       return;
     }
@@ -391,6 +463,7 @@ export function rebuild(features, count, opts = {}) {
 
   for (let i = 0; i < Math.min(count, features.length); i++) {
     const f = features[i];
+    curF = f;
     snaps.push(snap());
     if (opts.capture === i) captured = [...live.values()].map((b) => { const me = b.m.getMesh(); return { id: b.id, name: b.name, verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts) }; });
     if (f.suppressed) continue;
@@ -699,5 +772,5 @@ export function rebuild(features, count, opts = {}) {
     };
   });
   garbage.forEach((o) => { try { o.delete(); } catch { /* shared handle */ } });
-  return { bodies, errors, snaps, sketchUsed, captured };
+  return { bodies, errors, snaps, sketchUsed, captured, preview };
 }

@@ -36,6 +36,12 @@ export class Viewport {
     this.edgeGroup = new THREE.Group();
     this.pickEntries = [];
     this.scene.add(this.bodyGroup, this.sketchGroup, this.overlay, this.faceHL, this.edgeGroup);
+    this.profileGroup = new THREE.Group();
+    this.previewGroup = new THREE.Group();
+    this.manipGroup = new THREE.Group();
+    this.scene.add(this.profileGroup, this.previewGroup, this.manipGroup);
+    this.edgeSelGroup = new THREE.Group();
+    this.scene.add(this.edgeSelGroup);
     this.measureGroup = new THREE.Group();
     this.scene.add(this.measureGroup);
     this.buildGrid();
@@ -175,15 +181,24 @@ export class Viewport {
     if (!this.fitted && bodies.length) { this.fit(); this.fitted = true; }
   }
 
+  // Per-body appearance colour (doc.appearance); falls back to the default steel material.
+  bodyMat(id) {
+    const hex = this.bodyColors?.[id];
+    if (!hex) return this.mats.body;
+    this.colorMats ||= {};
+    if (!this.colorMats[hex]) this.colorMats[hex] = new THREE.MeshStandardMaterial({ color: hex, metalness: 0.12, roughness: 0.5, side: THREE.DoubleSide });
+    return this.colorMats[hex];
+  }
   refreshMaterials() {
     for (const m of this.bodyGroup.children) {
       const sel = this.selected.has(m.userData.id);
-      m.material = sel ? this.mats.sel : m.userData.id === this.hover ? this.mats.hover : this.mats.body;
+      m.material = sel ? this.mats.sel : m.userData.id === this.hover ? this.mats.hover : this.bodyMat(m.userData.id);
       const e = m.children[0];
       e.visible = this.opts.edges;
       e.material = sel ? this.mats.edgeSel : this.mats.edge;
     }
     this.mats.body.wireframe = this.mats.sel.wireframe = this.mats.hover.wireframe = this.opts.wire;
+    for (const mm of Object.values(this.colorMats || {})) mm.wireframe = this.opts.wire;
     this.grid.visible = this.opts.grid && !this.hideGround;
     if (this.bedObj) this.bedObj.visible = this.opts.bed;
   }
@@ -224,6 +239,127 @@ export class Viewport {
     }
     return { id: hit.object.userData.id, point: (best || hit.point).toArray(), vertex: !!best };
   }
+  // ---- sketch profile regions (shaded, pickable) ----
+  // items: [{id, polys}] from kernel.profilesOf; params: sketch plane params.
+  setProfiles(items, params, pickable = true) {
+    for (const c of [...this.profileGroup.children]) { c.geometry.dispose(); c.material.dispose(); this.profileGroup.remove(c); }
+    this.profileMeshes = [];
+    if (!items?.length) return;
+    const M = this.planeMatrix(params);
+    for (const it of items) {
+      const area = (pl) => pl.reduce((a, [x1, y1], i) => { const [x2, y2] = pl[(i + 1) % pl.length]; return a + (x1 * y2 - x2 * y1); }, 0) / 2;
+      const outers = it.polys.filter((pl) => area(pl) > 0), holes = it.polys.filter((pl) => area(pl) < 0);
+      for (const o of outers) {
+        const shape = new THREE.Shape(o.map(([x, y]) => new THREE.Vector2(x, y)));
+        for (const h of holes) shape.holes.push(new THREE.Path(h.map(([x, y]) => new THREE.Vector2(x, y))));
+        const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({ color: 0x5aa7ee, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false, depthTest: !pickable, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }));
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.copy(M);
+        mesh.userData.pid = it.id;
+        mesh.userData.pickable = pickable;
+        mesh.renderOrder = 2;
+        if (!pickable) mesh.raycast = () => {};
+        this.profileGroup.add(mesh);
+        this.profileMeshes.push(mesh);
+      }
+    }
+  }
+  setProfileState(selected, hover) {
+    for (const m of this.profileMeshes || []) {
+      const id = m.userData.pid, sel = selected?.has(id), hov = id === hover;
+      m.material.opacity = m.userData.pickable ? (sel ? 0.4 : hov ? 0.4 : 0.14) : sel ? 0.62 : hov ? 0.5 : 0.28;
+      m.material.color.setHex(sel ? 0x2f7fe0 : hov ? 0x3c93f2 : 0x5aa7ee);
+    }
+  }
+  pickProfile(ev) {
+    if (!this.profileMeshes?.length) return null;
+    this.setRay(ev);
+    const hit = this.ray.intersectObjects(this.profileMeshes.filter((m) => m.userData.pickable), false)[0];
+    return hit ? hit.object.userData.pid : null;
+  }
+
+  // Selected (red) and hovered (orange) model edges outside of commands. chains: [{pts, closed}]
+  showEdges(selected, hover) {
+    for (const c of [...this.edgeSelGroup.children]) { c.geometry.dispose(); this.edgeSelGroup.remove(c); }
+    const sz = this.bounds().getSize(new THREE.Vector3()).length();
+    const draw = (chain, color, k) => {
+      const pts = chain.pts.map((p) => new THREE.Vector3(...p));
+      if (chain.closed) pts.push(pts[0].clone());
+      if (pts.length < 2) return;
+      const path = new THREE.CurvePath();
+      for (let i = 0; i < pts.length - 1; i++) path.add(new THREE.LineCurve3(pts[i], pts[i + 1]));
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(path, Math.max(2, pts.length * 2), Math.max(sz * 0.004 * k, 0.15 * k), 6, false), new THREE.MeshBasicMaterial({ color, depthTest: false }));
+      tube.raycast = () => {}; tube.renderOrder = 11;
+      this.edgeSelGroup.add(tube);
+    };
+    for (const c of selected || []) draw(c, 0xe0453a, 1.15);
+    if (hover) draw(hover, 0x1d8cf8, 1);
+  }
+
+  // ---- feature preview (translucent tool solid) ----
+  setPreview(pv) {
+    for (const c of [...this.previewGroup.children]) { c.traverse((o) => o.geometry?.dispose()); this.previewGroup.remove(c); }
+    if (!pv) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pv.verts, 3));
+    g.setIndex(new THREE.BufferAttribute(pv.tris, 1));
+    g.computeVertexNormals();
+    const cut = pv.op === 'cut';
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: cut ? 0xe0584d : 0x3d95f0, transparent: true, opacity: cut ? 0.42 : 0.4, side: THREE.DoubleSide, depthWrite: false, roughness: 0.6 }));
+    m.raycast = () => {};
+    m.renderOrder = 3;
+    const e = new THREE.LineSegments(new THREE.EdgesGeometry(g, 30), new THREE.LineBasicMaterial({ color: cut ? 0xb0342b : 0x1d63b8 }));
+    e.raycast = () => {};
+    m.add(e);
+    this.previewGroup.add(m);
+  }
+
+  // ---- on-canvas distance manipulator (arrow) ----
+  setManip(base, dir, dist) {
+    for (const c of [...this.manipGroup.children]) { c.traverse((o) => { o.geometry?.dispose(); }); this.manipGroup.remove(c); }
+    this.manip = null;
+    if (!base) return;
+    const n = new THREE.Vector3(...dir).normalize(), p0 = new THREE.Vector3(...base);
+    const size = Math.max(this.bounds().getSize(new THREE.Vector3()).length() * 0.07, 3);
+    const tip = p0.clone().addScaledVector(n, dist);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x0d5bd6, depthTest: false });
+    const baseDot = new THREE.Mesh(new THREE.SphereGeometry(size * 0.2, 12, 8), mat);
+    baseDot.position.copy(p0); baseDot.renderOrder = 12; baseDot.raycast = () => {};
+    this.manipGroup.add(baseDot);
+    const sign = dist >= 0 ? 1 : -1;
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.1, size * 0.1, Math.max(Math.abs(dist), 0.01), 8), mat);
+    const mid = p0.clone().addScaledVector(n, dist / 2);
+    shaft.position.copy(mid);
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
+    shaft.quaternion.copy(q);
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(size * 0.38, size * 0.8, 16), mat);
+    cone.position.copy(tip).addScaledVector(n, sign * size * 0.35);
+    cone.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n.clone().multiplyScalar(sign)));
+    const hit = new THREE.Mesh(new THREE.SphereGeometry(size * 0.6, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+    hit.position.copy(tip).addScaledVector(n, sign * size * 0.3);
+    for (const o of [shaft, cone, hit]) { o.renderOrder = 12; this.manipGroup.add(o); }
+    shaft.raycast = () => {};
+    this.manip = { p0, n, tip, hit, label: tip.clone().addScaledVector(n, sign * size * 0.9) };
+  }
+  pickManip(ev) {
+    if (!this.manip) return false;
+    this.setRay(ev);
+    return this.ray.intersectObject(this.manip.hit, false).length > 0;
+  }
+  // Signed distance along the manipulator axis closest to the mouse ray.
+  manipDistance(ev) {
+    this.setRay(ev);
+    const { p0, n } = this.manip, o = this.ray.ray.origin, d = this.ray.ray.direction;
+    const w = p0.clone().sub(o), b = n.dot(d), dd = n.dot(w), e = d.dot(w), den = 1 - b * b;
+    if (Math.abs(den) < 1e-6) return null;
+    return (b * e - dd) / den;
+  }
+  toScreen(p) {
+    const r = this.canvas.getBoundingClientRect();
+    const v = (p.isVector3 ? p.clone() : new THREE.Vector3(...p)).project(this.camera);
+    return { x: ((v.x + 1) / 2) * r.width, y: ((1 - v.y) / 2) * r.height, behind: v.z > 1 };
+  }
+
   // Measurement markers/lines drawn over everything.
   setMeasureOverlay(points, lines) {
     for (const c of [...this.measureGroup.children]) { c.geometry?.dispose(); this.measureGroup.remove(c); }
@@ -364,12 +500,12 @@ export class Viewport {
       }
     }
   }
-  pickEdge(ev) {
+  pickEdge(ev, entries = this.pickEntries) {
     const r = this.canvas.getBoundingClientRect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
     const proj = (p) => { const v = p.clone().project(this.camera); return [(v.x + 1) / 2 * r.width, (1 - v.y) / 2 * r.height, v]; };
     let best = null, bd = 7;
-    for (const e of this.pickEntries) {
+    for (const e of entries) {
       const P = e.chain.pts.map((p) => new THREE.Vector3(...p));
       if (e.chain.closed) P.push(P[0]);
       for (let i = 0; i < P.length - 1; i++) {
@@ -524,6 +660,7 @@ export class Viewport {
     this.gizmo.camera = this.camera;
     if (this.opts.ortho) this.updateOrtho();
     this.updateCube();
+    this.onFrame?.();
     this.renderer.render(this.scene, this.camera);
   }
 }

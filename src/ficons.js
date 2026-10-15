@@ -73,6 +73,15 @@ const FI = {
   canvas: `<rect x="3" y="5" width="26" height="22" fill="#4aa3ee" stroke="#2b6fb8" stroke-width="1.2"/><circle cx="21" cy="12" r="3" fill="#fff"/><path d="M3 27L12 15L19 22L23 18L29 27Z" fill="#fff" opacity=".92"/>`,
   insertmesh: `<path d="M16 3L28 9V22L16 29L4 22V9Z" fill="#e6b84a" stroke="#9a7420" stroke-width="1"/><path d="M16 3L16 16M4 9L16 16L28 9M16 16L16 29M4 22L16 16L28 22M10 6L10 19M22 6L22 19" stroke="#9a7420" stroke-width=".8" fill="none"/><path d="M2 8H10M7 5L10.4 8L7 11" fill="none" stroke="#2f7fe0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
   sectionan: `${cube(G, 4, 6, 12, 14)}<path d="M2 22L30 12" stroke="${RED}" stroke-width="1.6" stroke-dasharray="3 2"/>`,
+  opjoin: `${cube(B, 3, 6, 9, 10)}${cube({ t: '#cfe6fb', l: '#82b8ee', r: '#5792d8', s: B.s }, 12, 10, 9, 10)}`,
+  opcut: `${cube(G, 4, 6, 12, 14)}${poly('M16 6 L28 12 L22 15 L16 12Z', '#ffffff', G.s)}${poly('M22 15 L28 12 V18 L22 21Z', B.l, B.s)}`,
+  opintersect: `<circle cx="12" cy="16" r="9" fill="#e6ebf0" stroke="${G.s}" stroke-width="1"/><circle cx="20" cy="16" r="9" fill="#e6ebf0" stroke="${G.s}" stroke-width="1"/><path d="M16 8.1A9 9 0 0 1 16 23.9A9 9 0 0 1 16 8.1Z" fill="${B.l}" stroke="${B.s}" stroke-width=".8"/>`,
+  opnew: `${cube(B, 3, 5, 12, 13)}${plus(25, 25)}`,
+  opauto: `${cube(G, 3, 5, 12, 13)}${poly('M13 5 L25 11 L19 14 L13 11Z', B.l, B.s)}<path d="M24 20L28 24L24 28" fill="none" stroke="${GREEN}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>`,
+  rrect: `<rect x="5" y="8" width="22" height="16" rx="5" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(5, 8)}${pt(27, 24)}`,
+  slot: `<path d="M10 10H22A6 6 0 0 1 22 22H10A6 6 0 0 1 10 10Z" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(10, 16)}${pt(22, 16)}`,
+  ellipse: `<ellipse cx="16" cy="16" rx="12" ry="7.5" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(16, 16)}`,
+  crect: `<rect x="5" y="8" width="22" height="16" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(16, 16)}${pt(27, 24)}`,
   disabled: `<rect x="5" y="5" width="22" height="22" rx="3" fill="${G.l}" stroke="${G.r}" stroke-width="1"/>`,
 };
 

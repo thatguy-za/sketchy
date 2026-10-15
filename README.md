@@ -72,7 +72,20 @@ npm run dev         # http://localhost:5173
 
 The UI follows Fusion's current layout: application bar with design tab, `DESIGN ▾` workspace menu, workspace tabs with icon-only toolbar groups (click a group label for its full dropdown), floating Browser/Comments cards, ViewCube with clickable faces/edges/corners, navigation bar, a timeline of feature icons, a Data panel (grid icon) listing your saved designs with thumbnails, and a right-click **marking menu**.
 
-Shortcuts (Fusion defaults): `S` command search · `E` extrude · `Q` press pull · `F` fillet · `M` move/copy · `H` hole · `J` joint · `I` measure · `L`/`R`/`C` line/rectangle/circle in a sketch · `Del` delete · `Ctrl+Z / Ctrl+Shift+Z` undo/redo · `Ctrl+S` save · `Ctrl+N` new · `Esc` cancel.
+Shortcuts (Fusion defaults): `F2` rename · `Enter` accepts a dialog · `S` command search · `E` extrude · `Q` press pull · `F` fillet · `M` move/copy · `H` hole · `J` joint · `I` measure · `L`/`R`/`C` line/rectangle/circle in a sketch · `Del` delete · `Ctrl+Z / Ctrl+Shift+Z` undo/redo · `Ctrl+S` save · `Ctrl+N` new · `Esc` cancel.
+
+### Editing experience (Fusion-style)
+
+* **Sketching** — every closed region becomes a shaded **profile**; click inside regions in the Extrude/Revolve dialog to pick which ones (a circle inside a rectangle is a hole by default, like Fusion). Tools: line, open path, rectangle, centre rectangle, rounded rectangle, circle, ellipse, slot, polygon.
+* **Type while you draw** — after the first click, a dimension box shows live values; type a number, `Tab` to the next field, `Enter` to commit (width/height, diameter, radius, length/angle, corner radius…). Expressions and parameters work.
+* **Inference snapping** — endpoints, midpoints, centres, quadrants and the origin snap with markers and dashed alignment guides; the grid step adapts to zoom; hold `Ctrl` to snap to nothing.
+* **Select tool** (`Esc` in a sketch) — hover/click shapes, drag to move, drag handles to resize, click a dimension label to type a value, arrow keys nudge.
+* **Extrude** — translucent blue (join/new) or red (cut) **preview**, an on-canvas **arrow manipulator** to drag the distance, a value box you can type into, operation icons, direction/extent options; `Enter` accepts. The last extrude distance is remembered.
+* **Fillet / Chamfer on edges** — hover any model edge (it turns blue), click to select it (red), `Shift`/`Ctrl`-click to add more, then press `F` (or right-click → Fillet / Chamfer). Or select a **face** (Face priority) and Fillet/Chamfer rounds its whole perimeter. Drag the on-canvas arrow or type the radius/distance; `Esc` clears the selection.
+* **Selection priority** (SELECT ▾) — *Body* or *Face*. In Face priority hover highlights flat faces; select one first and `Q` (Press Pull), `E` (pull the face), `H` (hole) or Create Sketch act on it.
+* **Timeline** — drag items to reorder (blocked if a feature depends on another), `Ctrl`/`Shift` multi-select, right-click for Edit / Rename (`F2`) / Roll back / Suppress (dependents are suppressed with it, and restored together) / Delete.
+* **Browser** — right-click bodies for Rename, Hide, Isolate, Appearance colours, Properties, Delete; hovering a body row highlights it in the model.
+* **Navigation** — middle-drag pan, `Shift` + middle-drag orbit, double-click middle to fit, mouse wheel zoom; left-drag also orbits.
 
 ### Known limits
 

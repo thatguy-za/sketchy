@@ -1,6 +1,7 @@
 // Feature catalogue: defaults + editable field schema (drives the properties dialog).
 const PLANE_OPTS = [['XY', 'XY (Top)'], ['XZ', 'XZ (Front)'], ['YZ', 'YZ (Right)']];
-const EXTENT_OPTS = [['distance', 'Distance'], ['all', 'Through all'], ['object', 'To object']];
+const EXTENT_OPTS = [['distance', 'Distance'], ['all', 'All'], ['object', 'To Object']];
+export const LAST = {};
 const OP_OPTS = [['new', 'New Body'], ['join', 'Join'], ['cut', 'Cut'], ['intersect', 'Intersect']];
 const prim = (shape, label, icon, defaults, fields) => ({
   label, icon, group: 'primitive',
@@ -31,16 +32,17 @@ export const FEATURES = {
     fields: [{ key: 'plane', label: 'Plane', type: 'select', options: PLANE_OPTS }, { key: 'offset', label: 'Offset', type: 'num' }],
   },
   extrude: {
-    label: 'Extrude', icon: 'extrude', type: 'extrude',
-    make: (ctx) => ({ sketch: ctx.lastSketch, extent: 'distance', distance: 10, flip: false, symmetric: false, op: ctx.lastSketchOnFace ? 'auto' : ctx.hasBodies ? 'join' : 'new', target: '', toBody: '', taper: 0, twist: 0, scaleTop: 1 }),
+    label: 'Extrude', icon: 'extrude', type: 'extrude', manip: { key: 'distance', sketch: 'sketch', show: (p) => p.extent === 'distance' },
+    make: (ctx) => ({ sketch: ctx.lastSketch, profiles: null, extent: 'distance', distance: LAST.extrude ?? 10, flip: false, symmetric: false, op: ctx.lastSketchOnFace ? 'auto' : ctx.hasBodies ? 'join' : 'new', target: '', toBody: '', taper: 0, twist: 0, scaleTop: 1 }),
     fields: [
-      { key: 'sketch', label: 'Profile (sketch)', type: 'sketch' },
-      { key: 'extent', label: 'Extent', type: 'select', options: EXTENT_OPTS },
+      { key: 'sketch', label: 'Sketch', type: 'sketch' },
+      { key: 'profiles', label: 'Profiles', type: 'profiles' },
+      { key: 'extent', label: 'Extent Type', type: 'select', options: EXTENT_OPTS },
       { key: 'distance', label: 'Distance', type: 'num', show: (p) => p.extent === 'distance' },
       { key: 'toBody', label: 'To object', type: 'body', show: (p) => p.extent === 'object' },
       { key: 'flip', label: 'Flip direction', type: 'bool', show: (p) => p.extent !== 'distance' },
-      { key: 'symmetric', label: 'Symmetric', type: 'bool', show: (p) => p.extent === 'distance' },
-      { key: 'op', label: 'Operation', type: 'select', options: [...OP_OPTS, ['auto', 'Auto (cut or join)']] },
+      { key: 'symmetric', label: 'Direction', type: 'select', boolSelect: true, options: [[false, 'One Side'], [true, 'Symmetric']], show: (p) => p.extent === 'distance' },
+      { key: 'op', label: 'Operation', type: 'ops', options: [...OP_OPTS, ['auto', 'Auto (cut or join)']] },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' && p.op !== 'auto' },
       { key: 'taper', label: 'Draft / taper (°)', type: 'num', step: 0.5, show: (p) => p.extent === 'distance' },
       { key: 'twist', label: 'Twist (°)', type: 'num', show: (p) => !p.taper },
@@ -49,11 +51,12 @@ export const FEATURES = {
   },
   revolve: {
     label: 'Revolve', icon: 'revolve', type: 'revolve',
-    make: (ctx) => ({ sketch: ctx.lastSketch, angle: 360, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
+    make: (ctx) => ({ sketch: ctx.lastSketch, profiles: null, angle: 360, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
     fields: [
-      { key: 'sketch', label: 'Profile (sketch)', type: 'sketch' },
+      { key: 'sketch', label: 'Sketch', type: 'sketch' },
+      { key: 'profiles', label: 'Profiles', type: 'profiles' },
       { key: 'angle', label: 'Angle (°)', type: 'num', min: 1, max: 360 },
-      { key: 'op', label: 'Operation', type: 'select', options: OP_OPTS },
+      { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
     ],
   },
@@ -96,7 +99,7 @@ export const FEATURES = {
     ],
   },
   fillet: {
-    label: 'Fillet', icon: 'fillet', type: 'fillet', pickEdges: true,
+    label: 'Fillet', icon: 'fillet', type: 'fillet', pickEdges: true, manip: { key: 'radius', edge: true },
     make: () => ({ edges: [], radius: 2 }),
     fields: [
       { key: 'edges', label: 'Edges', type: 'edges' },
@@ -104,7 +107,7 @@ export const FEATURES = {
     ],
   },
   chamfer: {
-    label: 'Chamfer', icon: 'chamfer', type: 'chamfer', pickEdges: true,
+    label: 'Chamfer', icon: 'chamfer', type: 'chamfer', pickEdges: true, manip: { key: 'distance', edge: true },
     make: () => ({ edges: [], distance: 2 }),
     fields: [
       { key: 'edges', label: 'Edges', type: 'edges' },
@@ -118,7 +121,7 @@ export const FEATURES = {
       { key: 'profile', label: 'Profile (sketch)', type: 'sketch' },
       { key: 'path', label: 'Path (sketch)', type: 'sketch' },
       { key: 'smooth', label: 'Smooth path', type: 'bool' },
-      { key: 'op', label: 'Operation', type: 'select', options: OP_OPTS },
+      { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
     ],
   },
@@ -127,7 +130,7 @@ export const FEATURES = {
     make: (ctx) => ({ sketches: ctx.sketches.slice(-2), op: ctx.hasBodies ? 'join' : 'new', target: '' }),
     fields: [
       { key: 'sketches', label: 'Profiles (in order)', type: 'sketchlist' },
-      { key: 'op', label: 'Operation', type: 'select', options: OP_OPTS },
+      { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
     ],
   },
@@ -143,7 +146,7 @@ export const FEATURES = {
       { key: 'pitch', label: 'Pitch', type: 'num', min: 0.05, step: 0.5 },
       { key: 'turns', label: 'Turns', type: 'num', min: 0.25, step: 0.5 },
       { key: 'left', label: 'Left-handed', type: 'bool' },
-      { key: 'op', label: 'Operation', type: 'select', options: OP_OPTS },
+      { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
     ],
   },
@@ -163,14 +166,14 @@ export const FEATURES = {
     ],
   },
   rib: {
-    label: 'Rib / Web', icon: 'rib', type: 'rib',
+    label: 'Rib / Web', icon: 'rib', type: 'rib', manip: { key: 'height', sketch: 'sketch' },
     make: (ctx) => ({ sketch: ctx.pathSketch || ctx.lastSketch, thickness: 2, height: 10, symmetric: false, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
     fields: [
       { key: 'sketch', label: 'Path sketch', type: 'sketch' },
       { key: 'thickness', label: 'Thickness', type: 'num', min: 0.05, step: 0.5 },
       { key: 'height', label: 'Height (±)', type: 'num' },
       { key: 'symmetric', label: 'Symmetric', type: 'bool' },
-      { key: 'op', label: 'Operation', type: 'select', options: OP_OPTS },
+      { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
     ],
   },

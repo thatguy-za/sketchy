@@ -156,7 +156,7 @@ svg.fi, svg.ui, .ic { display: block; pointer-events: none; }
 .zwin { position: absolute; border: 1px solid #1c6ac4; background: rgba(60,140,230,.15); pointer-events: none; display: none; }
 
 /* ---- command dialog / palette (floating, like Fusion) ---- */
-#props-wrap { position: absolute; right: 16px; top: 168px; width: 300px; max-height: calc(100% - 230px); display: none; flex-direction: column; background: var(--panel); border: 1px solid #b4b6bb; border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.22); overflow: hidden; z-index: 5; }
+#props-wrap { position: absolute; right: 16px; top: 150px; width: 300px; max-height: calc(100% - 200px); display: none; flex-direction: column; background: var(--panel); border: 1px solid #b4b6bb; border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.22); overflow: hidden; z-index: 5; }
 #props-wrap.open { display: flex; }
 #props-wrap.sketch { width: 270px; }
 .props { display: flex; flex-direction: column; min-height: 0; flex: 1; }
@@ -300,3 +300,35 @@ form .modal-foot { padding: 4px 0 0; }
 .qs-list .mi.hot, .qs-list .mi:hover { background: #d3e5f8; }
 .qs-list .mi small { margin-left: auto; color: #8a8f96; }
 .qs-list svg.fi { width: 22px; height: 22px; }
+
+#manip-label { position: absolute; transform: translate(-50%, -50%); z-index: 4; }
+#manip-label input { width: 82px; height: 24px; border: 1px solid #2f7fe0; border-radius: 3px; text-align: center; background: #fff; font: inherit; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.28); }
+#manip-label input.bad { border-color: var(--danger); background: #fff3f3; }
+#manip-label input:focus { outline: 2px solid #bcd9f6; }
+
+#dimbox { position: absolute; z-index: 5; background: rgba(255,255,255,.97); border: 1px solid #2f7fe0; border-radius: 4px; padding: 4px 6px; box-shadow: 0 2px 8px rgba(0,0,0,.25); display: flex; flex-direction: column; gap: 3px; }
+#dimbox label { display: flex; align-items: center; gap: 6px; }
+#dimbox label span { width: 14px; color: #1d63b8; font-weight: 700; text-align: center; }
+#dimbox input { width: 74px; height: 22px; border: 1px solid #b5b7bd; border-radius: 3px; padding: 0 5px; font: inherit; }
+#dimbox input.live { color: #8a8f96; background: #f7f8f9; }
+#dimbox input:focus { outline: 2px solid #bcd9f6; border-color: #2f7fe0; color: #000; background: #fff; }
+#dimbox input.bad { border-color: var(--danger); background: #fff3f3; }
+.dimlbl { position: absolute; transform: translate(-50%, -50%); z-index: 4; display: flex; align-items: center; gap: 3px; background: #fff; border: 1px solid #2f7fe0; border-radius: 3px; padding: 1px 4px; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+.dimlbl span { color: #1d63b8; font-weight: 700; }
+.dimlbl input { width: 58px; height: 20px; border: 0; background: transparent; text-align: center; font: inherit; font-weight: 600; }
+.dimlbl input:focus { outline: none; background: #eef5fd; }
+.dimlbl input.bad { color: var(--danger); }
+
+.tl-drop { position: absolute; top: 4px; bottom: 4px; width: 3px; background: #0f78d8; border-radius: 2px; pointer-events: none; }
+.inline-edit { position: fixed; z-index: 70; height: 24px; padding: 0 6px; border: 1px solid #2f7fe0; border-radius: 3px; background: #fff; font: inherit; box-shadow: 0 2px 8px rgba(0,0,0,.3); outline: 2px solid #bcd9f6; }
+.popup .swatch { width: 16px; height: 16px; border-radius: 3px; border: 1px solid rgba(0,0,0,.25); flex: none; margin: 0 3px; }
+
+.opbar { display: flex; gap: 3px; }
+.opbtn { width: 33px; height: 32px; border: 1px solid #b5b7bd; background: #fff; border-radius: 3px; display: grid; place-items: center; padding: 0; }
+.opbtn:hover { border-color: #7fb0e3; background: #f2f8fe; }
+.opbtn.on { background: #cfe2f6; border-color: #2f7fe0; box-shadow: inset 0 0 0 1px #2f7fe0; }
+
+#tip { position: fixed; z-index: 80; max-width: 260px; background: #fff; border: 1px solid #b1b3b9; border-radius: 4px; box-shadow: 0 4px 14px rgba(0,0,0,.25); padding: 7px 10px 8px; pointer-events: none; }
+#tip b { font-size: 12.5px; }
+#tip .k { margin-left: 10px; color: #6d7279; background: #eef0f2; border-radius: 3px; padding: 0 5px; font-size: 11px; }
+#tip p { margin: 4px 0 0; color: #444; line-height: 1.4; }
