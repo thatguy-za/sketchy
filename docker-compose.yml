@@ -1,0 +1,11 @@
+services:
+  sketchy:
+    build: .
+    ports: ["8080:8080"]
+    volumes: ["sketchy-data:/data"]
+    environment:
+      # set to "false" once your users have signed up
+      ALLOW_REGISTRATION: "true"
+    restart: unless-stopped
+volumes:
+  sketchy-data:

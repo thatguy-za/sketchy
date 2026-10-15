@@ -1,0 +1,140 @@
+// Fusion-style icon set: colourful isometric feature icons (ficon) + thin UI chrome icons (uicon).
+const B = { t: '#a9d2f7', l: '#4f9be8', r: '#2c6fc6', s: '#245a9f' };      // blue solid (top / left / right / stroke)
+const G = { t: '#f7f8f9', l: '#d9dce0', r: '#b8bdc4', s: '#7c858f' };      // gray solid
+const GREEN = '#35a853', ORANGE = '#f08c00', RED = '#e0453a', INK = '#3a444f';
+
+const poly = (d, fill, stroke, sw = 0.7) => `<path d="${d}" fill="${fill}" stroke="${stroke || 'none'}" stroke-width="${sw}" stroke-linejoin="round"/>`;
+// isometric cube at (cx, top) with half-width w and height h
+const cube = (c, x = 4, y = 4, w = 12, h = 12) => {
+  const cx = x + w, d = w / 2;
+  return poly(`M${cx} ${y} L${cx + w} ${y + d} L${cx} ${y + d * 2} L${x} ${y + d}Z`, c.t, c.s)
+    + poly(`M${x} ${y + d} L${cx} ${y + d * 2} V${y + d * 2 + h} L${x} ${y + d + h}Z`, c.l, c.s)
+    + poly(`M${cx + w} ${y + d} L${cx} ${y + d * 2} V${y + d * 2 + h} L${cx + w} ${y + d + h}Z`, c.r, c.s);
+};
+const plus = (x = 25, y = 25, s = 3.4) => `<path d="M${x - s} ${y}H${x + s}M${x} ${y - s}V${y + s}" stroke="${GREEN}" stroke-width="2.6" stroke-linecap="round" fill="none"/>`;
+const arrowUp = (x, y1, y2) => `<path d="M${x} ${y2}V${y1}M${x - 2.6} ${y1 + 3}L${x} ${y1 - 0.2}L${x + 2.6} ${y1 + 3}" stroke="${INK}" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`;
+const arrowR = (x1, x2, y) => `<path d="M${x1} ${y}H${x2}M${x2 - 3} ${y - 2.6}L${x2 + 0.2} ${y}L${x2 - 3} ${y + 2.6}" stroke="${INK}" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`;
+const pt = (x, y) => `<rect x="${x - 1.8}" y="${y - 1.8}" width="3.6" height="3.6" fill="#4f9be8" stroke="${B.s}" stroke-width=".6"/>`;
+
+const grad = (id, a, b) => `<defs><radialGradient id="${id}" cx=".35" cy=".3" r=".8"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></radialGradient></defs>`;
+
+const FI = {
+  sketch: `<rect x="5" y="6" width="17" height="16" fill="none" stroke="${INK}" stroke-width="1.3" stroke-dasharray="2.4 2"/>${pt(5, 22)}${pt(22, 6)}${plus(25, 25)}`,
+  extrude: `${cube(B, 3, 9, 8, 9)}${arrowUp(26, 5, 22)}`,
+  revolve: `<path d="M4 22C4 11 11 5 22 7L21 13C14 12 10 15 10 22Z" fill="${B.l}" stroke="${B.s}" stroke-width=".7"/><path d="M22 7L19 3.5M22 7L18.5 10" stroke="${INK}" stroke-width="1.4" stroke-linecap="round"/><path d="M5 27H27" stroke="${INK}" stroke-width="1" stroke-dasharray="2 2"/>`,
+  sweep: `<path d="M5 24C6 12 12 20 18 12C21 8 23 8 26 6" fill="none" stroke="${B.l}" stroke-width="5" stroke-linecap="round"/><path d="M5 24C6 12 12 20 18 12C21 8 23 8 26 6" fill="none" stroke="${B.t}" stroke-width="1.6" stroke-linecap="round"/><ellipse cx="6" cy="25" rx="3.6" ry="2.4" fill="${B.t}" stroke="${B.s}" stroke-width=".7"/>`,
+  loft: `<path d="M6 25L10 14H22L26 25Z" fill="${B.l}" stroke="${B.s}" stroke-width=".7"/><rect x="4" y="22" width="22" height="5" fill="${B.r}" stroke="${B.s}" stroke-width=".7"/><ellipse cx="16" cy="12" rx="6" ry="2.6" fill="${B.t}" stroke="${B.s}" stroke-width=".7"/>`,
+  rib: `${poly('M3 22L14 17L28 22L17 27Z', G.t, G.s)}${poly('M3 22L17 27V30L3 25Z', G.l, G.s)}${poly('M17 27L28 22V25L17 30Z', G.r, G.s)}${poly('M9 18L14 7L24 12L19 22Z', B.l, B.s)}`,
+  hole: `${cube(G, 3, 5, 13, 13)}<ellipse cx="16" cy="12" rx="6" ry="3.2" fill="${B.l}" stroke="${B.s}" stroke-width=".8"/><ellipse cx="16" cy="12.6" rx="3.6" ry="1.8" fill="${B.t}"/>`,
+  thread: `<path d="M10 4H22V28H10Z" fill="${G.l}" stroke="${G.s}" stroke-width=".8"/><path d="M10 8L22 11M10 13L22 16M10 18L22 21M10 23L22 26" stroke="${G.s}" stroke-width="1.2"/><path d="M13 4V28" stroke="${G.t}" stroke-width="2"/>`,
+  box: cube(B, 4, 3, 12, 14),
+  cylinder: `<path d="M7 8V22C7 25 11 27 16 27S25 25 25 22V8Z" fill="${B.l}" stroke="${B.s}" stroke-width=".8"/><path d="M19 8V26.6C22.5 26 25 24.6 25 22V8Z" fill="${B.r}"/><ellipse cx="16" cy="8" rx="9" ry="4" fill="${B.t}" stroke="${B.s}" stroke-width=".8"/>`,
+  sphere: `${grad('gs', '#d7ebfc', '#2f72c9')}<circle cx="16" cy="16" r="11.5" fill="url(#gs)" stroke="${B.s}" stroke-width=".8"/>`,
+  cone: `<path d="M16 4L5 23C5 26 10 28 16 28S27 26 27 23Z" fill="${B.l}" stroke="${B.s}" stroke-width=".8"/><path d="M16 4L27 23C27 26 22 28 16 28V4Z" fill="${B.r}"/><ellipse cx="16" cy="23" rx="11" ry="4" fill="${B.t}" stroke="${B.s}" stroke-width=".8" opacity=".9"/>`,
+  torus: `${grad('gt', '#d7ebfc', '#2f72c9')}<ellipse cx="16" cy="16" rx="12.5" ry="8.5" fill="url(#gt)" stroke="${B.s}" stroke-width=".8"/><ellipse cx="16" cy="16" rx="5" ry="2.8" fill="#eef1f4" stroke="${B.s}" stroke-width=".8"/>`,
+  coil: `<path d="M5 8C12 4 24 7 26 9C24 11 12 10 6 13C12 12 24 15 26 17C24 19 12 18 6 21C12 20 24 23 26 25" fill="none" stroke="${B.l}" stroke-width="3.6" stroke-linecap="round"/><path d="M5 8C12 4 24 7 26 9C24 11 12 10 6 13C12 12 24 15 26 17C24 19 12 18 6 21C12 20 24 23 26 25" fill="none" stroke="${B.t}" stroke-width="1" stroke-linecap="round"/>`,
+  presspull: `${poly('M5 8L14 5L24 8L15 11Z', B.t, B.s)}${poly('M5 8L15 11V26L5 23Z', B.l, B.s)}${poly('M24 8L15 11V26L24 23Z', B.r, B.s)}${arrowR(19, 29, 17)}`,
+  fillet: `${poly('M4 12L15 6L27 12L16 18Z', G.t, G.s)}${poly('M4 12L16 18V29L4 23Z', G.l, G.s)}${poly('M27 12L16 18V29L27 23Z', G.r, G.s)}<path d="M9 9.2C12 8 14 11 16 12C18 11 20 8 23 9.2L27 12L16 18L4 12Z" fill="${B.l}" stroke="${B.s}" stroke-width=".7"/>`,
+  chamfer: `${poly('M4 12L15 6L27 12L16 18Z', G.t, G.s)}${poly('M4 12L16 18V29L4 23Z', G.l, G.s)}${poly('M27 12L16 18V29L27 23Z', G.r, G.s)}<path d="M13 8.5L19 8.5L24 11L16 15L8 11Z" fill="${B.l}" stroke="${B.s}" stroke-width=".7"/>`,
+  shell: `${cube(G, 3, 4, 13, 14)}${poly('M8 11L16 7L24 11L16 15Z', B.l, B.s)}${poly('M8 11L16 15V21L8 17Z', B.r, B.s)}${poly('M24 11L16 15V21L24 17Z', B.t, B.s)}`,
+  scale: `<rect x="4" y="12" width="15" height="15" fill="${G.t}" stroke="${G.s}" stroke-width="1"/><rect x="4" y="19" width="8" height="8" fill="${B.l}" stroke="${B.s}" stroke-width=".8"/><path d="M15 17L26 6M20 6H26V12" stroke="${INK}" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`,
+  split: `${poly('M3 14L15 8L27 14L15 20Z', G.t, G.s)}${poly('M3 14L15 20V30L3 24Z', G.l, G.s)}${poly('M27 14L15 20V30L27 24Z', B.r, B.s)}<path d="M2 17L28 17" stroke="${RED}" stroke-width="1.2" stroke-dasharray="2.4 2"/>`,
+  combine: `${cube(B, 3, 4, 9, 10)}${cube({ t: '#cfe6fb', l: '#82b8ee', r: '#5792d8', s: B.s }, 11, 10, 9, 10)}`,
+  move: `<path d="M16 3V29M3 16H29M16 3L12.6 6.8M16 3L19.4 6.8M16 29L12.6 25.2M16 29L19.4 25.2M3 16L6.8 12.6M3 16L6.8 19.4M29 16L25.2 12.6M29 16L25.2 19.4" stroke="${INK}" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`,
+  mirror: `<path d="M16 3V29" stroke="${INK}" stroke-width="1.2" stroke-dasharray="2.4 2"/>${poly('M13 9L4 25H13Z', B.l, B.s)}${poly('M19 9L28 25H19Z', B.t, B.s)}`,
+  pattern: `<rect x="4" y="5" width="7" height="7" fill="${B.l}" stroke="${B.s}" stroke-width=".7"/><rect x="13" y="5" width="7" height="7" fill="${B.l}" stroke="${B.s}" stroke-width=".7"/><rect x="22" y="5" width="6" height="7" fill="${B.t}" stroke="${B.s}" stroke-width=".7" stroke-dasharray="1.6 1.2"/><rect x="4" y="15" width="7" height="7" fill="${B.t}" stroke="${B.s}" stroke-width=".7" stroke-dasharray="1.6 1.2"/><rect x="13" y="15" width="7" height="7" fill="${B.t}" stroke="${B.s}" stroke-width=".7" stroke-dasharray="1.6 1.2"/>`,
+  joint: `${cube(G, 3, 7, 9, 10)}<path d="M16 8H27M24 5L27.4 8L24 11" fill="none" stroke="#2f7fe0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="20" cy="22" r="3.2" fill="none" stroke="${INK}" stroke-width="1.4"/><circle cx="25" cy="25" r="3.2" fill="none" stroke="${INK}" stroke-width="1.4"/>`,
+  measure: `<path d="M3 21L21 3L29 11L11 29Z" fill="#f6c453" stroke="#b9852c" stroke-width="1"/><path d="M8 20L10.5 22.5M12 16L14 18M16 12L18.5 14.5M20 8L22 10" stroke="#8a5a10" stroke-width="1.3"/>`,
+  params: `<rect x="3" y="5" width="26" height="20" fill="#fff" stroke="${G.s}" stroke-width="1.1"/><path d="M3 11H29M12 5V25M3 17H29" stroke="${G.s}" stroke-width="1"/><path d="M17 8.4H26M17 14H26M17 20H23" stroke="${B.l}" stroke-width="1.6"/><text x="5" y="22.6" font-size="7" font-family="serif" font-style="italic" fill="${B.r}">fx</text>`,
+  importstl: `${cube(G, 5, 10, 11, 11)}<path d="M3 6H12M9 3L12.4 6L9 9" fill="none" stroke="#2f7fe0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
+  remove: `<path d="M7 7L25 25M25 7L7 25" stroke="${RED}" stroke-width="4" stroke-linecap="round"/>`,
+  select: `<rect x="4" y="6" width="17" height="15" fill="none" stroke="${B.l}" stroke-width="1.4" stroke-dasharray="2.4 2"/><path d="M17 15L28 20L23 22L26 28L23.5 29L20.5 23L17 26Z" fill="#fff" stroke="${INK}" stroke-width="1.2" stroke-linejoin="round"/>`,
+  offsetplane: `${poly('M5 9L15 5L15 24L5 28Z', '#79c68d', '#3a8a50')}${poly('M17 7L27 11L27 28L17 24Z', '#f2a65a', '#b8691d')}<path d="M14 4V29" stroke="${RED}" stroke-width="1"/>`,
+  finish: `<path d="M6 17L13 24L27 7" fill="none" stroke="${GREEN}" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>`,
+  // sketch tools (dark blue lines + blue points)
+  line: `<path d="M6 26L26 6" stroke="#1f4f93" stroke-width="2"/>${pt(6, 26)}${pt(26, 6)}`,
+  path: `<path d="M5 25L12 12L19 20L27 7" fill="none" stroke="#1f4f93" stroke-width="2" stroke-linejoin="round"/>${pt(5, 25)}${pt(12, 12)}${pt(19, 20)}${pt(27, 7)}`,
+  rect: `<rect x="5" y="8" width="22" height="16" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(5, 8)}${pt(27, 24)}`,
+  circle: `<circle cx="16" cy="16" r="10.5" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(16, 16)}`,
+  ngon: `<path d="M16 4L27 12L23 26H9L5 12Z" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2" stroke-linejoin="round"/>${pt(16, 15)}`,
+  arc: `<path d="M5 24C5 12 12 6 27 6" fill="none" stroke="#1f4f93" stroke-width="2"/>${pt(5, 24)}${pt(27, 6)}`,
+  spline: `<path d="M4 22C9 6 14 28 19 14S25 8 28 9" fill="none" stroke="#1f4f93" stroke-width="2"/>${pt(4, 22)}${pt(28, 9)}`,
+  dimension: `<path d="M5 22V10M27 22V10M5 16H27M8 13.5L5 16L8 18.5M24 13.5L27 16L24 18.5" fill="none" stroke="#1f4f93" stroke-width="1.6"/>`,
+  trim: `<path d="M5 25L27 7M5 7L27 25" stroke="#1f4f93" stroke-width="1.8"/><circle cx="16" cy="16" r="3" fill="#fff" stroke="${RED}" stroke-width="1.6"/>`,
+  constraint: `<path d="M5 12H27M5 20H27" stroke="#1f4f93" stroke-width="2"/><path d="M13 9L19 23" stroke="#1f4f93" stroke-width="1.6"/><rect x="21" y="3" width="8" height="8" fill="#fff" stroke="${B.l}"/>`,
+  properties: `<circle cx="16" cy="16" r="11.5" fill="#fff" stroke="${B.l}" stroke-width="2"/><path d="M16 14V23M16 9V11" stroke="${B.r}" stroke-width="2.6" stroke-linecap="round"/>`,
+  angle: `<path d="M5 26H27M5 26L20 8" stroke="${INK}" stroke-width="1.8" stroke-linecap="round"/><path d="M14 26A9 9 0 0 0 11.6 19.4" fill="none" stroke="${ORANGE}" stroke-width="2"/>`,
+  edge: `<path d="M5 27L27 5" stroke="${ORANGE}" stroke-width="2.4"/><path d="M5 22V30H13M27 10V2H19" fill="none" stroke="${INK}" stroke-width="1.2" opacity=".6"/>`,
+  faces: `${poly('M3 24L14 19V8L3 13Z', G.l, G.s)}${poly('M17 19L28 24V13L17 8Z', B.l, B.s)}`,
+  threed: `<path d="M8 12V6H24V12M8 22H5V12H27V22H24M8 18H24V27H8Z" fill="${G.t}" stroke="${INK}" stroke-width="1.3" stroke-linejoin="round"/><rect x="21" y="15" width="3" height="2" fill="${GREEN}"/>`,
+  printer: `<path d="M8 12V6H24V12M8 22H5V12H27V22H24M8 18H24V27H8Z" fill="${G.t}" stroke="${INK}" stroke-width="1.3" stroke-linejoin="round"/>`,
+  table: `<rect x="3" y="5" width="26" height="20" fill="#fff" stroke="${G.s}" stroke-width="1.2"/><rect x="3" y="5" width="26" height="5" fill="#e3e6ea" stroke="${G.s}" stroke-width="1.2"/><path d="M12 10V25M20 10V25M3 15H29M3 20H29" stroke="${G.r}" stroke-width="1"/><path d="M22 22H30M26 18V26" stroke="#2f7fe0" stroke-width="2.2"/>`,
+  derive: `${cube(G, 5, 8, 10, 11)}<path d="M3 5L12 5M9 2L12.4 5L9 8" fill="none" stroke="#2f7fe0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 22H30M26 18V26" stroke="#2f7fe0" stroke-width="2.2"/>`,
+  canvas: `<rect x="3" y="5" width="26" height="22" fill="#4aa3ee" stroke="#2b6fb8" stroke-width="1.2"/><circle cx="21" cy="12" r="3" fill="#fff"/><path d="M3 27L12 15L19 22L23 18L29 27Z" fill="#fff" opacity=".92"/>`,
+  insertmesh: `<path d="M16 3L28 9V22L16 29L4 22V9Z" fill="#e6b84a" stroke="#9a7420" stroke-width="1"/><path d="M16 3L16 16M4 9L16 16L28 9M16 16L16 29M4 22L16 16L28 22M10 6L10 19M22 6L22 19" stroke="#9a7420" stroke-width=".8" fill="none"/><path d="M2 8H10M7 5L10.4 8L7 11" fill="none" stroke="#2f7fe0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
+  sectionan: `${cube(G, 4, 6, 12, 14)}<path d="M2 22L30 12" stroke="${RED}" stroke-width="1.6" stroke-dasharray="3 2"/>`,
+  disabled: `<rect x="5" y="5" width="22" height="22" rx="3" fill="${G.l}" stroke="${G.r}" stroke-width="1"/>`,
+};
+
+export const ficon = (name, size = 32) =>
+  `<svg class="fi" width="${size}" height="${size}" viewBox="0 0 32 32" aria-hidden="true">${FI[name] || FI.disabled}</svg>`;
+
+// ---- thin UI chrome icons (24px, currentColor) ----
+const U = {
+  home: '<path d="M4 11.5L12 4.5L20 11.5V20H14.5V14.5H9.5V20H4Z"/>',
+  grid: '<rect x="4" y="4" width="6.5" height="6.5"/><rect x="13.5" y="4" width="6.5" height="6.5"/><rect x="4" y="13.5" width="6.5" height="6.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5"/>',
+  file: '<path d="M6 3.5H14L18.5 8V20.5H6Z"/><path d="M14 3.5V8H18.5"/>',
+  save: '<path d="M5 4H16.5L20 7.5V20H5Z"/><path d="M8 4V9H15V4M8 20V13H16V20"/>',
+  undo: '<path d="M9.5 6L4.5 10.5L9.5 15"/><path d="M4.5 10.5H14A5 5 0 0 1 14 20.5H10"/>',
+  redo: '<path d="M14.5 6L19.5 10.5L14.5 15"/><path d="M19.5 10.5H10A5 5 0 0 0 10 20.5H14"/>',
+  caret: '<path d="M7 10L12 15L17 10Z" fill="currentColor"/>',
+  chevR: '<path d="M9 6L15 12L9 18"/>',
+  chevD: '<path d="M6 9L12 15L18 9"/>',
+  eye: '<path d="M2.5 12S6 5.5 12 5.5S21.5 12 21.5 12S18 18.5 12 18.5S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
+  eyeOff: '<path d="M2.5 12S6 5.5 12 5.5S21.5 12 21.5 12S18 18.5 12 18.5S2.5 12 2.5 12Z" opacity=".5"/><path d="M4 20L20 4"/>',
+  folder: '<path d="M3.5 6.5H10L12 8.5H20.5V19H3.5Z"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M12 3V6M12 18V21M3 12H6M18 12H21M5.6 5.6L7.7 7.7M16.3 16.3L18.4 18.4M5.6 18.4L7.7 16.3M16.3 7.7L18.4 5.6"/>',
+  bell: '<path d="M6 17V11A6 6 0 0 1 18 11V17L19.5 18.5H4.5Z"/><path d="M10 20.5H14"/>',
+  help: '<circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.5A2.5 2.5 0 1 1 12 12V14M12 16.5V17"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15L20.5 20.5"/>',
+  close: '<path d="M6 6L18 18M18 6L6 18"/>',
+  plus: '<path d="M12 5V19M5 12H19"/>',
+  user: '<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20C5 15.5 8 13.5 12 13.5S19 15.5 19 20"/>',
+  cloud: '<path d="M7 18.5A4 4 0 0 1 7 10.5A5.5 5.5 0 0 1 17.5 9.5A4.5 4.5 0 0 1 17 18.5Z"/>',
+  orbit: '<ellipse cx="12" cy="12" rx="8.5" ry="4.5"/><path d="M12 3.5V20.5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/>',
+  camera: '<rect x="4" y="7" width="16" height="11" rx="1.5"/><path d="M8 7L9.5 4.5H14.5L16 7"/><circle cx="12" cy="12.5" r="3"/>',
+  hand: '<path d="M8.5 12V6A1.4 1.4 0 0 1 11.3 6V11M11.3 11V4.8A1.4 1.4 0 0 1 14 4.8V11M14 11V6.5A1.4 1.4 0 0 1 16.8 6.5V13M16.8 11.5A1.4 1.4 0 0 1 19.5 11.5V15.5C19.5 18.5 17.5 20.5 14.5 20.5H12.5C10 20.5 8.5 19.5 7 17L4.8 13.3A1.4 1.4 0 0 1 7 12L8.5 14"/>',
+  zoom: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15L20.5 20.5M8 10.5H13M10.5 8V13"/>',
+  zoomwin: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15L20.5 20.5"/><rect x="8" y="8" width="5" height="5"/>',
+  monitor: '<rect x="3.5" y="5" width="17" height="11.5" rx="1"/><path d="M9 20H15M12 16.5V20"/>',
+  grid2: '<rect x="4" y="4" width="16" height="16"/><path d="M12 4V20M4 12H20"/>',
+  viewports: '<rect x="4" y="4" width="16" height="16" rx="1.5"/><rect x="6.5" y="6.5" width="4.5" height="4.5"/><rect x="13" y="6.5" width="4.5" height="4.5"/><rect x="6.5" y="13" width="4.5" height="4.5"/><rect x="13" y="13" width="4.5" height="4.5"/>',
+  first: '<path d="M17.5 5L8.5 12L17.5 19ZM5.5 5V19" />',
+  prev: '<path d="M16 5L8 12L16 19Z"/>',
+  play: '<path d="M8 4.5L19 12L8 19.5Z"/>',
+  next: '<path d="M8 5L16 12L8 19Z"/>',
+  last: '<path d="M6.5 5L15.5 12L6.5 19ZM18.5 5V19"/>',
+  comp: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M12 4V20M4 12H12"/>',
+  body: '<path d="M12 3.5L20 8V16L12 20.5L4 16V8Z"/><path d="M4 8L12 12.5L20 8M12 12.5V20.5"/>',
+  sketchi: '<path d="M4 20L5.5 14L16 3.5L20.5 8L10 18.5Z"/>',
+  plane: '<path d="M4 17L8 6H20L16 17Z"/>',
+  axis: '<path d="M4 20L20 4"/>',
+  point: '<circle cx="12" cy="12" r="2.6" fill="currentColor"/>',
+  link: '<path d="M10 14L14 10M8.5 11.5L6.5 13.5A3 3 0 0 0 10.5 17.5L12.5 15.5M15.5 12.5L17.5 10.5A3 3 0 0 0 13.5 6.5L11.5 8.5"/>',
+  warn: '<path d="M12 4L21 19.5H3Z"/><path d="M12 10V14.5M12 17V17.2"/>',
+  check: '<path d="M5 12.5L10 17.5L19 7"/>',
+  menu: '<path d="M4 7H20M4 12H20M4 17H20"/>',
+  more: '<circle cx="6" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18" cy="12" r="1.3" fill="currentColor"/>',
+  collapse: '<path d="M11 6L5 12L11 18M18 6L12 12L18 18"/>',
+  minus: '<path d="M5 12H19"/>',
+  upload: '<path d="M12 16V5M7.5 9.5L12 5L16.5 9.5M5 17V20H19V17"/>',
+  sparkle: '<path d="M12 3V9M12 15V21M3 12H9M15 12H21M5.5 5.5L9.5 9.5M14.5 14.5L18.5 18.5M18.5 5.5L14.5 9.5M9.5 14.5L5.5 18.5"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7V12L15.5 14"/>',
+  jobs: '<circle cx="12" cy="12" r="8.5" fill="#2f7fe0" stroke="#2f7fe0"/><path d="M12 17V8M8.5 11.5L12 8L15.5 11.5" stroke="#fff" stroke-width="2"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12H20.5M12 3.5C8 8 8 16 12 20.5M12 3.5C16 8 16 16 12 20.5"/>',
+  refresh: '<path d="M19 12A7 7 0 1 1 16.5 6.7M19 4V8.5H14.5"/>',
+  lock: '<rect x="6" y="11" width="12" height="9" rx="1.5"/><path d="M8.5 11V8A3.5 3.5 0 0 1 15.5 8V11"/>',
+  newdoc: '<path d="M6 3.5H14L18.5 8V20.5H6Z"/><path d="M12 11V17M9 14H15"/>',
+};
+export const uicon = (name, size = 16, sw = 1.6) =>
+  `<svg class="ui" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${U[name] || U.point}</svg>`;

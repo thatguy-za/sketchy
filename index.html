@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sketchy — open source CAD</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2L21 7V17L12 22L3 17V7Z' fill='%23f08c00'/%3E%3Cpath d='M12 12L21 7M12 12V22M12 12L3 7' stroke='%23fff' stroke-width='1.5' fill='none'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div id="app">
+    <aside id="data-panel"></aside>
+    <div id="main">
+      <header id="appbar">
+        <div class="ab-left">
+          <button class="abtn" id="btn-home" title="Show Home"></button>
+          <button class="abtn" id="btn-data" title="Show Data Panel"></button>
+          <span class="ab-gap"></span>
+          <button class="abtn wide" id="btn-menu" title="File"></button>
+          <button class="abtn wide" id="btn-save" title="Save (Ctrl+S)"></button>
+          <button class="abtn wide" id="btn-undo" title="Undo (Ctrl+Z)"></button>
+          <button class="abtn wide" id="btn-redo" title="Redo (Ctrl+Shift+Z)"></button>
+        </div>
+        <div class="doc-tab"><span class="doc-ic"></span><span id="doc-name">Untitled</span><span id="doc-dirty"></span><button class="doc-x" id="btn-closedoc" title="Close design"></button></div>
+        <div class="ab-right">
+          <button class="abtn" id="btn-newtab" title="New design"></button>
+          <button class="abtn" id="btn-job" title="Job status"></button>
+          <button class="abtn" id="btn-ext" title="Extensions"></button>
+          <button class="abtn" id="btn-clock" title="Data queue"></button>
+          <button class="abtn" id="btn-bell" title="Notifications"></button>
+          <button class="abtn" id="btn-help" title="Help"></button>
+          <button id="btn-acct" class="avatar" title="Account"></button>
+        </div>
+      </header>
+      <section id="toolrow">
+        <button id="btn-workspace" title="Workspace"></button>
+        <div id="toolwrap">
+          <nav id="tabs"></nav>
+          <section id="ribbon"></section>
+        </div>
+      </section>
+      <main id="workspace">
+        <div id="viewport">
+          <canvas id="gl"></canvas>
+          <aside id="browser">
+            <div class="panel-title"><span class="pt-l" id="pt-collapse"></span><span>BROWSER</span><span class="pt-r" id="pt-min"></span></div>
+            <div id="tree"></div>
+          </aside>
+          <div id="comments"><span>COMMENTS</span><button id="btn-addcomment" title="Add comment"></button></div>
+          <div id="viewcube"><div id="cube"></div><div id="cube-axes"></div><button id="cube-home" title="Home"></button><button id="cube-menu" title="View options"></button></div>
+          <div id="props-wrap"></div>
+          <div id="hud"></div>
+          <div id="navbar"></div>
+          <div id="statusbar"></div>
+          <div class="zwin" id="zwin"></div>
+        </div>
+      </main>
+      <footer id="timeline-bar">
+        <div id="tl-controls"></div>
+        <div id="timeline"></div>
+        <button id="tl-settings" title="Timeline settings"></button>
+      </footer>
+    </div>
+  </div>
+  <div id="menu" class="popup" hidden></div>
+  <div id="marking" hidden></div>
+  <div id="toast" hidden></div>
+  <input type="file" id="file-stl" accept=".stl" hidden />
+  <input type="file" id="file-proj" accept=".json,.sketchy" hidden />
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
