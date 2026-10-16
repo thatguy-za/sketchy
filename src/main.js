@@ -56,7 +56,10 @@ const canvasHidden = new Set();
 const planeHidden = new Set(); // construction planes hidden in the viewport
 let dataOpen = false;
 let lastCmd = null;
-let selPriority = 'body';
+const loadPriority = () => { try { return localStorage.getItem('sketchy.selPriority') === 'body' ? 'body' : 'face'; } catch { return 'face'; } };
+let prefPriority = loadPriority(); // what a plain click picks: faces by default; whole bodies if you chose that
+let selPriority = prefPriority;
+const savePriority = (v) => { prefPriority = v; try { localStorage.setItem('sketchy.selPriority', v); } catch { /* storage unavailable */ } };
 let selMode = 'click';           // click | window | freeform | paint (drag-selection tools)
 let selFace = null;
 let selEdges = [];
@@ -399,12 +402,12 @@ function selectionMenu(anchor) {
   const r = (anchor || $('#ribbon')).getBoundingClientRect();
   showMenu(r.left - 60, r.bottom + 2, [
     { head: 'SELECTION PRIORITY' },
-    { label: 'Body priority', check: selPriority === 'body', run: () => { selPriority = 'body'; selFace = null; vp.showFaces([], null); toast('Click selects whole bodies.'); } },
-    { label: 'Face priority', check: selPriority === 'face', run: () => { selPriority = 'face'; vp.selected.clear(); vp.refreshMaterials(); toast('Click selects flat faces — then press Q, E (pull), H (hole) or Create Sketch.'); } },
+    { label: 'Body priority', check: selPriority === 'body', run: () => { selPriority = 'body'; savePriority('body'); selFace = null; vp.showFaces([], null); toast('Click selects whole bodies.'); } },
+    { label: 'Face priority (default)', check: selPriority === 'face', run: () => { selPriority = 'face'; savePriority('face'); vp.selected.clear(); vp.refreshMaterials(); toast('Click selects flat faces — then press Q, E (pull), H (hole) or Create Sketch.'); } },
     { sep: true },
     { head: 'SELECTION MODE' },
-    ...[['click', 'Click selection', 'Click picks a body; drag orbits.'], ['window', 'Window selection', 'Drag a rectangle: left to right takes bodies fully inside, right to left takes any it touches.'], ['freeform', 'Freeform selection', 'Drag a loop around bodies to select every body it touches.'], ['paint', 'Paint selection', 'Drag over bodies to select them. Middle mouse or Esc to leave.']]
-      .map(([m, label, tip]) => ({ label, check: selMode === m, run: () => { selMode = m; if (m !== 'click' && selPriority === 'face') { selPriority = 'body'; selFace = null; vp.showFaces([], null); } toast(`${tip}${m !== 'click' ? ' Hold Shift to add. Esc for click selection.' : ''}`); renderRibbon(); } })),
+    ...[['click', 'Click selection', 'Click picks a face (or a body, if you chose body priority); double-click picks the whole body; drag orbits.'], ['window', 'Window selection', 'Drag a rectangle: left to right takes bodies fully inside, right to left takes any it touches.'], ['freeform', 'Freeform selection', 'Drag a loop around bodies to select every body it touches.'], ['paint', 'Paint selection', 'Drag over bodies to select them. Middle mouse or Esc to leave.']]
+      .map(([m, label, tip]) => ({ label, check: selMode === m, run: () => { selMode = m; if (m !== 'click' && selPriority === 'face') { selPriority = 'body'; selFace = null; vp.showFaces([], null); } else if (m === 'click') selPriority = prefPriority; toast(`${tip}${m !== 'click' ? ' Hold Shift to add. Esc for click selection.' : ''}`); renderRibbon(); } })),
   ]);
 }
 function sketchOnSelectedFace() {
@@ -468,7 +471,7 @@ function renderTree() {
     onEye: () => { const hide = visBodies > 0; result.bodies.forEach((b) => (hide ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } });
   if (open('root')) {
     folder(1, 'docset', 'Document Settings', 'gear', {}, () => { R(2, `Units: ${getUnits()}, g`, { kind: 'file', click: (ev) => unitsMenu(ev.currentTarget) }); R(2, 'Part Design', { kind: 'body', dim: true }); });
-    folder(1, 'views', 'Named Views', 'folder', {}, () => R(2, 'Home', { kind: 'camera', click: () => vp.home() }));
+    folder(1, 'views', 'Named Views', 'folder', {}, () => R(2, 'Home', { kind: 'camera', click: () => vp.home(true) }));
     folder(1, 'origin', 'Origin', 'folder', { eye: originVis, onEye: () => { originVis = !originVis; vp.setOriginVisible(originVis); renderTree(); } }, () => {
       for (const n of ['XY', 'XZ', 'YZ']) R(2, n, { kind: 'plane', dim: true });
       for (const n of ['X', 'Y', 'Z']) R(2, n, { kind: 'axis', dim: true });
@@ -990,7 +993,7 @@ function selectBody(id, additive = false) {
 // ------------------------------------------------------------------ features: create / edit
 const ctx = () => {
   const sks = sketchesBefore(doc.marker);
-  const sel = [...vp.selected][0] || result.bodies[0]?.id || '';
+  const sel = [...vp.selected][0] || selFace?.id || result.bodies[0]?.id || '';
   const selB = result.bodies.find((b) => b.id === sel) || result.bodies[0];
   const otherB = result.bodies.find((b) => b.id !== selB?.id);
   const ctr = (b) => (b ? b.bbox.min.map((v, k) => +((v + b.bbox.max[k]) / 2).toFixed(3)) : [0, 0, 0]);
@@ -1473,10 +1476,12 @@ function buildSketchGrid(step = SU?.stepNow() ?? 1) {
   if (sketch.grid) { vp.scene.remove(sketch.grid); }
   const p = curSketch().params;
   const g = new THREE.Group();
-  const mkGrid = (div, c1, c2, op) => { const gr = new THREE.GridHelper(400 * step, div, c1, c2); gr.rotation.x = Math.PI / 2; gr.material.transparent = true; gr.material.opacity = op; gr.material.depthTest = false; gr.renderOrder = -1; return gr; };
-  g.add(mkGrid(400, 0x9aa3ae, 0xc3c9d1, 0.7), mkGrid(80, 0x6f7a87, 0x8e98a4, 0.75));
+  const mkGrid = (div, c1, c2, op) => { const gr = new THREE.GridHelper(400 * step, div, c1, c2); gr.rotation.x = Math.PI / 2; gr.material.transparent = true; gr.material.opacity = op; gr.renderOrder = -1; return gr; }; // depth-tested: solids hide the grid behind them instead of having grid lines drawn across their faces
+  // quiet lines so the drawing stays easy to see: a faint fine grid and slightly stronger lines every fifth cell
+  const dark = getTheme() === 'dark';
+  g.add(dark ? mkGrid(400, 0x272d34, 0x272d34, 0.9) : mkGrid(400, 0xeef0f3, 0xeef0f3, 0.75), dark ? mkGrid(80, 0x373e47, 0x373e47, 1) : mkGrid(80, 0xe1e5ea, 0xe1e5ea, 0.8));
   g.matrixAutoUpdate = false;
-  g.matrix.copy(vp.planeMatrix(p));
+  g.matrix.copy(vp.planeMatrix(p)).multiply(new THREE.Matrix4().makeTranslation(0, 0, 0.03)); // a hair above the plane so a face lying in it doesn't flicker
   g.visible = sketch.gridVisible !== false;
   sketch.grid = g;
   vp.scene.add(g);
@@ -2329,7 +2334,7 @@ function bindViewport() {
   // Navigation: middle = pan, Shift + middle = orbit, double-click middle = fit
   cv.addEventListener('pointerdown', (e) => {
     if (e.button !== 1) return;
-    if (e.detail === 2) { vp.fit(); return; }
+    if (e.detail === 2) { vp.fit(true); return; }
     vp.controls.mouseButtons.MIDDLE = e.shiftKey ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
   }, true);
   cv.addEventListener('pointerdown', (e) => { if (e.button === 2) rdown = { x: e.clientX, y: e.clientY }; });
@@ -2375,13 +2380,20 @@ function bindViewport() {
       const tg = vp.pickPlanarFace(e);
       vp.selected.clear(); vp.refreshMaterials();
       selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal } : null;
-      if (tg?.curved) toast('Only flat faces can be selected.');
+      if (tg?.curved) { vp.selected.add(tg.id); vp.refreshMaterials(); toast('Curved face: selected the whole body. Flat faces select on their own.'); } // something is always selectable
       vp.showFaces(selFace ? [selFace] : [], null);
       renderTree(); renderRibbon();
       return;
     }
     const hit = vp.pickBody(e);
     selectBody(hit?.id, e.shiftKey || e.ctrlKey || e.metaKey);
+  });
+  cv.addEventListener('dblclick', (e) => { // double-click: the whole body, whatever the click priority is
+    if (e.button !== 0 || sketch || dialog || measure || selMode !== 'click') return;
+    const hit = vp.pickBody(e);
+    if (!hit) return;
+    selFace = null; vp.showFaces([], null);
+    selectBody(hit.id, e.shiftKey || e.ctrlKey || e.metaKey);
   });
   // Press/Pull: drag the picked face along its normal
   $('#viewport').addEventListener('pointerdown', (e) => {
@@ -2499,7 +2511,7 @@ function buildNavBar() {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(r.left, r.top - 90, [
       { label: 'Zoom Window', uicon: 'zoomwin', run: () => setNavMode('zwin') },
-      { label: 'Fit', uicon: 'fit', hint: '', run: () => vp.fit() },
+      { label: 'Fit', uicon: 'fit', hint: '', run: () => vp.fit(true) },
     ]);
   }, { on: navMode === 'zwin', caret: true });
   sep();
@@ -2677,7 +2689,7 @@ function openMarking(x, y) {
   if (dialog) items.push({ uicon: 'check', label: 'OK', key: '⏎', run: () => closeDialog(true) }, { uicon: 'close', label: 'Cancel', key: 'Esc', run: () => closeDialog(false) }, { sep: true });
   if (sketch && !sketch.picking) items.push({ ficon: 'finish', label: 'Finish Sketch', run: finishSketch }, { sep: true });
   if (selEdges.length || selFace) items.push({ ficon: 'fillet', label: selEdges.length ? `Fillet ${selEdges.length} edge${selEdges.length > 1 ? 's' : ''}` : 'Fillet face edges', key: 'F', run: () => runCommand('fillet') }, { ficon: 'chamfer', label: selEdges.length ? 'Chamfer edges' : 'Chamfer face edges', run: () => runCommand('chamfer') }, { sep: true });
-  items.push({ uicon: 'zoomwin', label: 'Fit', run: () => vp.fit() }, { uicon: 'camera', label: 'Look At', run: lookAtNearest }, { uicon: 'home', label: 'Home View', run: () => vp.home() },
+  items.push({ uicon: 'zoomwin', label: 'Fit', run: () => vp.fit(true) }, { uicon: 'camera', label: 'Look At', run: lookAtNearest }, { uicon: 'home', label: 'Home View', run: () => vp.home(true) },
     { sep: true }, { uicon: 'eye', label: 'Show All', run: showAll }, { sep: true });
   for (const id of ['extrude', 'fillet', 'hole', 'sketch', 'measure', 'parameters', 'importstl']) items.push({ ficon: CMD[id].icon, label: CMD[id].label, key: CMD[id].key, run: () => runCommand(id) });
   const list = document.createElement('div');
@@ -3056,6 +3068,7 @@ async function boot() {
   vp.opts.bedSize = PRINTERS[bedName] || vp.opts.bedSize;
   vp.buildBed();
   vp.home();
+  vp.fitted = true; // only opening a design re-frames the view; making the first body must not move the camera
   $('#loading')?.remove();
   SU = createSketchUI({
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
@@ -3072,7 +3085,7 @@ async function boot() {
   $('#btn-ext').onclick = openQuickSearch;
   $('#pt-min').onclick = $('#pt-collapse').onclick = () => $('#browser').classList.toggle('min');
   $('#tl-settings').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 150, r.top - 80, [{ label: 'Capture position', dim: true, run: () => toast('Not available yet.') }, { label: 'Collapse all features', dim: true, run: () => toast('Not available yet.') }]); };
-  $('#cube-home').onclick = () => vp.home();
+  $('#cube-home').onclick = () => vp.home(true);
   document.querySelectorAll('.vc-arrow').forEach((b) => { const [ax, d] = b.dataset.t.split(','); b.onclick = () => vp.turnView(ax, +d); });
   { // roll arrows: two outlined arcs around the cube's top-right corner
     const R = 76, pt = (deg, r = R) => [r * Math.cos((deg * Math.PI) / 180), -r * Math.sin((deg * Math.PI) / 180)];
@@ -3090,7 +3103,7 @@ async function boot() {
     host.append(arrow(49, 72, 1, 'Roll counter-clockwise', -90), arrow(41, 18, -1, 'Roll clockwise', 90));
   }
   $('#cube-menu').dataset.menu = 1;
-  $('#cube-menu').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 140, r.bottom + 4, [{ label: 'Go Home', uicon: 'home', run: () => vp.home() }, { sep: true }, { label: 'Orthographic', check: vp.opts.ortho, run: () => vp.setOrtho(true) }, { label: 'Perspective', check: !vp.opts.ortho, run: () => vp.setOrtho(false) }]); };
+  $('#cube-menu').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 140, r.bottom + 4, [{ label: 'Go Home', uicon: 'home', run: () => vp.home(true) }, { sep: true }, { label: 'Orthographic', check: vp.opts.ortho, run: () => vp.setOrtho(true) }, { label: 'Perspective', check: !vp.opts.ortho, run: () => vp.setOrtho(false) }]); };
   $('#file-2d').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) import2D(f); };
   $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importSTL(f); };
   $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { const txt = await f.text(); if (!newTab({ reuseBlank: true })) return; loadProject(txt); renderDocTabs(); } catch (x) { toast(x.message, true); } };

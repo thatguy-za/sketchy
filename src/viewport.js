@@ -98,7 +98,7 @@ export class Viewport {
   buildGrid(dark = false) {
     this.grid = new THREE.Group();
     const mk = (size, div, c1, c2) => { const g = new THREE.GridHelper(size, div, c1, c2); g.rotation.x = Math.PI / 2; g.material.transparent = true; g.material.opacity = 0.9; return g; };
-    this.grid.add(...(dark ? [mk(1000, 100, 0x4a525c, 0x3a4048), mk(1000, 1000, 0x2b3037, 0x2b3037)] : [mk(1000, 100, 0xaab2bd, 0xbcc3cc), mk(1000, 1000, 0xcdd3da, 0xcdd3da)]));
+    this.grid.add(...(dark ? [mk(1000, 100, 0x343a43, 0x2d333a), mk(1000, 1000, 0x242a30, 0x242a30)] : [mk(1000, 100, 0xe0e4e9, 0xe6e9ed), mk(1000, 1000, 0xf0f2f5, 0xf0f2f5)]));
     this.grid.children[1].material.opacity = 0.55;
     this.grid.position.z = -0.02;
     this.scene.add(this.grid);
@@ -210,9 +210,7 @@ export class Viewport {
     if (!hit) return;
     const f = Math.max(w / r.width, h / r.height);
     const dist = cam.position.distanceTo(this.controls.target) * Math.max(f, 0.02);
-    this.controls.target.copy(hit);
-    cam.position.copy(hit).addScaledVector(dir, -dist);
-    this.updateOrtho();
+    this.flyTo({ target: hit, q: this.anim ? this.anim.q1 : cam.quaternion.clone(), dist });
   }
 
   /** Reference images ("canvases") on a plane. items: [{id, plane, offset, x, y, width, opacity, image, aspect, hidden}] */
@@ -713,14 +711,16 @@ export class Viewport {
     for (const m of this.bodyGroup.children) box.expandByObject(m);
     return box.isEmpty() ? new THREE.Box3(new THREE.Vector3(-30, -30, 0), new THREE.Vector3(30, 30, 40)) : box;
   }
-  fit() {
+  /** Where the camera has to be to frame everything: { target, dist }. */
+  fitParams() {
     const b = this.bounds();
     const c = b.getCenter(new THREE.Vector3());
     const r = Math.max(b.getSize(new THREE.Vector3()).length() / 2, 10);
-    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
-    this.controls.target.copy(c);
-    this.camera.position.copy(c).addScaledVector(dir, r / Math.sin((this.persp.fov * Math.PI) / 360) * 1.05);
-    this.updateOrtho();
+    return { target: c, dist: (r / Math.sin((this.persp.fov * Math.PI) / 360)) * 1.05 };
+  }
+  /** Frame everything. Animated when you ask for it; loading a design jumps straight there. */
+  fit(animate = false) {
+    this.flyTo({ ...this.fitParams(), q: this.anim ? this.anim.q1 : this.camera.quaternion.clone(), animate });
   }
   lookAlong(dir, up = [0, 0, 1], animate = false) {
     const d = new THREE.Vector3(...dir).normalize();
@@ -729,11 +729,21 @@ export class Viewport {
   }
   /** Turn the camera (orbiting the target) to orientation q, optionally with a short eased animation. */
   orientTo(q1, animate = false) {
-    const dist = this.camera.position.distanceTo(this.controls.target);
-    const q0 = this.camera.quaternion.clone();
+    this.flyTo({ q: q1, animate });
+  }
+  /**
+   * Move the camera to look at `target` from `dist` away with orientation `q`; any of them left out stays as it is.
+   * Animated by default over a short, eased time (longer for bigger moves). Dragging the view cancels it.
+   */
+  flyTo({ target, q, dist, animate = true } = {}) {
+    const tg0 = this.controls.target.clone(), q0 = this.camera.quaternion.clone(), d0 = this.camera.position.distanceTo(tg0);
+    const tg1 = target ? target.clone() : tg0, qq = q || q0, d1 = dist ?? d0;
     this.anim = null;
-    if (!animate || q0.angleTo(q1) < 1e-3) return this.applyOrientation(q1, dist);
-    this.anim = { t0: performance.now(), dur: 100 + 280 * Math.min(1, q0.angleTo(q1) / Math.PI), q0, q1, dist };
+    const turn = q0.angleTo(qq), shift = tg0.distanceTo(tg1) / Math.max(d0, 1), zoom = Math.abs(Math.log(Math.max(d1, 1e-3) / Math.max(d0, 1e-3)));
+    if (!animate || (turn < 1e-3 && shift < 1e-4 && zoom < 1e-3)) {
+      this.controls.target.copy(tg1); this.applyOrientation(qq, d1); return;
+    }
+    this.anim = { t0: performance.now(), dur: Math.min(520, 200 + 220 * Math.min(1, turn / Math.PI) + 160 * Math.min(1, shift + zoom)), q0, q1: qq, tg0, tg1, d0, d1 };
   }
   applyOrientation(q, dist) {
     const z = new THREE.Vector3(0, 0, 1).applyQuaternion(q), y = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
@@ -745,7 +755,8 @@ export class Viewport {
     const a = this.anim;
     if (!a) return;
     const t = Math.min(1, (performance.now() - a.t0) / a.dur), e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-    this.applyOrientation(a.q0.clone().slerp(a.q1, e), a.dist);
+    this.controls.target.lerpVectors(a.tg0, a.tg1, e);
+    this.applyOrientation(a.q0.clone().slerp(a.q1, e), a.d0 * Math.pow(a.d1 / a.d0, e));
     if (t >= 1) this.anim = null;
   }
   /** Rotate the view by 90 degrees about a camera axis: 'x' (up/down), 'y' (left/right) or 'z' (roll). */
@@ -756,9 +767,13 @@ export class Viewport {
   }
   lookAtPlane(params) {
     const { n, y } = planeFrame(params);
-    this.lookAlong(n, Math.abs(n[2]) > 0.99 ? y : [0, 0, 1]);
+    this.lookAlong(n, Math.abs(n[2]) > 0.99 ? y : [0, 0, 1], true);
   }
-  home() { this.camera.up.set(0, 0, 1); this.lookAlong([1, -1.35, 0.95]); this.fit(); }
+  home(animate = false) {
+    const d = new THREE.Vector3(1, -1.35, 0.95).normalize();
+    const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(d, new THREE.Vector3(), new THREE.Vector3(0, 0, 1)));
+    this.flyTo({ ...this.fitParams(), q, animate });
+  }
   setOrtho(on) {
     this.opts.ortho = on;
     if (this.panes[1]) { this.eachPane(() => this.setOrthoHere(on)); return; }
