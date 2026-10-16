@@ -979,21 +979,6 @@ function showMenu(x, y, items) {
 addEventListener('pointerdown', (e) => { if (!e.target.closest('#menu') && !e.target.closest('[data-menu]')) $('#menu').hidden = true; }, true);
 
 
-function fileMenu() {
-  const r = $('#btn-menu').getBoundingClientRect();
-  showMenu(r.left, r.bottom + 2, [
-    { label: 'New Design', uicon: 'newdoc', hint: 'Ctrl+N', run: newDoc },
-    { label: 'Open…', uicon: 'folder', run: () => toggleDataPanel(true) },
-    { label: 'Open from my computer…', uicon: 'upload', run: () => $('#file-proj').click() },
-    { sep: true },
-    { label: acct.server ? 'Save version' : 'Save (download)', uicon: 'save', hint: 'Ctrl+S', run: () => save(false) },
-    { label: 'Save As…', uicon: 'save', run: () => save(true) },
-    { label: 'Export…', uicon: 'upload', run: exportDialog },
-    { sep: true },
-    { label: `Document units: ${getUnits()}…`, uicon: 'gear', run: () => unitsMenu($('#btn-menu')) },
-    { label: 'Insert Mesh (STL)…', ficon: 'insertmesh', run: () => $('#file-stl').click() },
-  ]);
-}
 
 // ------------------------------------------------------------------ selection
 function selectBody(id, additive = false) {
@@ -2310,6 +2295,17 @@ function renderDocTabs() {
     el.title = tabName(t);
     el.onclick = (e) => { if (e.target.closest('.doc-x')) closeTab(t.id); else activateTab(t.id); };
     el.onauxclick = (e) => { if (e.button === 1) closeTab(t.id); };
+    el.oncontextmenu = (e) => {
+      e.preventDefault();
+      if (t.id !== activeTab) activateTab(t.id);
+      showMenu(e.clientX, e.clientY, [
+        { label: acct.server ? 'Save version' : 'Save (download)', uicon: 'save', hint: 'Ctrl+S', run: () => save(false) },
+        { label: 'Save As…', uicon: 'save', hint: 'Ctrl+Shift+S', run: () => save(true) },
+        { label: 'Export…', uicon: 'upload', run: exportDialog },
+        { sep: true },
+        { label: 'Close', uicon: 'close', run: () => closeTab(t.id) },
+      ]);
+    };
     host.appendChild(el);
   }
   host.appendChild(plus); // the + sits right after the last tab
@@ -2723,34 +2719,57 @@ function openMarking(x, y) {
 }
 
 // ------------------------------------------------------------------ quick search (S)
+function closeQuickSearch() { document.querySelector('.qs-inline')?.remove(); $('#btn-ext')?.setAttribute('aria-expanded', 'false'); $('#btn-ext')?.classList.remove('on'); }
+/** Command search: a field that opens inline, to the left of the search button, with the matches in a list below it. */
 function openQuickSearch() {
+  if (document.querySelector('.qs-inline')) { closeQuickSearch(); return; }
   closeMarking();
-  const host = $('#marking');
-  host.hidden = false;
-  host.innerHTML = `<div class="qs"><input placeholder="Search commands…" autocomplete="off" spellcheck="false"><div class="qs-list"></div></div>`;
-  const input = host.querySelector('input'), list = host.querySelector('.qs-list');
-  let hot = 0, shown = [];
+  const btn = $('#btn-ext');
+  const box = document.createElement('div');
+  box.className = 'qs-inline';
+  box.innerHTML = `<input type="text" role="combobox" aria-label="Search" aria-expanded="true" aria-controls="qs-list" aria-autocomplete="list" placeholder="Search…" autocomplete="off" spellcheck="false"><div class="qs-list" id="qs-list" role="listbox"></div>`;
+  btn.parentElement.insertBefore(box, btn);
+  btn.setAttribute('aria-expanded', 'true'); btn.classList.add('on');
+  const input = box.querySelector('input'), list = box.querySelector('.qs-list');
+  let hot = 0, shown = [], designs = [];
+  if (acct.user) call('GET', '/projects').then((r) => { if (r.ok) { designs = r.data; if (document.body.contains(input)) draw(); } }); // your saved designs, searched along with the commands
   const draw = () => {
     const q = input.value.trim().toLowerCase();
-    shown = Object.entries(CMD).filter(([id, c]) => !id.startsWith('sk_') && id !== 'cancelpick' && id !== 'finishsketch' && (!q || c.label.toLowerCase().includes(q))).slice(0, 40);
+    const cmds = Object.entries(CMD).filter(([id, c]) => !id.startsWith('sk_') && id !== 'cancelpick' && id !== 'finishsketch' && (!q || c.label.toLowerCase().includes(q))).slice(0, q ? 30 : 5).map(([id, c]) => ({ kind: 'cmd', id, c })); // just five suggestions until you type
+    const files = (q ? designs.filter((d) => d.name.toLowerCase().includes(q) || (d.folder || '').toLowerCase().includes(q)) : []).slice(0, 8).map((d) => ({ kind: 'design', d }));
+    shown = [...files, ...cmds]; // matching designs first: a typed name is more likely a file than a command
     hot = Math.min(hot, Math.max(shown.length - 1, 0));
     list.innerHTML = '';
-    shown.forEach(([id, c], i) => {
+    let lastKind = '';
+    shown.forEach((it, i) => {
+      if (it.kind !== lastKind && files.length) { list.insertAdjacentHTML('beforeend', `<div class="qs-head" role="presentation">${it.kind === 'design' ? 'DESIGNS' : 'COMMANDS'}</div>`); }
+      lastKind = it.kind;
       const e = document.createElement('div');
       e.className = 'mi' + (i === hot ? ' hot' : '');
-      e.innerHTML = ficon(c.icon, 22) + `<span>${esc(c.label)}</span>` + (c.key ? `<small>${c.key}</small>` : c.off ? '<small>soon</small>' : '');
-      e.onclick = () => { closeMarking(); runCommand(id); };
+      e.id = 'qs-o' + i; e.setAttribute('role', 'option'); e.setAttribute('aria-selected', String(i === hot));
+      if (it.kind === 'design') {
+        e.innerHTML = uicon('file', 20) + `<span>${esc(it.d.name)}</span>` + (it.d.folder ? `<small>${esc(it.d.folder)}</small>` : '');
+        e.onclick = () => { closeQuickSearch(); openSavedDesign(it.d); };
+      } else {
+        const { id, c } = it;
+        e.innerHTML = ficon(c.icon, 22) + `<span>${esc(c.label)}</span>` + (c.key ? `<small>${c.key}</small>` : c.off ? '<small>soon</small>' : '');
+        e.onclick = () => { closeQuickSearch(); runCommand(id); };
+      }
       list.appendChild(e);
     });
+    if (!shown.length) list.innerHTML = '<div class="qs-none">No matching commands or designs</div>';
+    input.setAttribute('aria-activedescendant', shown.length ? 'qs-o' + hot : '');
+    list.querySelector('.hot')?.scrollIntoView({ block: 'nearest' });
   };
+  list.addEventListener('pointerdown', (e) => e.preventDefault()); // keep the focus in the field while clicking a result
   input.oninput = () => { hot = 0; draw(); };
   input.onkeydown = (e) => {
     if (e.key === 'ArrowDown') { hot = Math.min(hot + 1, shown.length - 1); draw(); e.preventDefault(); }
     else if (e.key === 'ArrowUp') { hot = Math.max(hot - 1, 0); draw(); e.preventDefault(); }
-    else if (e.key === 'Enter') { const t = shown[hot]; closeMarking(); if (t) runCommand(t[0]); e.preventDefault(); e.stopPropagation(); }
-    else if (e.key === 'Escape') { closeMarking(); e.stopPropagation(); }
+    else if (e.key === 'Enter') { const t = shown[hot]; closeQuickSearch(); if (t) (t.kind === 'design' ? openSavedDesign(t.d) : runCommand(t.id)); e.preventDefault(); e.stopPropagation(); }
+    else if (e.key === 'Escape') { closeQuickSearch(); btn.focus(); e.stopPropagation(); }
   };
-  host.onpointerdown = (e) => { if (e.target === host) closeMarking(); };
+  input.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== input && document.activeElement !== btn) closeQuickSearch(); }, 120));
   draw(); input.focus();
 }
 
@@ -2790,14 +2809,26 @@ async function showVersions(pr) {
     };
   });
 }
+async function openSavedDesign(pr) {
+  if (focusOpenDesign(pr.name)) return;
+  if (!newTab({ reuseBlank: true })) return;
+  const dr = await call('GET', '/drafts');
+  const draft = dr.ok && dr.data.find((x) => x.key === pr.name && x.modified > pr.modified + 2000);
+  if (draft && await confirmBox({ title: 'Resume the autosaved draft?', message: `A newer autosaved draft of "${pr.name}" exists (${draft.device || 'another device'}, ${ago(draft.modified)}). Resume it, or open the saved version?`, ok: 'Resume draft' })) {
+    const g = await call('GET', '/drafts/' + encodeURIComponent(pr.name));
+    if (g.ok) { loadProject(typeof g.data === 'string' ? g.data : JSON.stringify(g.data), draft.base ?? 0); doc.folder = pr.folder || ''; doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh(); return; }
+  }
+  openDesign(pr.name);
+}
 async function renderDataPanel() {
   const host = $('#data-panel');
-  host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
-    <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
+  host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-openfile" title="Open a project file from your computer" aria-label="Open a project file from your computer">${uicon('upload', 16)}</button><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
+    <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16, 1.8)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
     <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
     <div class="dp-actions"><button class="btn primary" id="dp-new">New Design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New Folder</button></div>`;
   $('#dp-close').onclick = () => toggleDataPanel(false);
   $('#dp-refresh').onclick = renderDataPanel;
+  $('#dp-openfile').onclick = () => $('#file-proj').click();
   $('#dp-new').onclick = () => { newDoc(); };
   const grid = $('#dp-grid');
   const card = (name, o = {}) => {
@@ -2840,18 +2871,7 @@ async function renderDataPanel() {
         if (showPath && pr.folder) el.querySelector('.dp-date').insertAdjacentHTML('afterend', `<div class="dp-where">${uicon('folder', 13)} ${esc(pr.folder)}</div>`);
         el.draggable = true;
         el.ondragstart = (e) => { e.dataTransfer.setData('text/x-sketchy-design', pr.name); e.dataTransfer.effectAllowed = 'move'; };
-        el.onclick = async (e) => {
-          if (e.target.closest('.dp-rename,.dp-more,.dp-ver')) return;
-          if (focusOpenDesign(pr.name)) return;
-          if (!newTab({ reuseBlank: true })) return;
-          const dr = await call('GET', '/drafts');
-          const draft = dr.ok && dr.data.find((x) => x.key === pr.name && x.modified > pr.modified + 2000);
-          if (draft && await confirmBox({ title: 'Resume the autosaved draft?', message: `A newer autosaved draft of "${pr.name}" exists (${draft.device || 'another device'}, ${ago(draft.modified)}). Resume it, or open the saved version?`, ok: 'Resume draft' })) {
-            const g = await call('GET', '/drafts/' + encodeURIComponent(pr.name));
-            if (g.ok) { loadProject(typeof g.data === 'string' ? g.data : JSON.stringify(g.data), draft.base ?? 0); doc.folder = pr.folder || ''; doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh(); return; }
-          }
-          openDesign(pr.name);
-        };
+        el.onclick = (e) => { if (!e.target.closest('.dp-rename,.dp-more,.dp-ver')) openSavedDesign(pr); };
         el.querySelector('.dp-ver').onclick = (e) => {
           e.stopPropagation(); const b = e.currentTarget.getBoundingClientRect();
           showMenu(b.left, b.bottom + 2, [{ head: `CURRENT: V${pr.ver || 1}` }, { label: 'Version history…', uicon: 'refresh', run: () => showVersions(pr) }]);
@@ -2982,7 +3002,7 @@ function bindKeys() {
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     if (!$('#marking').hidden) { if (e.key === 'Escape') closeMarking(); return; }
-    if (mod && key === 's') { e.preventDefault(); save(false); return; }
+    if (mod && key === 's') { e.preventDefault(); save(e.shiftKey); return; }
     if (mod && key === 'n') { e.preventDefault(); newDoc(); return; }
     if (typing) {
       if (e.key === 'Enter' && !document.activeElement.closest('.modal')) {
@@ -3024,11 +3044,10 @@ function bindKeys() {
 async function boot() {
   const caret = uicon('caret', 7, 0).replace('class="ui"', 'class="ui caret"');
   const set = (id, html) => { $('#' + id).innerHTML = html; };
-  set('btn-home', uicon('home', 18, 1.5)); set('btn-data', uicon('grid', 18, 1.5));
-  set('btn-menu', uicon('file', 18, 1.5) + caret);
+  set('btn-data', uicon('library', 18, 1.5));
   set('btn-undo', uicon('undo', 18, 1.5) + caret); set('btn-redo', uicon('redo', 18, 1.5) + caret);
-  set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('sparkle', 18, 1.4));
-  set('btn-bell', uicon('bell', 18, 1.5));
+  set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('search', 18, 1.8));
+ 
   set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
   set('tl-settings', uicon('gear', 18, 1.5)); set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
   $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" style="position:absolute;inset:0;display:grid;place-items:center;color:#667">Loading CAD kernel…</div>');
@@ -3046,15 +3065,11 @@ async function boot() {
   });
   buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip();
   bindTooltips();
-  $('#btn-menu').dataset.menu = 1;
-  $('#btn-menu').onclick = fileMenu;
   $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
-  $('#btn-home').onclick = () => toggleDataPanel(true);
   $('#btn-data').onclick = () => toggleDataPanel();
   $('#btn-newtab').onclick = () => newDoc();
   renderDocTabs();
   $('#btn-ext').onclick = openQuickSearch;
-  $('#btn-bell').onclick = () => toast('No new notifications.');
   $('#pt-min').onclick = $('#pt-collapse').onclick = () => $('#browser').classList.toggle('min');
   $('#tl-settings').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 150, r.top - 80, [{ label: 'Capture position', dim: true, run: () => toast('Not available yet.') }, { label: 'Collapse all features', dim: true, run: () => toast('Not available yet.') }]); };
   $('#cube-home').onclick = () => vp.home();

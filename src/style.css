@@ -309,8 +309,6 @@ form .modal-foot { padding: 4px 0 0; }
 .fbtn.off:hover { background: none; border-color: transparent; }
 .fbtn.sel-big { width: 46px; height: 46px; }
 .fbtn.sel-big svg { width: 36px; height: 36px; }
-.qs { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); width: 380px; background: var(--c-ffffff); border: 1px solid var(--c-b1b3b9); border-radius: 6px; box-shadow: 0 8px 28px rgba(0,0,0,.3); overflow: hidden; }
-.qs input { width: 100%; border: 0; border-bottom: 1px solid var(--c-d7d8dc); padding: 10px 12px; font: inherit; font-size: var(--fs-lg); outline: none; }
 .qs-list { max-height: 320px; overflow: auto; }
 .qs-list .mi { display: flex; align-items: center; gap: 9px; padding: 3px 12px; min-height: 30px; cursor: pointer; }
 .qs-list .mi.hot, .qs-list .mi:hover { background: var(--c-dcf1e7); }
@@ -866,3 +864,15 @@ table.cfg .cfg-name { font-weight: 600; width: 104px; }
 .ex-chk small { color: var(--muted); }
 
 #doc-dirty[data-state="conflict"]::after, #doc-dirty[data-state="error"]::after { color: var(--danger); }
+
+/* ---- inline command search (top bar, left of the search button) */
+.qs-inline { position: relative; display: flex; align-items: center; }
+.qs-inline input { width: 0; opacity: 0; box-sizing: border-box; height: 26px; border: 1px solid var(--c-b9bcc2); border-radius: 4px; background: var(--c-ffffff); color: var(--text); font: inherit; padding: 0 8px; outline: none; animation: qs-open .16s ease-out forwards; }
+.qs-inline input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+@keyframes qs-open { to { width: 230px; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .qs-inline input { animation-duration: .01s; } }
+.qs-inline .qs-list { position: absolute; top: calc(100% + 6px); right: -34px; width: 340px; max-height: min(60vh, 420px); overflow: auto; background: var(--c-ffffff); border: 1px solid var(--c-b1b3b9); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.18); z-index: 50; }
+.qs-none { padding: 10px 12px; color: var(--muted); }
+.qs-head { padding: 6px 12px 2px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .04em; color: var(--muted); }
+.qs-list .mi small { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qs-list svg.ui { flex: none; margin: 0 1px; color: var(--c-555555); }
