@@ -220,6 +220,8 @@ export async function showAccount(startTab = 'profile') {
         <div id="mc-list" class="mcp-list">Loading…</div>
         <form class="mcp-new" id="mc-form"><input name="name" placeholder="Token name, e.g. Claude Desktop" maxlength="60" aria-label="Token name"><button class="btn primary" type="submit">Create token</button></form>
         <div id="mc-out"></div>
+        <h3 class="mh3" style="margin-top:14px">Set up your assistant</h3>
+        <div id="mc-guide" class="mcp-guide"></div>
       </section>
     </div>`);
   m.el.classList.add('acct-modal');
@@ -251,6 +253,52 @@ export async function showAccount(startTab = 'profile') {
   m.el.querySelector('#mc-copyurl').onclick = (e) => copy(mcpUrl, e.currentTarget);
   const list = m.el.querySelector('#mc-list'), out = m.el.querySelector('#mc-out'), form = m.el.querySelector('#mc-form');
   const when = (t) => (t ? new Date(t).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never');
+  // ---- step-by-step setup guides, one collapsed section per assistant (Claude and ChatGPT first)
+  const guide = m.el.querySelector('#mc-guide');
+  const renderGuide = (tok, open = false) => {
+    const t = tok || 'YOUR_TOKEN', urlTok = `${mcpUrl}/${t}`, secure = location.protocol === 'https:';
+    const code = (txt) => `<div class="mcp-snip"><div class="mcp-snip-h"><span></span><button class="btn sm" type="button" data-copy>Copy</button></div><pre>${esc(txt)}</pre></div>`;
+    const json = (o) => JSON.stringify(o, null, 2);
+    const hdr = { Authorization: `Bearer ${t}` };
+    const note = tok ? '' : '<p class="hint">Create a token above first and these steps fill in your token. Until then <b>YOUR_TOKEN</b> stands in for it.</p>';
+    const needHttps = secure ? '' : `<p class="ac-warn">You are on <b>${esc(location.origin)}</b>, which isn't a public https address. Claude's website, ChatGPT and other web assistants call Sketchy from their own servers, so they can't reach it. Either <a href="https://github.com/thatguy-za/sketchy/blob/main/docs/HTTPS.md" target="_blank" rel="noopener">put Sketchy behind https</a> or use the local option below.</p>`;
+    const sections = [
+      ['Claude', `<p>Works in Claude on the web and in the Claude desktop app.</p>${needHttps}${note}
+        <ol>
+          <li>Create a token above (name it <em>Claude</em>) and copy the <b>connector URL</b>:${code(urlTok)}</li>
+          <li>In Claude, open <b>Settings</b> and choose <b>Connectors</b>.</li>
+          <li>Choose <b>Add custom connector</b>.</li>
+          <li>Set the name to <em>Sketchy</em> and paste the URL into <b>Remote MCP server URL</b>. Leave any advanced or sign-in fields empty, the token in the URL is the sign-in.</li>
+          <li>Click <b>Add</b>.</li>
+          <li>Start a new chat, open the connectors or tools menu (the <b>+</b> or sliders button by the message box) and switch <b>Sketchy</b> on.</li>
+          <li>Ask for something: <em>“Make a 60×30×8 mm bracket with two 10 mm holes and call it Bracket.”</em> Then open <b>Bracket</b> in your library.</li>
+        </ol>
+        <details class="mcp-sub"><summary>Sketchy only on this computer? Use the Claude desktop app with a local config</summary>
+          <ol>
+            <li>Install <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> if you don't have it.</li>
+            <li>In the Claude desktop app open <b>Settings</b>, then <b>Developer</b>, then <b>Edit Config</b>.</li>
+            <li>Merge this into the file that opens, then save it:${code(json({ mcpServers: { sketchy: { command: 'npx', args: ['-y', 'mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${t}`] } } }))}</li>
+            <li>Quit Claude completely and open it again. Sketchy appears in the tools list of a new chat.</li>
+          </ol>
+        </details>`],
+      ['ChatGPT', `<p>Needs a public https address and a ChatGPT plan that offers custom connectors. Menu names change between releases, so look for the closest match.</p>${needHttps}${note}
+        <ol>
+          <li>Create a token above (name it <em>ChatGPT</em>) and copy the <b>connector URL</b>:${code(urlTok)}</li>
+          <li>In ChatGPT open <b>Settings</b>, then <b>Connectors</b> (or <b>Apps</b>), then <b>Advanced settings</b>, and turn on <b>Developer mode</b>.</li>
+          <li>Back in Connectors choose <b>Create</b>.</li>
+          <li>Name it <em>Sketchy</em>, paste the URL as the <b>MCP server URL</b>, and set authentication to <b>No authentication</b> (the token is in the URL).</li>
+          <li>Tick the box confirming you trust the server, then click <b>Create</b>.</li>
+          <li>In a new chat, add <b>Sketchy</b> from the tools menu under the message box, then ask for a part to be built.</li>
+        </ol>`],
+      ['Gemini CLI', `<ol><li>Create a token above.</li><li>Open <code>~/.gemini/settings.json</code> and add:${code(json({ mcpServers: { sketchy: { httpUrl: mcpUrl, headers: hdr } } }))}</li><li>Start <code>gemini</code> and run <code>/mcp</code> to check that <b>sketchy</b> is connected.</li></ol>${note}`],
+      ['Cursor', `<ol><li>Create a token above.</li><li>Open <b>Settings</b>, then <b>MCP</b>, then <b>Add new MCP server</b> (this edits <code>~/.cursor/mcp.json</code>), and add:${code(json({ mcpServers: { sketchy: { url: mcpUrl, headers: hdr } } }))}</li><li>Turn <b>sketchy</b> on in the MCP list, then ask the agent to build a part.</li></ol>${note}`],
+      ['VS Code (GitHub Copilot)', `<ol><li>Create a token above.</li><li>Run <b>MCP: Open User Configuration</b> from the command palette and add:${code(json({ servers: { sketchy: { type: 'http', url: mcpUrl, headers: hdr } } }))}</li><li>Open Copilot chat in <b>Agent</b> mode, check <b>sketchy</b> under the tools button, and ask for a part.</li></ol>${note}`],
+      ['Any other MCP client', `<p>Sketchy speaks standard MCP over HTTP. Give your client either of these:</p><ul><li><b>URL and header:</b> ${code(mcpUrl)}and the header <code>Authorization: Bearer ${esc(t)}</code></li><li><b>URL only</b>, for clients that can't send headers (web assistants must be able to reach it over https):${code(urlTok)}</li></ul>${note}`],
+    ];
+    guide.innerHTML = sections.map(([name, body], i) => `<details class="mcp-llm"${open && i === 0 ? ' open' : ''}><summary>${esc(name)}</summary><div class="mcp-llm-body">${body}</div></details>`).join('');
+    guide.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = (ev) => copy(b.closest('.mcp-snip').querySelector('pre').textContent, ev.currentTarget)));
+  };
+  renderGuide('');
   const loadTokens = async () => {
     const t = await call('GET', '/mcp/tokens');
     if (!t.ok) { list.textContent = t.data?.error || 'Could not load tokens.'; return; }
@@ -274,16 +322,10 @@ export async function showAccount(startTab = 'profile') {
     if (!res.ok) { out.innerHTML = `<div class="form-err">${esc(res.data?.error || 'Could not create the token.')}</div>`; return; }
     form.name.value = '';
     const tok = res.data.token;
-    const snip = {
-      'Claude Code': `claude mcp add --transport http sketchy ${mcpUrl} --header "Authorization: Bearer ${tok}"`,
-      'Claude Desktop': JSON.stringify({ mcpServers: { sketchy: { command: 'npx', args: ['-y', 'mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${tok}`] } } }, null, 2),
-      'ChatGPT / URL only': `${mcpUrl}/${tok}`,
-    };
     out.innerHTML = `<div class="mcp-token"><b>Copy your token now. It won't be shown again.</b><div class="mcp-url"><code>${esc(tok)}</code><button class="btn sm" type="button" data-c>Copy</button></div>
-      ${Object.entries(snip).map(([k, v], i) => `<div class="mcp-snip"><div class="mcp-snip-h"><span>${esc(k)}</span><button class="btn sm" type="button" data-i="${i}">Copy</button></div><pre>${esc(v)}</pre></div>`).join('')}
-      <div class="hint">ChatGPT and other web-based assistants need a publicly reachable <b>https</b> address, so put Sketchy behind a reverse proxy first. Anyone holding the URL-only link can act as you; treat it like a password.</div></div>`;
+      <div class="hint">The setup guide below now has this token filled in. Anyone holding it can act as you; treat it like a password.</div></div>`;
+    renderGuide(tok, true);
     out.querySelector('[data-c]').onclick = (ev) => copy(tok, ev.currentTarget);
-    out.querySelectorAll('[data-i]').forEach((b) => (b.onclick = (ev) => copy(Object.values(snip)[+b.dataset.i], ev.currentTarget)));
     loadTokens();
   };
   loadTokens();

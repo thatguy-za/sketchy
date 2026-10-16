@@ -2,6 +2,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import { Line2 } from 'three/examples/jsm/lines/Line2.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PLANES, planeFrame } from './kernel.js';
 import { planarFace } from './edges.js';
@@ -90,7 +93,25 @@ export class Viewport {
 
   // ---- static scene furniture ----
   /** Rebuild the ground grid with tones that suit the theme (subtle lines on a dark canvas). */
+  /** Thick lines (WebGL's own lines are always one pixel wide, too thin to follow a shape you are drawing). */
+  trackFat(m) {
+    if (!(this.fatMats ||= new Set()).has(m)) {
+      m.alphaToCoverage = true; // smooth (multisampled) edges instead of stair-steps
+      if (m.depthTest) { m.polygonOffset = true; m.polygonOffsetFactor = -4; m.polygonOffsetUnits = -4; } // sit just in front of a face the sketch lies on, so the line doesn't flicker or break into dashes
+      this.fatMats.add(m);
+    }
+    return m;
+  }
+  fatMat(color, width = 2.5, depthTest = true) { return this.trackFat(new LineMaterial({ color, linewidth: width, depthTest })); }
+  fatLine(pts, mat, closed = false) {
+    const a = []; for (const p of pts) a.push(p.x, p.y, p.z);
+    if (closed && pts.length) a.push(pts[0].x, pts[0].y, pts[0].z);
+    const g = new LineGeometry(); g.setPositions(a);
+    const l = new Line2(g, this.trackFat(mat)); l.computeLineDistances();
+    return l;
+  }
   applyTheme(dark) {
+    this.dark = dark; // sketch previews read this to pick a line colour that shows on the background
     const vis = this.grid?.visible ?? true;
     if (this.grid) { this.scene.remove(this.grid); this.grid.traverse((o) => o.geometry?.dispose()); }
     this.buildGrid(dark); this.grid.visible = vis;
@@ -892,6 +913,7 @@ export class Viewport {
     if (this.opts.ortho) this.updateOrtho();
     this.updateCube();
     this.onFrame?.();
+    this.fatMats?.forEach((m) => m.resolution.set(this.canvas.clientWidth, this.canvas.clientHeight));
     if (this.layout === 'single') { this.renderer.setScissorTest(false); this.renderer.setViewport(0, 0, this.canvas.clientWidth, this.canvas.clientHeight); this.renderer.render(this.scene, this.camera); return; }
     const H = this.canvas.clientHeight, rs = this.paneRects(), keepClear = this.renderer.autoClear;
     this.renderer.setScissorTest(false); this.renderer.autoClear = true; this.renderer.clear();
@@ -900,6 +922,7 @@ export class Viewport {
       if (!pn) return;
       const cam = i === this.active ? this.camera : pn.camera, q = rs[i];
       if (i !== this.active) { pn.controls.update(); if (this.opts.ortho) { const d = cam.position.distanceTo(pn.controls.target), hh = Math.tan((pn.persp.fov * Math.PI) / 360) * d; Object.assign(pn.ortho, { left: -hh * pn.persp.aspect, right: hh * pn.persp.aspect, top: hh, bottom: -hh }); pn.ortho.updateProjectionMatrix(); } }
+      this.fatMats?.forEach((m) => m.resolution.set(q.w, q.h));
       this.renderer.setViewport(q.x, H - q.y - q.h, q.w, q.h); this.renderer.setScissor(q.x, H - q.y - q.h, q.w, q.h);
       this.renderer.render(this.scene, cam);
     });

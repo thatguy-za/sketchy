@@ -892,3 +892,18 @@ table.cfg .cfg-name { font-weight: 600; width: 104px; }
 .ad-lockrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; background: var(--bg-warning, #fff4e5); border-radius: 4px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 :root[data-theme="dark"] .btn.danger, :root[data-theme="dark"] .btn.sm.danger { color: #ff9a92; }
+
+/* ---- AI assistants: one collapsed section per assistant */
+.mcp-guide { display: flex; flex-direction: column; gap: 6px; }
+.mcp-llm { border: 1px solid var(--line); border-radius: 6px; background: var(--c-ffffff); }
+.mcp-llm > summary, .mcp-sub > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-weight: 600; }
+.mcp-llm > summary::-webkit-details-marker, .mcp-sub > summary::-webkit-details-marker { display: none; }
+.mcp-llm > summary::before, .mcp-sub > summary::before { content: ""; width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform .12s; flex: none; }
+.mcp-llm[open] > summary::before, .mcp-sub[open] > summary::before { transform: rotate(45deg); }
+.mcp-llm > summary:focus-visible, .mcp-sub > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
+.mcp-llm-body { padding: 2px 14px 12px; line-height: 1.5; }
+.mcp-llm-body ol, .mcp-llm-body ul { margin: 6px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.mcp-llm-body p { margin: 6px 0; }
+.mcp-sub { margin-top: 8px; border-top: 1px solid var(--line); }
+.mcp-sub > summary { padding-left: 0; font-weight: 500; }
+.mcp-llm-body .mcp-snip { margin: 6px 0; }

@@ -1,5 +1,6 @@
 import './style.css';
 import * as THREE from 'three';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
 import { initKernel, rebuild, resolvePlanes, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
@@ -1477,9 +1478,9 @@ function buildSketchGrid(step = SU?.stepNow() ?? 1) {
   const p = curSketch().params;
   const g = new THREE.Group();
   const mkGrid = (div, c1, c2, op) => { const gr = new THREE.GridHelper(400 * step, div, c1, c2); gr.rotation.x = Math.PI / 2; gr.material.transparent = true; gr.material.opacity = op; gr.renderOrder = -1; return gr; }; // depth-tested: solids hide the grid behind them instead of having grid lines drawn across their faces
-  // quiet lines so the drawing stays easy to see: a faint fine grid and slightly stronger lines every fifth cell
-  const dark = getTheme() === 'dark';
-  g.add(dark ? mkGrid(400, 0x272d34, 0x272d34, 0.9) : mkGrid(400, 0xeef0f3, 0xeef0f3, 0.75), dark ? mkGrid(80, 0x373e47, 0x373e47, 1) : mkGrid(80, 0xe1e5ea, 0xe1e5ea, 0.8));
+  // quiet lines so the drawing stays easy to see. A mid grey at low opacity reads as a faint line on a dark background, on white and
+  // on the pale face of a body when you sketch on it (a fixed light or dark colour would look heavy on one of them).
+  g.add(mkGrid(400, 0x8a93a0, 0x8a93a0, 0.2), mkGrid(80, 0x8a93a0, 0x8a93a0, 0.36));
   g.matrixAutoUpdate = false;
   g.matrix.copy(vp.planeMatrix(p)).multiply(new THREE.Matrix4().makeTranslation(0, 0, 0.03)); // a hair above the plane so a face lying in it doesn't flicker
   g.visible = sketch.gridVisible !== false;
@@ -1629,10 +1630,11 @@ function cancelSketch() {
 function sketchPointer(ev, kind) { SU.pointer(ev, kind); }
 function closePath() { SU.finishPath(); }
 
-const sketchMat = new THREE.LineBasicMaterial({ color: 0x2b6cb0 });
-const sketchMatActive = new THREE.LineBasicMaterial({ color: 0x0b6bcb });
-const sketchMatSel = new THREE.LineBasicMaterial({ color: 0xf08c00 });
-const sketchMatHover = new THREE.LineBasicMaterial({ color: 0x00a2ff });
+const fatMat = (color, width) => new LineMaterial({ color, linewidth: width });
+const sketchMat = fatMat(0x2b6cb0, 2.8);         // a finished sketch
+const sketchMatActive = fatMat(0x0b6bcb, 3.2);   // the sketch you are editing
+const sketchMatSel = fatMat(0xf08c00, 3.6);
+const sketchMatHover = fatMat(0x00a2ff, 3.6);
 function drawSketches() {
   if (!vp) return;
   vp.sketchGroup.clear();
@@ -1644,9 +1646,10 @@ function drawSketches() {
     rp.shapes.forEach((s, k) => {
       const poly = shapeToPolygon(s);
       if (poly.length < 2) return;
-      const pts = poly.map((q) => vp.planeTo3D(rp, q));
+      const nrm = planeFrame(rp).n; // lift the lines a hair off the plane so a face lying in it can't break them up
+      const pts = poly.map((q) => vp.planeTo3D(rp, q).addScaledVector(new THREE.Vector3(...nrm), 0.06));
       const m = active ? (k === sketch.sel ? sketchMatSel : k === sketch.hover ? sketchMatHover : sketchMatActive) : sketchMat;
-      vp.sketchGroup.add(new (s.open ? THREE.Line : THREE.LineLoop)(new THREE.BufferGeometry().setFromPoints(pts), m));
+      vp.sketchGroup.add(vp.fatLine(pts, m, !s.open));
     });
   });
 }
@@ -2207,7 +2210,8 @@ function focusOpenDesign(name) {
   if (!t) return false;
   activateTab(t.id); return true;
 }
-const rememberLast = (name) => { try { localStorage.setItem('sketchy.last', name); } catch { /* storage unavailable */ } };
+const lastKey = () => 'sketchy.last.' + (acct.user || '');  // per person, so signing in as someone else doesn't look for the wrong design
+const rememberLast = (name) => { try { localStorage.setItem(lastKey(), name); } catch { /* storage unavailable */ } };
 let namingNow = false;
 /** Ask for a name and folder, make sure the name is free, and return { name, folder } (or null if cancelled). */
 async function askNewDesign(title, okLabel) {
@@ -3061,7 +3065,7 @@ async function boot() {
   set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('search', 18, 1.8));
  
   set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
-  set('tl-settings', uicon('gear', 18, 1.5)); set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
+  set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
   $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" style="position:absolute;inset:0;display:grid;place-items:center;color:#667">Loading CAD kernel…</div>');
   await initKernel({ locateFile: () => wasmUrl });
   vp = new Viewport($('#gl'), $('#cube'));
@@ -3084,7 +3088,6 @@ async function boot() {
   renderDocTabs();
   $('#btn-ext').onclick = openQuickSearch;
   $('#pt-min').onclick = $('#pt-collapse').onclick = () => $('#browser').classList.toggle('min');
-  $('#tl-settings').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 150, r.top - 80, [{ label: 'Capture position', dim: true, run: () => toast('Not available yet.') }, { label: 'Collapse all features', dim: true, run: () => toast('Not available yet.') }]); };
   $('#cube-home').onclick = () => vp.home(true);
   document.querySelectorAll('.vc-arrow').forEach((b) => { const [ax, d] = b.dataset.t.split(','); b.onclick = () => vp.turnView(ax, +d); });
   { // roll arrows: two outlined arcs around the cube's top-right corner
@@ -3110,7 +3113,7 @@ async function boot() {
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
   $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.stl$/i.test(f.name)) importSTL(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
   initA11y();
-  const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x7fb6f0 : 0x2b6cb0); sketchMatActive.color.setHex(d ? 0x5aa7ee : 0x0b6bcb); };
+  const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x3d94ff : 0x1f5fa8); sketchMatActive.color.setHex(d ? 0x2f8cff : 0x0b6bcb); };
   paint(getTheme()); onTheme(paint);
   await refreshAccount();
   await ensureSignedIn(); // server mode: sign-up on first visit, login afterwards
@@ -3132,8 +3135,12 @@ async function openLastOrCreate() {
     try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length) { loadProject(a); toast('Restored your last session'); } } } catch { /* ignore */ }
     return;
   }
-  let last = ''; try { last = localStorage.getItem('sketchy.last') || ''; } catch { /* storage unavailable */ }
+  let last = ''; try { last = localStorage.getItem(lastKey()) || ''; } catch { /* storage unavailable */ }
   if (last && !(await call('GET', '/projects/' + encodeURIComponent(last) + '/meta')).ok) last = ''; // deleted or renamed since
+  if (!last) { // a new browser or device: pick up where you left off, i.e. your most recently changed design
+    const all = await call('GET', '/projects');
+    if (all.ok && all.data.length) last = [...all.data].sort((a, b) => b.modified - a.modified)[0].name;
+  }
   if (last) {
     await openDesign(last, true);
     if (doc.name === last && doc.rev) {

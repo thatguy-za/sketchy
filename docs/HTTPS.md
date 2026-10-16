@@ -4,7 +4,7 @@ You only need this if you want a **web-based assistant such as ChatGPT** to use 
 
 Not needed for:
 * Using Sketchy yourself in a browser on your own network.
-* Claude Code or Claude Desktop running on the same machine or network. They can use `http://localhost:8080/mcp`.
+* The Claude desktop app running on the same machine. It can use `http://localhost:8080/mcp` through the local config option in the app's setup guide.
 
 Sketchy itself only speaks plain HTTP, so you put a small proxy in front of it. Pick one of the two options below.
 

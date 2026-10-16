@@ -3,6 +3,7 @@
 //
 // `app` provides: vp, THREE, sketch() (state, may be null), params() (current sketch params),
 // setShapes(shapes), renderPanel(), redrawSketch(), evalExpr(text) -> number | throws.
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { shapeToPolygon, offsetPolygon } from './kernel.js';
 import { setDim, getDim } from './sketchdims.js';
 import { keyPoints, segOf, conAnchor, CON_GLYPH, CON_LABEL } from './sketchcons.js';
@@ -190,11 +191,18 @@ export function createSketchUI(app) {
 
   // ------------------------------------------------------------ overlay drawing
   const mat = (c, o = 1) => new THREE.LineBasicMaterial({ color: c, transparent: o < 1, opacity: o, depthTest: false });
-  const line3 = (pts, color, closed = false, dashed = false) => {
-    const g = new THREE.BufferGeometry().setFromPoints(pts.map((q) => vp.planeTo3D(P(), q)));
-    const m = dashed ? new THREE.LineDashedMaterial({ color, dashSize: 1.2, gapSize: 0.8, depthTest: false }) : mat(color);
-    const l = new (closed ? THREE.LineLoop : THREE.Line)(g, m);
-    if (dashed) l.computeLineDistances();
+  const line3 = (pts, color, closed = false, dashed = false, width = 3) => {
+    const p3 = pts.map((q) => vp.planeTo3D(P(), q));
+    let l;
+    if (dashed) { // guides stay thin and dashed
+      l = new (closed ? THREE.LineLoop : THREE.Line)(new THREE.BufferGeometry().setFromPoints(p3), new THREE.LineDashedMaterial({ color, dashSize: 1.2, gapSize: 0.8, depthTest: false }));
+      l.computeLineDistances();
+    } else { // thick, drawn over everything, with a soft outline so it shows on a pale face and on the dark background
+      const g = new THREE.Group();
+      const edge = vp.fatLine(p3, new LineMaterial({ color: vp.dark ? 0x0a0d11 : 0xffffff, linewidth: width + 2, depthTest: false }), closed); edge.renderOrder = 19;
+      const core = vp.fatLine(p3, new LineMaterial({ color, linewidth: width, depthTest: false }), closed); core.renderOrder = 20;
+      g.add(edge, core); return g;
+    }
     l.renderOrder = 20;
     return l;
   };
