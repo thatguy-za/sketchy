@@ -1,19 +1,28 @@
 # Multi-arch (linux/amd64, linux/arm64, e.g. Raspberry Pi 4/5 and Apple silicon).
 # The app is plain JS + WASM (no native modules), so one Dockerfile serves every architecture.
 # Plain `docker build` builds for the machine you're on; use build-multiarch.sh for both.
-FROM node:22-alpine AS build
+# BuildKit fills in BUILDPLATFORM (the machine doing the build); the default only matters for the old non-BuildKit builder
+ARG BUILDPLATFORM
+FROM --platform=${BUILDPLATFORM:-linux/amd64} node:22-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
 RUN npm run build && mkdir -p /data-empty
 
+# The runtime dependencies are pure JavaScript and WebAssembly, so they are installed once on the machine doing the build (not
+# emulated for each target architecture). Running node under QEMU emulation crashes now and then ("Illegal instruction").
+FROM --platform=${BUILDPLATFORM:-linux/amd64} node:22-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+# runtime needs only the modelling kernel (manifold-3d + three's triangulation) for the MCP server; the other browser libraries are bundled into dist
+RUN npm ci --omit=dev && npm cache clean --force
+
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production DATA_DIR=/data PORT=8080
 COPY package*.json ./
-# runtime needs only the modelling kernel (manifold-3d + three's triangulation) for the MCP server; the other browser libraries are bundled into dist
-RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server.js mcp.js ./
 RUN apk add --no-cache su-exec
