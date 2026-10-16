@@ -603,6 +603,7 @@ http.createServer(async (req, res) => {
     if (!body) { res.statusCode = 404; return res.end('not found'); }
     res.setHeader('content-type', types[path.extname(p)] || 'application/octet-stream');
     if (p.includes('assets')) res.setHeader('cache-control', 'public, max-age=31536000, immutable');
+    else res.setHeader('cache-control', 'no-cache'); // the page itself is re-checked on every visit, so an upgrade shows up straight away
     res.end(body);
   } catch (e) { send(res, e.code === 413 ? 413 : 500, { error: e.code === 413 ? 'File too large' : 'Server error' }); }
 }).listen(port, () => console.log(`Sketchy on :${port}, data in ${dataDir}, registration ${settings.allowRegistration ? 'open' : 'closed'}`));
