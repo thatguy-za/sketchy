@@ -52,9 +52,9 @@ export const FEATURES = {
   },
   extrude: {
     label: 'Extrude', icon: 'extrude', type: 'extrude', manip: { key: 'distance', sketch: 'sketch', show: (p) => p.extent === 'distance' },
-    make: (ctx) => ({ sketch: ctx.lastSketch, profiles: null, extent: 'distance', distance: LAST.extrude ?? 10, flip: false, symmetric: false, op: ctx.lastSketchOnFace ? 'auto' : ctx.hasBodies ? 'join' : 'new', target: '', toBody: '', taper: 0, twist: 0, scaleTop: 1 }),
+    make: (ctx) => ({ sketch: ctx.lastSketch, profiles: null, extent: 'distance', distance: LAST.extrude ?? 10, thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, op: ctx.lastSketchOnFace ? 'auto' : ctx.hasBodies ? 'join' : 'new', target: '', toBody: '', taper: 0, twist: 0, scaleTop: 1 }),
     fields: [
-      { key: 'type', label: 'Type', type: 'soltype' },
+      { key: 'thin', label: 'Type', type: 'soltype' },
       { key: 'sketch', label: 'Sketch', type: 'sketch' },
       { key: 'profiles', label: 'Profiles', type: 'profiles' },
       { key: 'start', label: 'Start', type: 'static', text: 'Profile Plane', icon: 'start' },
@@ -63,7 +63,9 @@ export const FEATURES = {
       { key: 'distance', label: 'Distance', type: 'num', show: (p) => p.extent === 'distance' },
       { key: 'toBody', label: 'To object', type: 'body', show: (p) => p.extent === 'object' },
       { key: 'flip', label: 'Flip direction', type: 'bool', show: (p) => p.extent !== 'distance' },
-      { key: 'taper', label: 'Taper Angle', type: 'num', unit: 'deg', step: 0.5, show: (p) => p.extent === 'distance' },
+      { key: 'wall', label: 'Wall thickness', type: 'num', min: 0.01, step: 0.5, show: (p) => p.thin },
+      { key: 'wallSide', label: 'Wall lies', type: 'select', options: [['inside', 'Inside the profile'], ['outside', 'Outside the profile'], ['center', 'Centred on the outline']], show: (p) => p.thin },
+      { key: 'taper', label: 'Taper Angle', type: 'num', unit: 'deg', step: 0.5, show: (p) => p.extent === 'distance' && !p.thin },
       { key: 'twist', label: 'Twist (°)', type: 'num', adv: true, show: (p) => !p.taper },
       { key: 'scaleTop', label: 'Top scale', type: 'num', adv: true, min: 0.01, step: 0.05, show: (p) => !p.taper },
       { key: 'op', label: 'Operation', type: 'ops', options: [...OP_OPTS, ['auto', 'Auto (cut or join)']] },
@@ -127,17 +129,22 @@ export const FEATURES = {
   },
   fillet: {
     label: 'Fillet', icon: 'fillet', type: 'fillet', pickEdges: true, manip: { key: 'radius', edge: true },
-    make: () => ({ edges: [], radius: 2 }),
+    make: () => ({ edges: [], radius: 2, variable: false, radiusEnd: 4, reverse: false, tangent: false }),
     fields: [
       { key: 'edges', label: 'Edges', type: 'edges' },
+      { key: 'tangent', label: 'Whole loop (connected edges)', type: 'bool' },
       { key: 'radius', label: 'Radius', type: 'num', min: 0.01, step: 0.5 },
+      { key: 'variable', label: 'Variable radius', type: 'bool' },
+      { key: 'radiusEnd', label: 'End radius', type: 'num', min: 0.01, step: 0.5, show: (p) => p.variable },
+      { key: 'reverse', label: 'Swap start and end', type: 'bool', show: (p) => p.variable },
     ],
   },
   chamfer: {
     label: 'Chamfer', icon: 'chamfer', type: 'chamfer', pickEdges: true, manip: { key: 'distance', edge: true },
-    make: () => ({ edges: [], distance: 2 }),
+    make: () => ({ edges: [], distance: 2, tangent: false }),
     fields: [
       { key: 'edges', label: 'Edges', type: 'edges' },
+      { key: 'tangent', label: 'Whole loop (connected edges)', type: 'bool' },
       { key: 'distance', label: 'Distance', type: 'num', min: 0.01, step: 0.5 },
     ],
   },
@@ -200,6 +207,53 @@ export const FEATURES = {
       { key: 'surface', label: 'Surface', type: 'surface' },
       { key: 'thickness', label: 'Thickness', type: 'num', min: 0.01, step: 0.5 },
       { key: 'both', label: 'Both sides', type: 'bool' },
+    ],
+  },
+  thickenface: {
+    label: 'Thicken Face', icon: 'shell', type: 'thickenface', needsBody: true,
+    make: (ctx) => ({ body: ctx.selected || '', faces: [], thickness: 2, dir: 'out' }),
+    fields: [
+      { key: 'body', label: 'Body', type: 'body' },
+      { key: 'faces', label: 'Flat faces', type: 'faces' },
+      { key: 'thickness', label: 'Thickness', type: 'num', min: 0.01, step: 0.5 },
+      { key: 'dir', label: 'Direction', type: 'select', options: [['out', 'Outward (adds material)'], ['in', 'Inward (removes material)']] },
+    ],
+  },
+  replaceface: {
+    label: 'Replace Face', icon: 'presspull', type: 'replaceface', needsBody: true,
+    make: (ctx) => ({ body: ctx.selected || '', face: null, plane: 'XY', offset: 0 }),
+    fields: [
+      { key: 'body', label: 'Body', type: 'body' },
+      { key: 'face', label: 'Face to replace', type: 'face' },
+      { key: 'plane', label: 'New face lies on', type: 'planeref' },
+      { key: 'offset', label: 'Plane offset', type: 'num', step: 1 },
+    ],
+  },
+  boundaryfill: {
+    label: 'Boundary Fill', icon: 'combine', type: 'boundaryfill',
+    make: (ctx) => ({ tools: ctx.selected ? [ctx.selected] : [], region: 'voids', keepTools: true }),
+    fields: [
+      { key: 'tools', label: 'Tool bodies', type: 'bodies' },
+      { key: 'region', label: 'Fill', type: 'select', options: [['voids', 'Space enclosed by the tools'], ['common', 'Where all the tools overlap']] },
+      { key: 'keepTools', label: 'Keep tool bodies', type: 'bool' },
+    ],
+  },
+  strim: {
+    label: 'Trim Surface', icon: 'split', type: 'strim',
+    make: (ctx) => ({ surface: (ctx.surfaces || []).at(-1) || '', plane: 'XY', offset: 0, keep: 'above' }),
+    fields: [
+      { key: 'surface', label: 'Surface', type: 'surface' },
+      { key: 'plane', label: 'Trim at plane', type: 'planeref' },
+      { key: 'offset', label: 'Plane offset', type: 'num', step: 1 },
+      { key: 'keep', label: 'Keep', type: 'select', options: [['above', 'Side the plane normal points to'], ['below', 'The other side']] },
+    ],
+  },
+  sextend: {
+    label: 'Extend Surface', icon: 'scale', type: 'sextend',
+    make: (ctx) => ({ surface: (ctx.surfaces || []).at(-1) || '', distance: 5 }),
+    fields: [
+      { key: 'surface', label: 'Surface', type: 'surface' },
+      { key: 'distance', label: 'Distance', type: 'num', min: 0.01, step: 1 },
     ],
   },
   sweep: {
@@ -317,7 +371,7 @@ export const FEATURES = {
       { key: 'body', label: 'Body', type: 'body' },
       { key: 'side', label: 'Direction', type: 'select', options: [['inside', 'Inside'], ['outside', 'Outside'], ['both', 'Both (centred)']] },
       { key: 'thickness', label: 'Wall thickness', type: 'num', min: 0.05, step: 0.5 },
-      { key: 'open', label: 'Open faces', type: 'faces' },
+      { key: 'open', label: 'Open faces', type: 'faces', note: 'Click flat faces to open (optional). Click again to deselect.' },
     ],
   },
   presspull: {

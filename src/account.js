@@ -1,4 +1,5 @@
 // Account UI (sign in / register) and the "My Designs" browser. Talks to the /api in server.js.
+import { confirmBox, alertBox } from './files.js';
 import { icon } from './icons.js';
 import { uicon } from './ficons.js';
 
@@ -17,7 +18,7 @@ export async function call(method, path, body, headers = {}) {
     const r = await fetch('/api' + path, { method, headers: { 'x-sketchy': '1', 'x-device-label': deviceLabel(), ...headers }, body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body) });
     const text = await r.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
-    return { ok: r.ok, status: r.status, data, rev: +r.headers.get('x-rev') || 0 };
+    return { ok: r.ok, status: r.status, data, rev: +r.headers.get('x-rev') || 0, seq: +r.headers.get('x-seq') || 0 };
   } catch { return { ok: false, status: 0, data: { error: 'Cannot reach the server.' } }; }
 }
 
@@ -41,7 +42,7 @@ function renderAccountButton() {
   b.innerHTML = acct.user ? esc(acct.user.slice(0, 1).toUpperCase()) : uicon('user', 15, 1.8);
   b.title = acct.user ? `Signed in as ${acct.user}` : acct.server ? 'Sign in or create an account to save designs to your profile' : 'Accounts need the Sketchy server (docker compose up)';
   b.onclick = (e) => {
-    if (!acct.server) return alert('Sign-in is available when Sketchy runs with its server (docker compose up).');
+    if (!acct.server) return alertBox({ title: 'Sketchy server not reachable', message: 'Accounts and saved designs need the Sketchy server. Start it with `docker compose up`, or `npm run dev` when developing.' });
     acct.user ? accountMenu(e.currentTarget) : showAuth();
   };
 }
@@ -135,12 +136,12 @@ export async function showDesigns({ onOpen, current }) {
       row.innerHTML = `${icon('box', 18)}<div class="dn"><b>${esc(p.name)}</b><small>${new Date(p.modified).toLocaleString()} · ${(p.size / 1024).toFixed(p.size > 1e5 ? 0 : 1)} KB</small></div><button class="btn" data-o>Open</button><button class="icon-btn danger" data-d title="Delete">${icon('remove', 16)}</button>`;
       row.querySelector('[data-o]').onclick = async () => {
         const d = await call('GET', '/projects/' + encodeURIComponent(p.name));
-        if (!d.ok) return alert(d.data?.error || 'Could not open design.');
+        if (!d.ok) return alertBox({ title: 'Could not open design', message: d.data?.error || 'The design could not be opened.' });
         m.close();
         onOpen(typeof d.data === 'string' ? d.data : JSON.stringify(d.data), p.name);
       };
       row.querySelector('[data-d]').onclick = async () => {
-        if (!confirm(`Delete "${p.name}" permanently?`)) return;
+        if (!(await confirmBox({ title: 'Delete design', message: `Delete "${p.name}" permanently?`, ok: 'Delete', danger: true }))) return;
         await call('DELETE', '/projects/' + encodeURIComponent(p.name));
         load();
       };
@@ -261,7 +262,7 @@ export async function showAccount(startTab = 'profile') {
       row.className = 'mcp-row';
       row.innerHTML = `<span class="mcp-ico">${uicon('key', 16, 1.6)}</span><div class="mcp-info"><b>${esc(k.name)}</b><span>Created ${when(k.created)} · Last used ${when(k.lastUsed)}</span></div><button class="btn sm danger" type="button">Revoke</button>`;
       row.querySelector('button').onclick = async () => {
-        if (!confirm(`Revoke "${k.name}"? Assistants using it will lose access immediately.`)) return;
+        if (!(await confirmBox({ title: 'Revoke token', message: `Revoke "${k.name}"? Assistants using it will lose access immediately.`, ok: 'Revoke', danger: true }))) return;
         await call('DELETE', '/mcp/tokens/' + encodeURIComponent(k.id)); out.innerHTML = ''; loadTokens();
       };
       list.appendChild(row);
@@ -308,7 +309,7 @@ export function showChangePassword() {
     const r = await call('POST', '/password', { current: form.current.value, next: form.next.value });
     if (!r.ok) { err.textContent = r.data?.error || 'Could not change the password.'; return; }
     m.close();
-    alert('Password changed.');
+    alertBox({ title: 'Password changed', message: 'Your password has been updated.' });
   };
 }
 
@@ -334,13 +335,13 @@ export async function showAdmin() {
       row.innerHTML = `<span><b>${esc(u.name)}</b>${u.admin ? ' <em class="adm">admin</em>' : ''}${u.name === acct.user ? ' <em>(you)</em>' : ''}</span><span>${u.designs}</span><span>${fmtBytes(u.bytes)}</span><span>${fmtDate(u.lastLogin)}</span>
         <span class="ad-act"><button class="btn sm" data-a="pw">Reset password</button><button class="btn sm" data-a="adm">${u.admin ? 'Remove admin' : 'Make admin'}</button>${u.name === acct.user ? '' : '<button class="btn sm danger" data-a="del">Delete</button>'}</span>`;
       row.querySelector('[data-a=pw]').onclick = async () => {
-        if (!confirm(`Reset the password for ${u.name}? They will be signed out everywhere.`)) return;
+        if (!(await confirmBox({ title: 'Reset password', message: `Reset the password for ${u.name}? They will be signed out everywhere.`, ok: 'Reset' }))) return;
         const pw = await call('POST', `/admin/users/${encodeURIComponent(u.name)}/password`, {});
         msg.innerHTML = pw.ok ? `Temporary password for <b>${esc(u.name)}</b>: <code>${esc(pw.data.password)}</code> — shown once; ask them to change it after signing in.` : esc(pw.data?.error || 'Failed');
       };
       row.querySelector('[data-a=adm]').onclick = async () => { const a = await call('POST', `/admin/users/${encodeURIComponent(u.name)}/admin`, { admin: !u.admin }); if (!a.ok) msg.textContent = a.data?.error || 'Failed'; await load(); await refreshAccount(); };
       row.querySelector('[data-a=del]')?.addEventListener('click', async () => {
-        if (!confirm(`Delete ${u.name} and all of their saved designs? This cannot be undone.`)) return;
+        if (!(await confirmBox({ title: 'Delete user', message: `Delete ${u.name} and all of their saved designs? This cannot be undone.`, ok: 'Delete', danger: true }))) return;
         const d = await call('DELETE', `/admin/users/${encodeURIComponent(u.name)}`);
         msg.textContent = d.ok ? `Deleted ${u.name}.` : d.data?.error || 'Failed';
         await load();

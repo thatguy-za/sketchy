@@ -226,17 +226,50 @@ function manifoldFromIndexed(verts, tris, t) {
 }
 
 // Loft the edge profile along an edge chain -> { m, convex }.
-function edgeCutter(ch, kind, size, t) {
+/**
+ * Chains connected end to end with `ch` (an edge loop): follows a shared end point as long as exactly two chains meet there
+ * and the turn is under maxTurnDeg. Edge picking already follows smooth curves; this carries on across sharper corners.
+ */
+function connectedChains(chains, ch, maxTurnDeg = 100) {
+  const out = [ch], seen = new Set([ch]), cosTol = Math.cos((maxTurnDeg * Math.PI) / 180);
+  const ends = (c) => { const n = c.pts.length; return [{ p: c.pts[0], d: v3norm(vsub(c.pts[1], c.pts[0])) }, { p: c.pts[n - 1], d: v3norm(vsub(c.pts[n - 2], c.pts[n - 1])) }]; };
+  const near = (a, b) => Math.hypot(...vsub(a, b)) < 1e-3;
+  const faces = (c) => [c.frames[0].n1, c.frames[0].n2];
+  // the loop runs around one face of the picked edge: the more upward-facing of its two
+  const [fa, fb] = faces(ch), loopFace = fb[2] > fa[2] + 1e-6 ? fb : fa;
+  const sharesFace = (a, b) => faces(b).some((y) => vdot(loopFace, y) > 0.999);
+  for (let k = 0; k < out.length; k++) {
+    if (out[k].closed) continue;
+    for (const e of ends(out[k])) {
+      const cand = chains.filter((c) => c !== out[k] && !c.closed && sharesFace(out[k], c) && ends(c).some((x) => near(x.p, e.p)));
+      if (cand.length !== 1) continue; // nothing to follow, or ambiguous
+      const d = cand[0];
+      if (seen.has(d)) continue;
+      for (const f of ends(d)) if (near(e.p, f.p) && vdot(e.d, f.d) < -cosTol) { seen.add(d); out.push(d); break; }
+    }
+  }
+  return out;
+}
+
+/** size: a number, or {r0, r1} to vary linearly along the chain (open chains only). */
+function edgeCutter(ch, kind, sizeIn, t) {
   const steps = kind === 'fillet' ? 12 : 0;
+  const varying = typeof sizeIn === 'object' && !ch.closed;
+  const r0 = varying ? sizeIn.r0 : typeof sizeIn === 'object' ? sizeIn.r0 : sizeIn, r1 = varying ? sizeIn.r1 : r0;
+  const size = Math.max(r0, r1);
   const delta = Math.max(0.05 * size, 0.01);
   let pts = ch.pts, frames = ch.frames;
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(...vsub(pts[i], pts[i - 1])));
+  let sizes = cum.map((c) => r0 + (r1 - r0) * (cum.at(-1) ? c / cum.at(-1) : 0));
   if (!ch.closed) {
+    sizes = [sizes[0], ...sizes, sizes.at(-1)];
     const d0 = v3norm(vsub(pts[1], pts[0])), dn = v3norm(vsub(pts[pts.length - 1], pts[pts.length - 2]));
     pts = [vsub(pts[0], vscl(d0, delta)), ...pts, vadd(pts[pts.length - 1], vscl(dn, delta))];
     frames = [frames[0], ...frames, frames[frames.length - 1]];
   }
   const convex = vdot(frames[0].n1, frames[0].u2) < 0;
-  const rings = pts.map((p, i) => edgeRing(p, frames[i], kind, size, steps).ring);
+  const rings = pts.map((p, i) => edgeRing(p, frames[i], kind, sizes[i], steps).ring);
   const m = rings[0].length, fan = m - 2;
   const verts = rings.flat(2);
   const tris = [];
@@ -408,6 +441,92 @@ function thickenSurface(surf, thickness, both, t) {
   return m;
 }
 
+/** Outline loops (3D points) of a region of triangles, from the edges used by exactly one triangle of the region. */
+function faceLoops(V, T, triList) {
+  const key = (i) => `${Math.round(V[i * 3] * 1e3)},${Math.round(V[i * 3 + 1] * 1e3)},${Math.round(V[i * 3 + 2] * 1e3)}`;
+  const ids = new Map(), pos = [];
+  const vid = (i) => { const k = key(i); let id = ids.get(k); if (id === undefined) { id = pos.length; ids.set(k, id); pos.push([V[i * 3], V[i * 3 + 1], V[i * 3 + 2]]); } return id; };
+  const dir = new Set();
+  for (const ti of triList) { const a = vid(T[ti * 3]), b = vid(T[ti * 3 + 1]), c = vid(T[ti * 3 + 2]); dir.add(`${a}>${b}`); dir.add(`${b}>${c}`); dir.add(`${c}>${a}`); }
+  const next = new Map();
+  for (const e of dir) { const [a, b] = e.split('>').map(Number); if (!dir.has(`${b}>${a}`)) (next.get(a) || next.set(a, []).get(a)).push(b); }
+  const loops = [], used = new Set();
+  for (const [start, outs] of next) for (const first of outs) {
+    if (used.has(`${start}>${first}`)) continue;
+    const lp = [start]; let a = start, b = first;
+    for (let guard = 0; guard < 100000; guard++) {
+      used.add(`${a}>${b}`);
+      if (b === start) { loops.push(lp.map((i) => pos[i])); break; }
+      lp.push(b);
+      const nx = (next.get(b) || []).find((n) => !used.has(`${b}>${n}`));
+      if (nx === undefined) break;
+      a = b; b = nx;
+    }
+  }
+  return loops;
+}
+
+
+function meshV3(m) {
+  const me = m.getMesh(), np = me.numProp, n = me.vertProperties.length / np, V = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { V[i * 3] = me.vertProperties[i * np]; V[i * 3 + 1] = me.vertProperties[i * np + 1]; V[i * 3 + 2] = me.vertProperties[i * np + 2]; }
+  return { V, T: me.triVerts };
+}
+/** Outline of a flat face as a cross-section in the face frame (outer loop CCW, holes CW). */
+function faceOutlineCS(V, T, pf, X, Y, t) {
+  const o = pf.point;
+  const loops = faceLoops(V, T, pf.tris).map((lp) => lp.map((q) => { const d = sub(q, o); return [dot(d, X), dot(d, Y)]; }));
+  if (!loops.length) throw new Error('Could not read the outline of a picked face');
+  const area = (pl) => pl.reduce((a2, [x1, y1], i) => { const [x2, y2] = pl[(i + 1) % pl.length]; return a2 + (x1 * y2 - x2 * y1); }, 0) / 2;
+  const polys = loops.sort((a2, b2) => Math.abs(area(b2)) - Math.abs(area(a2)));
+  return t(K.CrossSection.ofPolygons(polys.map((pl, i) => (i === 0 ? (area(pl) < 0 ? pl.reverse() : pl) : (area(pl) > 0 ? pl.reverse() : pl)))));
+}
+/** Keep the part of an open surface on the side where dot(n,x) >= off; triangles that cross the plane are cut. */
+function clipSurface(sf, n, off) {
+  const P = (i) => [sf.verts[i * 3], sf.verts[i * 3 + 1], sf.verts[i * 3 + 2]];
+  const outV = [], outT = [];
+  const push = (q) => { outV.push(q[0], q[1], q[2]); return outV.length / 3 - 1; };
+  for (let i = 0; i < sf.tris.length; i += 3) {
+    const pts = [P(sf.tris[i]), P(sf.tris[i + 1]), P(sf.tris[i + 2])], d = pts.map((q) => dot(n, q) - off), poly = [];
+    for (let k = 0; k < 3; k++) {
+      const a = pts[k], b = pts[(k + 1) % 3], da = d[k], db = d[(k + 1) % 3];
+      if (da >= 0) poly.push(a);
+      if ((da >= 0) !== (db >= 0)) { const s = da / (da - db); poly.push([a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s]); }
+    }
+    if (poly.length < 3) continue;
+    const ids = poly.map(push);
+    for (let k = 1; k < ids.length - 1; k++) outT.push(ids[0], ids[k], ids[k + 1]);
+  }
+  const r = repairSoup(Float32Array.from(outT.flatMap((i) => [outV[i * 3], outV[i * 3 + 1], outV[i * 3 + 2]])), { fillHoles: false });
+  return { verts: r.verts, tris: r.tris };
+}
+/** Grow an open surface outward from every open edge by a straight tangent strip. */
+function extendSurface(sf, dist) {
+  const soup = new Float32Array(sf.tris.length * 3);
+  for (let i = 0; i < sf.tris.length; i++) for (let k = 0; k < 3; k++) soup[i * 3 + k] = sf.verts[sf.tris[i] * 3 + k];
+  const r = repairSoup(soup, { fillHoles: false }), V = r.verts, T = r.tris, nv = V.length / 3;
+  const P = (i) => [V[i * 3], V[i * 3 + 1], V[i * 3 + 2]];
+  const used = new Map(); // directed edge -> opposite vertex
+  for (let i = 0; i < T.length; i += 3) for (let k = 0; k < 3; k++) used.set(`${T[i + k]}>${T[i + (k + 1) % 3]}`, T[i + (k + 2) % 3]);
+  const dirSum = new Map(), cnt = new Map(), edges = [];
+  for (const [e, opp] of used) {
+    const [a, b] = e.split('>').map(Number);
+    if (used.has(`${b}>${a}`)) continue;
+    edges.push([a, b]);
+    const ab = unit(sub(P(b), P(a))), mid = scl(add(P(a), P(b)), 0.5), away = sub(mid, P(opp));
+    const out = unit(sub(away, scl(ab, dot(away, ab)))); // in the surface, perpendicular to the edge, pointing away from the surface
+    for (const v of [a, b]) { dirSum.set(v, add(dirSum.get(v) || [0, 0, 0], out)); cnt.set(v, (cnt.get(v) || 0) + 1); }
+  }
+  if (!edges.length) return null;
+  const verts = Array.from(V), tris = Array.from(T), ext = new Map();
+  for (const [v, d] of dirSum) {
+    const u = unit(d), q = add(P(v), scl(u, dist / Math.max(0.5, Math.hypot(...d) / cnt.get(v)))); // corners are pushed out further so the strip keeps its width
+    ext.set(v, verts.length / 3); verts.push(q[0], q[1], q[2]);
+  }
+  for (const [a, b] of edges) tris.push(a, b, ext.get(b), a, ext.get(b), ext.get(a));
+  return { verts: Float32Array.from(verts), tris: Uint32Array.from(tris) };
+}
+
 /** Helical groove tool for threads, built about +Z from z=0 to z=length. */
 function threadGroove(p, t) {
   const { radius: Rs, pitch, length, depth, internal, left } = p;
@@ -531,6 +650,12 @@ export function rebuild(features, count, opts = {}) {
     if (!b) throw new Error('Referenced body no longer exists');
     return b;
   };
+  const planeGeo = (ref) => {
+    const q = features.find((x) => x.id === ref && x.type === 'plane');
+    if (q) return { origin: q.params.origin, normal: q.params.normal };
+    const fr = planeFrame({ plane: ref });
+    return { origin: fr.o, normal: fr.n };
+  };
   const sketches = {};
   const surfaces = new Map(); // id -> {id, name, verts, tris}: open surface bodies (not solids)
   const surfSnaps = [];
@@ -594,7 +719,16 @@ export function rebuild(features, count, opts = {}) {
         case 'sketch': sketches[f.id] = f; break;
         case 'plane': break; // construction geometry only (see resolvePlanes)
         case 'extrude': {
-          const { cs, sk } = solidFromSketch(f);
+          let { cs, sk } = solidFromSketch(f);
+          if (p.thin) { // thin extrude: only a wall of the given thickness around each profile outline
+            const w = p.wall ?? 1;
+            if (!(w > 0)) throw new Error('Wall thickness must be positive');
+            if (p.taper) throw new Error('Taper cannot be combined with Thin extrude');
+            const side = p.wallSide || 'inside', grow = side === 'inside' ? 0 : side === 'outside' ? w : w / 2, shrink = side === 'inside' ? w : side === 'outside' ? 0 : w / 2;
+            const outer = grow ? t(cs.offset(grow, 'Miter', 2)) : cs, inner = shrink ? t(cs.offset(-shrink, 'Miter', 2)) : cs;
+            cs = t(outer.subtract(inner));
+            if (cs.isEmpty() || cs.area() < 1e-9) throw new Error('Wall is too thick for this profile');
+          }
           const fr = planeFrame(sk.params);
           let dist = p.distance || 0;
           const dirSign = p.extent && p.extent !== 'distance' ? (p.flip ? -1 : 1) : dist < 0 ? -1 : 1;
@@ -721,18 +855,23 @@ export function rebuild(features, count, opts = {}) {
         }
         case 'fillet':
         case 'chamfer': {
-          const size = f.type === 'fillet' ? p.radius : p.distance;
+          const size0 = f.type === 'fillet' ? p.radius : p.distance;
           if (!p.edges?.length) throw new Error('Select at least one edge in the viewport');
-          if (!(size > 0)) throw new Error('Size must be positive');
+          if (!(size0 > 0)) throw new Error('Size must be positive');
+          const size = f.type === 'fillet' && p.variable ? (() => { if (!(p.radiusEnd > 0)) throw new Error('End radius must be positive'); return p.reverse ? { r0: p.radiusEnd, r1: p.radius } : { r0: p.radius, r1: p.radiusEnd }; })() : size0;
           const byBody = new Map();
           for (const e of p.edges) byBody.set(e.body, [...(byBody.get(e.body) || []), e]);
           for (const [bid, edges] of byBody) {
             const b = getBody(bid);
             const me = b.m.getMesh();
             const chains = findEdgeChains(me.vertProperties, me.numProp, me.triVerts);
+            const todo = [];
             for (const e of edges) {
               const ch = matchChain(chains, e.pts);
               if (!ch) throw new Error('An edge no longer exists — reselect the edges');
+              for (const c of p.tangent ? connectedChains(chains, ch) : [ch]) if (!todo.includes(c)) todo.push(c);
+            }
+            for (const ch of todo) {
               const cut = edgeCutter(ch, f.type, size, t);
               if (cut.m.isEmpty()) throw new Error('Size too large for this edge');
               b.m = t(cut.convex ? b.m.subtract(cut.m) : b.m.add(cut.m));
@@ -916,39 +1055,43 @@ export function rebuild(features, count, opts = {}) {
           break;
         }
         case 'draft': {
-          // Tilt planar faces by an angle about the neutral plane (the start or end of the body along the pull direction).
-          // Vertices of each picked face slide along the face normal in proportion to their height above the neutral plane,
-          // so the face stays flat and tilts; neighbouring faces follow.
+          // Exact draft of flat faces: each face is tilted about the neutral plane by cutting away (inward) or adding (outward)
+          // the wedge between the face and its tilted plane, limited to the face's own outline.
           const b = getBody(p.body);
           if (!p.faces?.length) throw new Error('Pick the faces to draft');
           const ang = ((p.angle || 0) * Math.PI) / 180;
           if (Math.abs(ang) < 1e-9) throw new Error('Enter a draft angle');
           if (Math.abs(ang) >= Math.PI / 4) throw new Error('Draft angle must be under 45 degrees');
           const u = ({ '+X': [1, 0, 0], '-X': [-1, 0, 0], '+Y': [0, 1, 0], '-Y': [0, -1, 0], '+Z': [0, 0, 1], '-Z': [0, 0, -1] })[p.dir || '+Z'];
-          const me = b.m.getMesh(), np = me.numProp, V = new Float32Array(me.vertProperties.length / np * 3), T = me.triVerts;
+          const me = b.m.getMesh(), np = me.numProp, V = new Float32Array((me.vertProperties.length / np) * 3), T = me.triVerts;
           for (let i = 0; i < V.length / 3; i++) { V[i * 3] = me.vertProperties[i * np]; V[i * 3 + 1] = me.vertProperties[i * np + 1]; V[i * 3 + 2] = me.vertProperties[i * np + 2]; }
           let lo = Infinity, hi = -Infinity;
           for (let i = 0; i < V.length / 3; i++) { const h = V[i * 3] * u[0] + V[i * 3 + 1] * u[1] + V[i * 3 + 2] * u[2]; lo = Math.min(lo, h); hi = Math.max(hi, h); }
-          const h0 = p.neutral === 'end' ? hi : lo;
-          const key = (x, y, z) => `${Math.round(x * 1e3)},${Math.round(y * 1e3)},${Math.round(z * 1e3)}`;
-          const shift = new Map();
-          for (const fc of p.faces) {
-            const tri = findFaceTri(V, T, fc.point, fc.normal);
-            const pf = tri < 0 ? null : planarFace(V, T, tri);
+          const end = p.neutral === 'end', h0 = end ? hi : lo, hsign = end ? -1 : 1, tn = Math.tan(ang);
+          const bb = bboxOf(b.m), D = 2 * Math.hypot(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]) + 10;
+          let m = b.m;
+          for (const fc of p.faces) { // re-read the current mesh each time so a neighbour's wedge extends this face's outline (fills corners when drafting outward)
+            const cm = m.getMesh(), cnp = cm.numProp, CV = new Float32Array((cm.vertProperties.length / cnp) * 3), CT = cm.triVerts;
+            for (let i = 0; i < CV.length / 3; i++) { CV[i * 3] = cm.vertProperties[i * cnp]; CV[i * 3 + 1] = cm.vertProperties[i * cnp + 1]; CV[i * 3 + 2] = cm.vertProperties[i * cnp + 2]; }
+            const tri = findFaceTri(CV, CT, fc.point, fc.normal);
+            const pf = tri < 0 ? null : planarFace(CV, CT, tri);
             if (!pf) throw new Error('One of the picked faces is not a flat face of this body any more');
             if (Math.abs(dot(pf.normal, u)) > 0.9) throw new Error('A picked face is parallel to the neutral plane; pick the side faces');
-            const seen = new Set();
-            for (const ti of pf.tris) for (let k = 0; k < 3; k++) {
-              const vi = T[ti * 3 + k];
-              if (seen.has(vi)) continue;
-              seen.add(vi);
-              const x = V[vi * 3], y = V[vi * 3 + 1], z = V[vi * 3 + 2];
-              const h = (x * u[0] + y * u[1] + z * u[2] - h0) * (p.neutral === 'end' ? -1 : 1); // height away from the neutral plane
-              const k2 = key(x, y, z), cur = shift.get(k2) || [0, 0, 0], m = -Math.tan(ang) * h; // positive angle leans the face inward
-              shift.set(k2, [cur[0] + pf.normal[0] * m, cur[1] + pf.normal[1] * m, cur[2] + pf.normal[2] * m]);
-            }
+            const M = axisFrame(pf.point, pf.normal), inv = invFrame(M);
+            const X = [M[0], M[1], M[2]], Y = [M[4], M[5], M[6]], o = pf.point;
+            const loops = faceLoops(CV, CT, pf.tris).map((lp) => lp.map((q) => { const d = sub(q, o); return [dot(d, X), dot(d, Y)]; }));
+            if (!loops.length) throw new Error('Could not read the outline of a picked face');
+            const area = (pl) => pl.reduce((a2, [x1, y1], i) => { const [x2, y2] = pl[(i + 1) % pl.length]; return a2 + (x1 * y2 - x2 * y1); }, 0) / 2;
+            const polys = loops.map((pl) => pl.slice()).sort((a2, b2) => Math.abs(area(b2)) - Math.abs(area(a2)));
+            const cs = t(K.CrossSection.ofPolygons(polys.map((pl, i) => (i === 0 ? (area(pl) < 0 ? pl.reverse() : pl) : (area(pl) > 0 ? pl.reverse() : pl)))));
+            const g = [-tn * hsign * dot(u, X), -tn * hsign * dot(u, Y)], f0 = -tn * hsign * (dot(u, o) - h0);
+            const nl = Math.hypot(g[0], g[1], 1), N = [-g[0] / nl, -g[1] / nl, 1 / nl], off = f0 / nl; // unit normal, matching offset
+            const up = t(cs.extrude(D)), down = t(t(cs.extrude(D)).translate([0, 0, -D]));
+            const wedgeIn = t(down.trimByPlane(N, off)), wedgeOut = t(up.trimByPlane([-N[0], -N[1], -N[2]], -off));
+            if (wedgeIn.volume() > 1e-9) m = t(m.subtract(t(wedgeIn.transform(M))));
+            if (wedgeOut.volume() > 1e-9) m = t(m.add(t(wedgeOut.transform(M))));
           }
-          b.m = t(b.m.warp((v) => { const sft = shift.get(key(v[0], v[1], v[2])); if (sft) { v[0] += sft[0]; v[1] += sft[1]; v[2] += sft[2]; } }));
+          b.m = m;
           break;
         }
         case 'mreduce': {
@@ -974,6 +1117,101 @@ export function rebuild(features, count, opts = {}) {
           if (parts.length < 2) throw new Error('This body is one connected piece, so there is nothing to separate');
           b.m = parts[0];
           parts.slice(1).forEach((pm, k) => addBody(`${f.id}~${k + 2}`, pm, `${b.name} ${k + 2}`));
+          break;
+        }
+        case 'thickenface': {
+          // Give flat faces thickness: a slab grown outward (joined to the body) or inward (cut out of it)
+          const b = getBody(p.body);
+          if (!p.faces?.length) throw new Error('Pick the faces to thicken');
+          if (!(p.thickness > 0)) throw new Error('Thickness must be positive');
+          let m = b.m;
+          for (const fc of p.faces) {
+            const { V, T } = meshV3(m);
+            const tri = findFaceTri(V, T, fc.point, fc.normal);
+            const pf = tri < 0 ? null : planarFace(V, T, tri);
+            if (!pf) throw new Error('One of the picked faces is not a flat face of this body any more');
+            const tris = [];
+            for (const ti of pf.tris) tris.push(T[ti * 3], T[ti * 3 + 1], T[ti * 3 + 2]);
+            let slab = thickenSurface({ verts: V, tris: Uint32Array.from(tris) }, p.thickness, false, t);
+            if (p.dir === 'in') slab = t(slab.translate(pf.normal.map((c) => -c * p.thickness))); // the slab is built outward; sink it into the body to cut
+            m = t(p.dir === 'in' ? m.subtract(slab) : m.add(slab));
+            if (m.isEmpty()) throw new Error('Thickening removed the whole body');
+          }
+          b.m = m;
+          break;
+        }
+        case 'replaceface': {
+          // Move a flat face onto a plane: grow the body up to the plane, or trim it back to the plane
+          const b = getBody(p.body);
+          if (!p.face) throw new Error('Pick the flat face to replace');
+          const g = planeGeo(p.plane || 'XY');
+          const nt0 = v3norm(g.normal), ot = g.origin.map((c, k) => c + nt0[k] * (p.offset || 0));
+          const { V, T } = meshV3(b.m);
+          const tri = findFaceTri(V, T, p.face.point, p.face.normal);
+          const pf = tri < 0 ? null : planarFace(V, T, tri);
+          if (!pf) throw new Error('The picked face is not a flat face of this body any more');
+          const M = axisFrame(pf.point, pf.normal), X = [M[0], M[1], M[2]], Y = [M[4], M[5], M[6]], Zn = pf.normal;
+          let nl = [dot(nt0, X), dot(nt0, Y), dot(nt0, Zn)], offl = dot(nt0, ot) - dot(nt0, pf.point);
+          if (Math.abs(nl[2]) < 0.05) throw new Error('The plane is (nearly) perpendicular to the face; choose a plane that crosses the face direction');
+          if (nl[2] < 0) { nl = nl.map((c) => -c); offl = -offl; }
+          const cs = faceOutlineCS(V, T, pf, X, Y, t);
+          const bb = bboxOf(b.m), D = 2 * Math.hypot(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]) + 2 * Math.hypot(...ot) + 10;
+          const up = t(cs.extrude(D)), down = t(t(cs.extrude(D)).translate([0, 0, -D]));
+          const grow = t(up.trimByPlane([-nl[0], -nl[1], -nl[2]], -offl)), cut = t(down.trimByPlane(nl, offl));
+          let m = b.m;
+          if (cut.volume() > 1e-9) m = t(m.subtract(t(cut.transform(M))));
+          if (grow.volume() > 1e-9) m = t(m.add(t(grow.transform(M))));
+          if (m.isEmpty()) throw new Error('Replacing the face removed the whole body');
+          b.m = m;
+          break;
+        }
+        case 'boundaryfill': {
+          // Solid from the empty space enclosed by the tool bodies ('voids'), or from where all of them overlap ('common')
+          const ids = (p.tools || []).filter((id) => live.has(id));
+          if (ids.length < 1 || (p.region === 'common' && ids.length < 2)) throw new Error(p.region === 'common' ? 'Pick at least two tool bodies' : 'Pick the tool bodies that enclose the space');
+          const ms = ids.map((id) => live.get(id).m);
+          const results = [];
+          if (p.region === 'common') {
+            const c = t(ms.slice(1).reduce((a, x) => t(a.intersect(x)), ms[0]));
+            if (c.isEmpty()) throw new Error('The tool bodies do not overlap');
+            results.push(c);
+          } else {
+            const all = t(K.Manifold.union(ms));
+            const bb = bboxOf(all), pad = 2;
+            const box = t(K.Manifold.cube([bb.max[0] - bb.min[0] + 2 * pad, bb.max[1] - bb.min[1] + 2 * pad, bb.max[2] - bb.min[2] + 2 * pad]).translate([bb.min[0] - pad, bb.min[1] - pad, bb.min[2] - pad]));
+            const space = t(box.subtract(all));
+            // decompose gives one piece per shell: positive pieces are regions, negative ones are islands (bodies) sitting inside a region
+            const pieces = space.decompose().map((x) => t(x)), islands = [];
+            for (const piece of pieces) if (piece.volume() < 0) { const { V, T } = meshV3(piece), fl = []; for (let i = 0; i < T.length; i += 3) fl.push(T[i], T[i + 2], T[i + 1]); islands.push({ m: t(manifoldFromIndexed(V, fl, t)), bb: bboxOf(piece) }); }
+            for (let piece of pieces) {
+              if (!(piece.volume() > 1e-6)) continue;
+              const pb = bboxOf(piece);
+              if (pb.min[0] <= bb.min[0] - pad + 1e-6 && pb.max[0] >= bb.max[0] + pad - 1e-6) continue; // the outer, unbounded space spans the whole box
+              for (const isl of islands) if (overlaps(pb, isl.bb, -1e-6) && isl.bb.min.every((v, k) => v >= pb.min[k] - 1e-6) && isl.bb.max.every((v, k) => v <= pb.max[k] + 1e-6)) piece = t(piece.subtract(isl.m));
+              if (piece.volume() > 1e-6) results.push(piece);
+            }
+            if (!results.length) throw new Error('No enclosed space found between these bodies');
+          }
+          results.sort((a, c) => c.volume() - a.volume());
+          results.forEach((rm, k) => addBody(k ? `${f.id}~${k + 1}` : f.id, rm, k ? `${f.name} ${k + 1}` : f.name));
+          if (!p.keepTools) for (const id of ids) live.delete(id);
+          break;
+        }
+        case 'strim': {
+          const sf = getSurface(p.surface);
+          const g = planeGeo(p.plane || 'XY'), n = v3norm(g.normal), off = dot(n, g.origin) + (p.offset || 0);
+          const sgn = p.keep === 'below' ? -1 : 1;
+          const res = clipSurface(sf, n.map((c) => c * sgn), off * sgn);
+          if (!res.tris.length) throw new Error('Nothing of the surface is left on that side of the plane');
+          sf.verts = res.verts; sf.tris = res.tris;
+          break;
+        }
+        case 'sextend': {
+          const sf = getSurface(p.surface);
+          if (!(p.distance > 0)) throw new Error('Distance must be positive');
+          const res = extendSurface(sf, p.distance);
+          if (!res) throw new Error('This surface has no open edges to extend');
+          sf.verts = res.verts; sf.tris = res.tris;
           break;
         }
         case 'split': {
@@ -1040,23 +1278,30 @@ export function rebuild(features, count, opts = {}) {
           const A = getBody(p.bodyA), B = getBody(p.bodyB);
           if (A === B) throw new Error('Choose two different bodies');
           const o = p.pointB, ax = 'XYZ'.indexOf(p.axis), av = axisVec(p.axis);
-          let m = t(A.m.translate(sub(o, p.pointA)));
+          // a body that belongs to a component drags the rest of its component along
+          const comp = opts.bodyComp?.[A.id];
+          const group = comp ? [...live.values()].filter((x) => opts.bodyComp[x.id] === comp) : [A];
+          if (group.includes(B)) throw new Error('Both bodies are in the same component; choose bodies from different components');
           const eul = (deg) => { const r = [0, 0, 0]; r[ax] = deg; return r; };
           const slide = (v) => av.map((c) => c * v);
-          switch (p.jtype) {
-            case 'revolute': m = rotAbout(m, o, eul(p.value), t); break;
-            case 'slider': m = t(m.translate(slide(p.value))); break;
-            case 'cylindrical': m = rotAbout(m, o, eul(p.value), t); m = t(m.translate(slide(p.value2))); break;
-            case 'planar': {
-              const a1 = (ax + 1) % 3, a2 = (ax + 2) % 3;
-              const tr = [0, 0, 0]; tr[a1] = p.value; tr[a2] = p.value2;
-              m = rotAbout(m, o, eul(p.value3 || 0), t); m = t(m.translate(tr));
-              break;
+          const move = (m0) => {
+            let m = t(m0.translate(sub(o, p.pointA)));
+            switch (p.jtype) {
+              case 'revolute': m = rotAbout(m, o, eul(p.value), t); break;
+              case 'slider': m = t(m.translate(slide(p.value))); break;
+              case 'cylindrical': m = rotAbout(m, o, eul(p.value), t); m = t(m.translate(slide(p.value2))); break;
+              case 'planar': {
+                const a1 = (ax + 1) % 3, a2 = (ax + 2) % 3;
+                const tr = [0, 0, 0]; tr[a1] = p.value; tr[a2] = p.value2;
+                m = rotAbout(m, o, eul(p.value3 || 0), t); m = t(m.translate(tr));
+                break;
+              }
+              case 'ball': m = rotAbout(m, o, p.rot, t); break;
+              default: if (p.flip) { const r = [0, 0, 0]; r[(ax + 1) % 3] = 180; m = rotAbout(m, o, r, t); }
             }
-            case 'ball': m = rotAbout(m, o, p.rot, t); break;
-            default: if (p.flip) { const r = [0, 0, 0]; r[(ax + 1) % 3] = 180; m = rotAbout(m, o, r, t); }
-          }
-          A.m = m;
+            return m;
+          };
+          for (const x of group) x.m = move(x.m);
           break;
         }
         case 'remove': getBody(p.body); live.delete(p.body); break;

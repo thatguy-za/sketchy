@@ -4,11 +4,18 @@
 
 ```bash
 npm install
-node server.js &    # optional: accounts and storage API on :8080 (run `npm run build` first for the static files)
-npm run dev         # http://localhost:5173
+npm run dev     # http://localhost:5173
 ```
 
-Without `server.js` the app still works, but there are no accounts: saving downloads a file instead.
+`npm run dev` starts the same two pieces the Docker image runs: `server.js` (accounts, saved designs and folders, version history, the MCP endpoint) on port 8080, and the app with hot reload on port 5173, proxying `/api` and `/mcp` to the server. The first account you create becomes the administrator, exactly as in the container. Designs are stored in `./data` (git-ignored), the way the container keeps them in its `/data` volume. Set `PORT` or `DATA_DIR` to change either.
+
+To check the production build the way the container serves it (one server, built files, no hot reload):
+
+```bash
+npm start       # builds, then serves everything on http://localhost:8080
+```
+
+`npm run app` starts only the front end, with no storage, and is not a supported way to run Sketchy.
 
 ## Build the Docker image yourself
 

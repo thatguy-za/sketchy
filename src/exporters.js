@@ -71,7 +71,80 @@ export function write3MF(bodies, name = 'Sketchy') {
   return new Blob([z], { type: 'model/3mf' });
 }
 
-/** Faceted STEP (ISO 10303-21, AP203): every triangle is a planar FACE of a FACETED_BREP. Opens as a faceted solid, not exact surfaces. */
+/**
+ * Group the triangles of a closed mesh into flat faces (connected, coplanar) and trace each face's outline.
+ * Returns [{ loops: [[vertexIndex...]] }] with the outer loop first; faces whose outline cannot be traced cleanly are
+ * returned as their individual triangles instead, so the result always covers every triangle exactly once.
+ */
+export function flatFaces(verts, tris) {
+  const nv = verts.length / 3, nt = tris.length / 3, id = new Int32Array(nv), seen = new Map();
+  for (let i = 0; i < nv; i++) {
+    const k = `${Math.round(verts[i * 3] * 1e4)},${Math.round(verts[i * 3 + 1] * 1e4)},${Math.round(verts[i * 3 + 2] * 1e4)}`;
+    if (!seen.has(k)) seen.set(k, i);
+    id[i] = seen.get(k);
+  }
+  const P = (i) => [verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2]];
+  const nrm = new Float64Array(nt * 3), edge = new Map();
+  for (let t = 0; t < nt; t++) {
+    const a = P(tris[t * 3]), b = P(tris[t * 3 + 1]), c = P(tris[t * 3 + 2]);
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]], l = Math.hypot(...n) || 1;
+    nrm.set([n[0] / l, n[1] / l, n[2] / l], t * 3);
+    for (let k = 0; k < 3; k++) { const e = `${id[tris[t * 3 + k]]}>${id[tris[t * 3 + (k + 1) % 3]]}`; edge.set(e, t); }
+  }
+  const dotN = (s, t) => nrm[s * 3] * nrm[t * 3] + nrm[s * 3 + 1] * nrm[t * 3 + 1] + nrm[s * 3 + 2] * nrm[t * 3 + 2];
+  const region = new Int32Array(nt).fill(-1), faces = [];
+  for (let s = 0; s < nt; s++) {
+    if (region[s] >= 0) continue;
+    const r = faces.length, list = [s], p0 = P(tris[s * 3]), n0 = [nrm[s * 3], nrm[s * 3 + 1], nrm[s * 3 + 2]];
+    region[s] = r;
+    for (let q = 0; q < list.length; q++) {
+      const t = list[q];
+      for (let k = 0; k < 3; k++) {
+        const nb = edge.get(`${id[tris[t * 3 + (k + 1) % 3]]}>${id[tris[t * 3 + k]]}`);
+        if (nb === undefined || region[nb] >= 0 || dotN(s, nb) < 0.99999) continue;
+        const q1 = P(tris[nb * 3]);
+        if (Math.abs((q1[0] - p0[0]) * n0[0] + (q1[1] - p0[1]) * n0[1] + (q1[2] - p0[2]) * n0[2]) > 1e-4) continue;
+        region[nb] = r; list.push(nb);
+      }
+    }
+    faces.push({ tris: list, n: n0 });
+  }
+  const out = [];
+  for (const fc of faces) {
+    const asTris = () => fc.tris.map((t) => ({ loops: [[tris[t * 3], tris[t * 3 + 1], tris[t * 3 + 2]]] }));
+    if (fc.tris.length === 1) { out.push(...asTris()); continue; }
+    const dir = new Set(), rep = new Map();
+    for (const t of fc.tris) for (let k = 0; k < 3; k++) { const a = id[tris[t * 3 + k]], b = id[tris[t * 3 + (k + 1) % 3]]; dir.add(`${a}>${b}`); rep.set(a, tris[t * 3 + k]); }
+    const next = new Map();
+    let bad = false;
+    for (const e of dir) {
+      const [a, b] = e.split('>').map(Number);
+      if (dir.has(`${b}>${a}`)) continue;
+      if (next.has(a)) bad = true; // outline touches itself at a vertex
+      next.set(a, b);
+    }
+    const loops = [], used = new Set();
+    if (!bad) for (const [st] of next) {
+      if (used.has(st)) continue;
+      const lp = []; let a = st;
+      while (a !== undefined && !used.has(a)) { used.add(a); lp.push(rep.get(a)); a = next.get(a); }
+      if (a !== st) { bad = true; break; }
+      loops.push(lp);
+    }
+    if (bad || !loops.length) { out.push(...asTris()); continue; }
+    const area = (lp) => { let sx = 0, sy = 0, sz = 0; for (let i = 0; i < lp.length; i++) { const a = P(lp[i]), b = P(lp[(i + 1) % lp.length]); sx += a[1] * b[2] - a[2] * b[1]; sy += a[2] * b[0] - a[0] * b[2]; sz += a[0] * b[1] - a[1] * b[0]; } return (sx * fc.n[0] + sy * fc.n[1] + sz * fc.n[2]) / 2; };
+    const pos = loops.filter((lp) => area(lp) > 0);
+    if (pos.length !== 1) { out.push(...asTris()); continue; }
+    out.push({ loops: [pos[0], ...loops.filter((lp) => area(lp) <= 0)] });
+  }
+  return out;
+}
+
+/**
+ * STEP (ISO 10303-21, AP214): flat faces are written as single planar faces (with holes where they have them) of a
+ * FACETED_BREP. Curved surfaces stay as many small flat facets, because the kernel is a mesh kernel, not an exact one.
+ */
 export function writeSTEP(bodies, name = 'Sketchy') {
   let n = 0;
   const L = [];
@@ -95,10 +168,12 @@ export function writeSTEP(bodies, name = 'Sketchy') {
     const pts = [];
     for (let i = 0; i < b.verts.length; i += 3) pts.push(e(`CARTESIAN_POINT('',(${f(b.verts[i])},${f(b.verts[i + 1])},${f(b.verts[i + 2])}))`));
     const faces = [];
-    for (let i = 0; i < b.tris.length; i += 3) {
-      const loop = e(`POLY_LOOP('',(#${pts[b.tris[i]]},#${pts[b.tris[i + 1]]},#${pts[b.tris[i + 2]]}))`);
-      const bound = e(`FACE_OUTER_BOUND('',#${loop},.T.)`);
-      faces.push(e(`FACE('',(#${bound}))`));
+    for (const fc of flatFaces(b.verts, b.tris)) {
+      const bounds = fc.loops.map((lp, k) => {
+        const loop = e(`POLY_LOOP('',(${lp.map((v) => '#' + pts[v]).join(',')}))`);
+        return e(k === 0 ? `FACE_OUTER_BOUND('',#${loop},.T.)` : `FACE_BOUND('',#${loop},.T.)`);
+      });
+      faces.push(e(`FACE('',(${bounds.map((x) => '#' + x).join(',')}))`));
     }
     const shell = e(`CLOSED_SHELL('',(${faces.map((x) => '#' + x).join(',')}))`);
     breps.push(e(`FACETED_BREP('${q(b.name || b.id)}',#${shell})`));
@@ -109,6 +184,6 @@ export function writeSTEP(bodies, name = 'Sketchy') {
   const pd = e(`PRODUCT_DEFINITION('design','',#${pdf},#${pdc})`);
   const pds = e(`PRODUCT_DEFINITION_SHAPE('','',#${pd})`);
   e(`SHAPE_DEFINITION_REPRESENTATION(#${pds},#${rep})`);
-  const head = `ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('Sketchy faceted export'),'2;1');\nFILE_NAME('${q(name)}.step','${new Date().toISOString().slice(0, 19)}',('Sketchy'),(''),'Sketchy','Sketchy','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n`;
+  const head = `ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('Sketchy export, flat faces merged'),'2;1');\nFILE_NAME('${q(name)}.step','${new Date().toISOString().slice(0, 19)}',('Sketchy'),(''),'Sketchy','Sketchy','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n`;
   return new Blob([head + L.join('\n') + '\nENDSEC;\nEND-ISO-10303-21;\n'], { type: 'model/step' });
 }

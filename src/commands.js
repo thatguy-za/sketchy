@@ -31,6 +31,11 @@ export const CMD = {
   pipe: C('Pipe', 'sweep', { feature: 'pipe', desc: 'A solid or hollow tube along a path.' }),
   sstitch: C('Stitch', 'combine', { feature: 'sstitch', desc: 'Joins surfaces together. A closed shell becomes a solid.' }),
   sthicken: C('Thicken', 'shell', { feature: 'sthicken', desc: 'Gives a surface thickness to make a solid.' }),
+  strim: C('Trim', 'split', { feature: 'strim', desc: 'Cuts a surface at a plane and keeps one side.' }),
+  sextend: C('Extend', 'scale', { feature: 'sextend', desc: 'Grows a surface outward from its open edges.' }),
+  thickenface: C('Thicken Face', 'shell', { feature: 'thickenface', desc: 'Adds or removes a slab of material on flat faces.' }),
+  replaceface: C('Replace Face', 'presspull', { feature: 'replaceface', desc: 'Moves a flat face onto a plane, growing or trimming the body.' }),
+  boundaryfill: C('Boundary Fill', 'combine', { feature: 'boundaryfill', desc: 'Makes a solid from the space enclosed by, or shared between, tool bodies.' }),
   mreduce: C('Reduce', 'scale', { feature: 'mreduce', desc: 'Reduces the triangle count of a mesh body, within a deviation limit.' }),
   mseparate: C('Separate', 'split', { feature: 'mseparate', desc: 'Splits a body made of disconnected pieces into separate bodies.' }),
   // --- modify ---
@@ -58,10 +63,9 @@ export const CMD = {
   cfg3: C('Configure Settings', 'table'),
   derive: C('Insert Derive', 'derive'),
   // --- 3D print / utilities ---
-  print3d: C('3D Print (Export STL)', 'threed'),
-  print3dsel: C('3D Print Selected Bodies', 'threed'),
-  printer: C('Printer…', 'printer'),
-  buildvol: C('Show Build Volume', 'box'),
+  printer: C('Printer…', 'printer', { desc: 'Chooses the printer whose build volume is shown and checked against.' }),
+  buildvol: C('Show Build Volume', 'box', { desc: 'Shows the printer build volume as a box in the viewport.' }),
+  export: C('Export', 'exportfile', { desc: 'Saves the design as STL, 3MF, OBJ, STEP or a Sketchy project file.' }),
   // --- sketch tools ---
   sk_line: C('Line', 'line', { sk: 'line', key: 'L' }),
   sk_path: C('Open Path', 'path', { sk: 'path' }),
@@ -88,7 +92,6 @@ export const CMD = {
   drivejoints: C('Drive Joints', 'joint'),
   draft: C('Draft', 'chamfer', { feature: 'draft' }),
   emboss: C('Emboss', 'extrude', { feature: 'emboss' }),
-  splitface: C('Split Face', 'split', { off: true, why: "Split Face needs boundary-representation faces, which Sketchy's mesh kernel doesn't have. To work on part of a face, sketch on it and use Extrude or Emboss (join or cut), or use Split Body." }),
   offsetface: C('Offset Face', 'presspull', { feature: 'presspull' }),
   sk_arc: C('3-Point Arc', 'arc', { sk: 'arc', key: '' }),
   sk_spline: C('Fit Point Spline', 'spline', { sk: 'spline' }),
@@ -113,7 +116,7 @@ export const WORKSPACE_TABS = ['SOLID', 'SURFACE', 'MESH', 'MANAGE', 'UTILITIES'
 export const TOOLBAR = {
   SOLID: [
     { label: 'CREATE', show: ['sketch', 'extrude', 'revolve', 'hole'], menu: ['newcomp', 'sketch', '|', 'extrude', 'revolve', 'sweep', 'loft', 'rib', 'coil', 'emboss', '|', 'hole', 'thread', '|', 'box', 'cylinder', 'sphere', 'torus', 'cone', '|', 'pattern', 'mirror'] },
-    { label: 'MODIFY', show: ['presspull', 'fillet', 'combine'], menu: ['presspull', 'fillet', 'chamfer', 'shell', 'draft', 'scale', 'combine', '|', 'offsetface', 'splitface', 'split', '|', 'move', 'remove', '|', 'parameters'] },
+    { label: 'MODIFY', show: ['presspull', 'fillet', 'combine'], menu: ['presspull', 'fillet', 'chamfer', 'shell', 'draft', 'scale', 'combine', '|', 'offsetface', 'thickenface', 'replaceface', 'split', 'boundaryfill', '|', 'move', 'remove', '|', 'parameters'] },
     { label: 'CONFIGURE', show: ['cfg1', 'cfg2', 'cfg3'], menu: ['cfg1', 'cfg2', 'cfg3'] },
     { label: 'CONSTRUCT', show: ['offsetplane'], menu: ['offsetplane'] },
     { label: 'INSPECT', show: ['measure', 'section'], menu: ['measure', 'angle', 'edgelen', 'faces', '|', 'properties', 'section', 'interference'] },
@@ -123,7 +126,7 @@ export const TOOLBAR = {
   ],
   SURFACE: [
     { label: 'CREATE', show: ['sketch', 'sextrude', 'srevolve', 'ssweep', 'sloft', 'pipe'], menu: ['sketch', '|', 'sextrude', 'srevolve', 'ssweep', 'sloft', '|', 'pipe'] },
-    { label: 'MODIFY', show: ['sstitch', 'sthicken'], menu: ['sstitch', 'sthicken'] },
+    { label: 'MODIFY', show: ['sstitch', 'sthicken', 'strim', 'sextend'], menu: ['sstitch', 'sthicken', '|', 'strim', 'sextend'] },
   ],
   MESH: [
     { label: 'CREATE', show: ['importstl'], menu: ['importstl'] },
@@ -134,7 +137,8 @@ export const TOOLBAR = {
     { label: 'INSPECT', show: ['measure', 'properties'], menu: ['measure', 'angle', 'edgelen', 'faces', '|', 'properties'] },
   ],
   UTILITIES: [
-    { label: 'MAKE', show: ['print3d', 'print3dsel', 'printer', 'buildvol'], menu: ['print3d', 'print3dsel', '|', 'printer', 'buildvol'] },
+    { label: 'EXPORT', show: ['export'], menu: [], big: true },
+    { label: 'PRINTER', show: ['printer', 'buildvol'], menu: [] },
   ],
 };
 
@@ -148,7 +152,6 @@ export const SKETCH_TOOLBAR = [
   { label: 'FINISH SKETCH', show: ['finishsketch'], menu: [], right: true, finish: true },
 ];
 
-export const WORKSPACES = ['DESIGN', 'GENERATIVE DESIGN', 'RENDER', 'ANIMATION', 'SIMULATION', 'MANUFACTURE', 'DRAWING'];
 
 // One-line descriptions shown in toolbar tooltips.
 const DESC = {
@@ -170,7 +173,7 @@ const DESC = {
   parameters: 'Defines named dimensions and expressions that drive the whole timeline.',
   joint: 'Positions one body against another with rigid, revolute, slider or ball joints.',
   measure: 'Measures distances, angles, edge lengths and face relationships.',
-  importstl: 'Inserts an STL mesh into the design.', print3d: 'Exports visible bodies as an STL file for slicing.',
+  importstl: 'Inserts an STL mesh into the design.',
   select: 'Choose what a click selects: whole bodies or individual faces.',
   sk_mirror: 'Copies shapes across a line. Pick the shapes, press Enter, then click a line (or press X / Y for a sketch axis).', sk_trim: 'Removes the part of a curve between its nearest intersections.', sk_spline: 'Draws a smooth curve through the points you click.', sk_project: 'Copies model edges onto the sketch plane. Shift-click copies every edge of a body.',
   sk_line: 'Draws connected line segments. Type a length and angle, press Enter. Press A for a tangent arc.',

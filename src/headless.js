@@ -26,7 +26,7 @@ export function evaluate(doc) {
     }
     return ff;
   });
-  const result = rebuild(feats, feats.length); // always the full timeline (ignores any UI roll-back marker)
+  const result = rebuild(feats, feats.length, { bodyComp: doc.bodyComp }); // always the full timeline (ignores any UI roll-back marker)
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   return { result, resolved: feats, paramErrors: ps.errors || {} };
 }
@@ -60,6 +60,7 @@ const fieldDoc = (fld) => ({
   ...(fld.min !== undefined ? { min: fld.min } : {}), ...(fld.max !== undefined ? { max: fld.max } : {}),
   ...(fld.type === 'body' ? { note: 'a body id from inspect_design' } : {}),
   ...(fld.type === 'sketch' ? { note: 'a sketch feature id' } : {}),
+  ...(fld.type === 'bodies' ? { note: 'array of body ids from inspect_design' } : {}),
   ...(fld.type === 'surface' || fld.type === 'surfaces' ? { note: 'surface ids from inspect_design (open surface bodies)' } : {}),
   ...(fld.type === 'planeref' ? { note: 'XY, XZ, YZ or the id of an earlier plane feature' } : {}),
   ...(PICKS.has(fld.type) ? { note: 'a viewport pick in the UI; pass explicit geometry only if you know the format' } : {}),
@@ -72,7 +73,7 @@ export function catalog() {
   for (const [key, d] of Object.entries(FEATURES)) {
     out[key] = {
       label: d.label, stored_type: d.type, group: d.group || 'feature',
-      defaults: d.make(stub), fields: d.fields.filter((f) => !['soltype', 'static'].includes(f.type)).map(fieldDoc),
+      defaults: d.make(stub), fields: d.fields.filter((f) => f.type !== 'static').map((f) => fieldDoc(f.type === 'soltype' ? { ...f, type: 'bool', label: 'Thin extrude (wall only)' } : f)),
       ...(d.pickEdges || d.fields.some((f) => PICKS.has(f.type)) ? { needs_ui_picking: true } : {}),
       ...(d.needsBody ? { needs_body: true } : {}),
     };

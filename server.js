@@ -109,13 +109,23 @@ const dropSessions = (username, exceptTok) => { for (const [k, v] of Object.entr
 const userRe = /^[a-z0-9_-]{3,32}$/;
 const nameOk = (n) => /^[\w .()-]{1,80}$/.test(n) && !n.startsWith('.');
 const pwOk = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 200;
-const dirs = (u) => ({ proj: path.join(dataDir, 'projects', users[u].id), draft: path.join(dataDir, 'drafts', users[u].id) });
+const dirs = (u) => ({ proj: path.join(dataDir, 'projects', users[u].id), draft: path.join(dataDir, 'drafts', users[u].id), fold: path.join(dataDir, 'folders', users[u].id + '.json') });
+
+// ---- folders: a label layer over the flat design list. Design names stay unique per account; a design lives in at most one folder.
+const folderOk = (f) => f === '' || (typeof f === 'string' && f.length <= 200 && f.split('/').every((seg) => nameOk(seg)));
+async function readFolders(D) {
+  const f = await readJSON(D.fold, null);
+  return { folders: Array.isArray(f?.folders) ? f.folders : [], map: f?.map && typeof f.map === 'object' ? f.map : {} };
+}
+async function writeFolders(D, f) { await fs.mkdir(path.dirname(D.fold), { recursive: true }); await writeJSON(D.fold, f); }
+/** Add a folder and every ancestor to the list. */
+function addFolder(f, p) { const parts = p.split('/'); for (let i = 1; i <= parts.length; i++) { const q = parts.slice(0, i).join('/'); if (q && !f.folders.includes(q)) f.folders.push(q); } }
 
 async function readMeta(dir, name) {
   const m = await readJSON(path.join(dir, name + '.meta'), null);
-  if (m) return m;
+  if (m) return { ...m, seq: m.seq ?? m.rev }; // seq counts every write (autosaves too); rev counts saved versions
   const rev = parseInt(await fs.readFile(path.join(dir, name + '.ver'), 'utf8').catch(() => '0'), 10) || 0; // legacy
-  return { rev, modified: 0, device: '' };
+  return { rev, seq: rev, modified: 0, device: '' };
 }
 
 const verDir = (D, name) => path.join(D.proj, '.versions', name);
@@ -132,21 +142,25 @@ async function snapshotVersion(D, name, cur) { // keep the file about to be over
 }
 
 // ---------------------------------------------------------------- project storage (shared by the REST API and MCP)
-class Conflict extends Error { constructor(rev) { super('conflict'); this.rev = rev; } }
-/** Write a design with revision bookkeeping and version history. ifRev: undefined/'*' = no check. */
-async function writeProject(username, name, objStr, device, ifRev) {
+class Conflict extends Error { constructor(seq) { super('conflict'); this.seq = seq; } }
+/**
+ * Write a design. `seq` counts every write and is what concurrent editors compare; `rev` counts saved versions: an autosave
+ * (opts.auto) updates the file in place and does not add a version, a normal save keeps the file it replaces in the history.
+ * ifSeq: undefined or '*' = no check. Returns { rev, seq }.
+ */
+async function writeProject(username, name, objStr, device, ifSeq, opts = {}) {
   const D = dirs(username), file = path.join(D.proj, name + '.json');
   await fs.mkdir(D.proj, { recursive: true }); await fs.mkdir(D.draft, { recursive: true });
   const exists = await fs.stat(file).catch(() => null);
   const cur = await readMeta(D.proj, name);
-  if (exists && ifRev !== undefined && ifRev !== '*' && +ifRev !== cur.rev) throw Object.assign(new Conflict(cur.rev), { modified: exists.mtimeMs, device: cur.device || '' });
-  const rev = (cur.rev || 0) + 1;
-  if (exists) await snapshotVersion(D, name, { ...cur, modified: cur.modified || exists.mtimeMs });
+  if (exists && ifSeq !== undefined && ifSeq !== '*' && +ifSeq !== cur.seq) throw Object.assign(new Conflict(cur.seq), { rev: cur.rev, modified: exists.mtimeMs, device: cur.device || '' });
+  const rev = opts.auto && exists ? cur.rev || 1 : (cur.rev || 0) + 1, seq = (cur.seq || 0) + 1;
+  if (exists && !opts.auto) await snapshotVersion(D, name, { ...cur, modified: cur.modified || exists.mtimeMs });
   await fs.writeFile(file, objStr);
-  await writeJSON(path.join(D.proj, name + '.meta'), { rev, modified: Date.now(), device });
+  await writeJSON(path.join(D.proj, name + '.meta'), { rev, seq, modified: Date.now(), device });
   await fs.writeFile(path.join(D.proj, name + '.ver'), String(rev));
   await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
-  return rev;
+  return { rev, seq };
 }
 const mcpStorage = {
   async list(u) {
@@ -157,10 +171,10 @@ const mcpStorage = {
   async read(u, name) {
     const D = dirs(u), raw = await fs.readFile(path.join(D.proj, name + '.json'), 'utf8').catch(() => null);
     if (raw === null) return null;
-    return { obj: JSON.parse(raw), rev: (await readMeta(D.proj, name)).rev };
+    return { obj: JSON.parse(raw), rev: (await readMeta(D.proj, name)).seq };
   },
   async write(u, name, obj, device, rev) {
-    try { return await writeProject(u, name, JSON.stringify(obj), device, rev); }
+    try { return (await writeProject(u, name, JSON.stringify(obj), device, rev)).seq; }
     catch (e) { if (e instanceof Conflict) throw new Error('The design was changed by someone else while this edit was being made. Fetch it again and retry.'); throw e; }
   },
 };
@@ -361,17 +375,10 @@ async function api(req, res, url) {
     if (req.method === 'DELETE') { await fs.rm(f, { force: true }); await fs.rm(mf, { force: true }); return send(res, 200, {}); }
     if (req.method === 'PUT') {
       const body = await readBody(req);
-      let obj; try { obj = JSON.parse(body.toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
-      const m = typeof obj.thumb === 'string' && /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(obj.thumb);
-      delete obj.thumb;
-      try {
-        const rev = await writeProject(user, name, JSON.stringify(obj), device, req.headers['if-match']);
-        if (m && m[1].length < 400000) await fs.writeFile(path.join(D.proj, name + '.jpg'), Buffer.from(m[1], 'base64'));
-        return send(res, 200, { rev });
-      } catch (e) {
-        if (e instanceof Conflict) return send(res, 409, { error: 'conflict', rev: e.rev, modified: e.modified, device: e.device });
-        throw e;
-      }
+      try { JSON.parse(body.toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
+      await fs.writeFile(f, body);
+      await writeJSON(mf, { device, base: +req.headers['x-base-rev'] || 0 });
+      return send(res, 200, {});
     }
     return send(res, 405, {});
   }
@@ -392,20 +399,43 @@ async function api(req, res, url) {
       res.setHeader('content-type', 'application/json'); res.setHeader('x-rev', vm[2]);
       return res.end(d);
     }
-    const suffix = ['/thumb', '/meta'].find((x) => name.endsWith(x));
+    const suffix = ['/thumb', '/meta', '/move', '/rename'].find((x) => name.endsWith(x));
     if (suffix) name = name.slice(0, -suffix.length);
     if (!name) {
+      const fmap = (await readFolders(D)).map;
       const files = (await fs.readdir(D.proj)).filter((f) => f.endsWith('.json'));
       const thumbs = new Set((await fs.readdir(D.proj)).filter((f) => f.endsWith('.jpg')));
       const list = await Promise.all(files.map(async (f) => {
         const n = f.slice(0, -5), st = await fs.stat(path.join(D.proj, f));
         const m = await readMeta(D.proj, n);
-        return { name: n, modified: st.mtimeMs, size: st.size, ver: m.rev || 1, device: m.device || '', thumb: thumbs.has(n + '.jpg') };
+        return { name: n, modified: st.mtimeMs, size: st.size, ver: m.rev || 1, seq: m.seq || 1, device: m.device || '', thumb: thumbs.has(n + '.jpg'), folder: fmap[n] || '' };
       }));
       return send(res, 200, list.sort((a, b) => b.modified - a.modified));
     }
     if (!nameOk(name)) return send(res, 400, { error: 'Invalid design name.' });
     const file = path.join(D.proj, name + '.json');
+    if (suffix === '/move' || suffix === '/rename') {
+      if (req.method !== 'POST') return send(res, 405, {});
+      let b; try { b = JSON.parse((await readBody(req)).toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
+      if (!(await fs.stat(file).catch(() => null))) return send(res, 404, { error: 'Not found' });
+      const F = await readFolders(D);
+      if (suffix === '/move') {
+        if (!folderOk(b.folder)) return send(res, 400, { error: 'Invalid folder name.' });
+        if (b.folder) addFolder(F, b.folder);
+        if (b.folder) F.map[name] = b.folder; else delete F.map[name];
+        await writeFolders(D, F);
+        return send(res, 200, { folder: b.folder });
+      }
+      const to = b.to;
+      if (!nameOk(to)) return send(res, 400, { error: 'Invalid design name.' });
+      if (to === name) return send(res, 200, { name });
+      if (await fs.stat(path.join(D.proj, to + '.json')).catch(() => null)) return send(res, 409, { error: 'A design with that name already exists.' });
+      for (const ext of ['.json', '.jpg', '.meta', '.ver']) await fs.rename(path.join(D.proj, name + ext), path.join(D.proj, to + ext)).catch(() => {});
+      await fs.rename(verDir(D, name), verDir(D, to)).catch(() => {});
+      for (const ext of ['.json', '.meta']) await fs.rename(path.join(D.draft, name + ext), path.join(D.draft, to + ext)).catch(() => {});
+      if (F.map[name] !== undefined) { F.map[to] = F.map[name]; delete F.map[name]; await writeFolders(D, F); }
+      return send(res, 200, { name: to });
+    }
     if (suffix === '/thumb') {
       const img = await fs.readFile(path.join(D.proj, name + '.jpg')).catch(() => null);
       if (!img) return send(res, 404, { error: 'No thumbnail' });
@@ -416,41 +446,70 @@ async function api(req, res, url) {
       const st = await fs.stat(file).catch(() => null);
       if (!st) return send(res, 404, { error: 'Not found' });
       const m = await readMeta(D.proj, name);
-      return send(res, 200, { rev: m.rev, modified: st.mtimeMs, device: m.device || '' });
+      return send(res, 200, { rev: m.rev, seq: m.seq, modified: st.mtimeMs, device: m.device || '', folder: (await readFolders(D)).map[name] || '' });
     }
     if (req.method === 'GET') {
       const d = await fs.readFile(file).catch(() => null);
       if (!d) return send(res, 404, { error: 'Not found' });
       const m = await readMeta(D.proj, name);
-      res.setHeader('content-type', 'application/json'); res.setHeader('x-rev', String(m.rev));
+      res.setHeader('content-type', 'application/json'); res.setHeader('x-rev', String(m.rev)); res.setHeader('x-seq', String(m.seq));
       return res.end(d);
     }
     if (req.method === 'DELETE') {
       for (const ext of ['.json', '.jpg', '.ver', '.meta']) await fs.rm(path.join(D.proj, name + ext), { force: true });
       await fs.rm(verDir(D, name), { recursive: true, force: true });
       await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
+      const F = await readFolders(D); if (F.map[name] !== undefined) { delete F.map[name]; await writeFolders(D, F); }
       return send(res, 200, {});
     }
     if (req.method === 'PUT') {
       const body = await readBody(req);
       let obj; try { obj = JSON.parse(body.toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
-      // optimistic concurrency: the client says which revision it started from
-      const exists = await fs.stat(file).catch(() => null);
-      const cur = await readMeta(D.proj, name);
-      const ifMatch = req.headers['if-match'];
-      if (exists && ifMatch !== undefined && ifMatch !== '*' && +ifMatch !== cur.rev) {
-        return send(res, 409, { error: 'conflict', rev: cur.rev, modified: exists.mtimeMs, device: cur.device || '' });
-      }
-      const m = typeof obj.thumb === 'string' && /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(obj.thumb);
-      if (m && m[1].length < 400000) await fs.writeFile(path.join(D.proj, name + '.jpg'), Buffer.from(m[1], 'base64'));
+      const folderHdr = req.headers['x-folder'] !== undefined ? decodeURIComponent(String(req.headers['x-folder'])) : null;
+      if (folderHdr !== null && !folderOk(folderHdr)) return send(res, 400, { error: 'Invalid folder name.' });
+      // optimistic concurrency: the client says which write (seq) it started from; x-autosave: 1 updates in place without adding a version
+      const thumb = typeof obj.thumb === 'string' && /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(obj.thumb);
       delete obj.thumb;
-      const rev = (cur.rev || 0) + 1;
-      if (exists) await snapshotVersion(D, name, { ...cur, modified: cur.modified || exists.mtimeMs });
-      await fs.writeFile(file, JSON.stringify(obj));
-      await writeJSON(path.join(D.proj, name + '.meta'), { rev, modified: Date.now(), device });
-      await fs.writeFile(path.join(D.proj, name + '.ver'), String(rev));
-      await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
-      return send(res, 200, { rev });
+      let res2;
+      try { res2 = await writeProject(user, name, JSON.stringify(obj), device, req.headers['if-match'], { auto: req.headers['x-autosave'] === '1' }); }
+      catch (e) { if (e instanceof Conflict) return send(res, 409, { error: 'conflict', rev: e.rev, seq: e.seq, modified: e.modified, device: e.device }); throw e; }
+      if (thumb && thumb[1].length < 400000) await fs.writeFile(path.join(D.proj, name + '.jpg'), Buffer.from(thumb[1], 'base64'));
+      if (folderHdr !== null) { const F = await readFolders(D); if (folderHdr) { addFolder(F, folderHdr); F.map[name] = folderHdr; } else delete F.map[name]; await writeFolders(D, F); }
+      return send(res, 200, res2);
+    }
+    return send(res, 405, {});
+  }
+
+  // ---- folders
+  if (p.startsWith('/api/folders')) {
+    const F = await readFolders(D);
+    if (req.method === 'GET') return send(res, 200, { folders: F.folders.sort((a, b) => a.localeCompare(b)) });
+    if (req.method === 'POST' || req.method === 'PATCH') {
+      let b; try { b = JSON.parse((await readBody(req)).toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
+      if (req.method === 'POST') {
+        if (!b.path || !folderOk(b.path)) return send(res, 400, { error: 'Folder names may use letters, numbers, spaces and . _ ( ) -' });
+        if (F.folders.includes(b.path)) return send(res, 409, { error: 'That folder already exists.' });
+        addFolder(F, b.path); await writeFolders(D, F);
+        return send(res, 200, { path: b.path });
+      }
+      const { from, to } = b;
+      if (!from || !F.folders.includes(from)) return send(res, 404, { error: 'Folder not found.' });
+      if (!to || !folderOk(to)) return send(res, 400, { error: 'Invalid folder name.' });
+      if (to === from || to.startsWith(from + '/')) return send(res, 400, { error: 'A folder cannot be moved into itself.' });
+      if (F.folders.includes(to)) return send(res, 409, { error: 'A folder with that name already exists.' });
+      const re = (q) => (q === from ? to : q.startsWith(from + '/') ? to + q.slice(from.length) : q);
+      F.folders = F.folders.map(re); addFolder(F, to);
+      for (const k of Object.keys(F.map)) F.map[k] = re(F.map[k]);
+      await writeFolders(D, F);
+      return send(res, 200, { path: to });
+    }
+    if (req.method === 'DELETE') {
+      const fp = decodeURIComponent(url.searchParams.get('path') || '');
+      if (!fp || !F.folders.includes(fp)) return send(res, 404, { error: 'Folder not found.' });
+      if (Object.values(F.map).some((v) => v === fp || v.startsWith(fp + '/'))) return send(res, 409, { error: 'The folder still contains designs. Move or delete them first.' });
+      F.folders = F.folders.filter((q) => q !== fp && !q.startsWith(fp + '/'));
+      await writeFolders(D, F);
+      return send(res, 200, {});
     }
     return send(res, 405, {});
   }

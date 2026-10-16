@@ -101,10 +101,6 @@ svg.fi, svg.ui, .ic { display: block; pointer-events: none; }
 .dp-date { color: var(--c-444444); font-size: var(--fs-sm); }
 .dp-bottom { margin-top: auto; display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .dp-ver { cursor: pointer; border: 1px solid var(--c-b9bcc2); background: var(--c-f6f6f7); padding: 1px 6px; font-size: var(--fs-sm); border-radius: 2px; }
-.dp-open { position: absolute; right: 8px; top: 8px; border: 1px solid var(--c-b9bcc2); background: var(--c-f6f6f7); border-radius: 2px; padding: 2px 4px; display: flex; align-items: center; }
-.dp-open svg { width: 16px; height: 16px; color: var(--c-0e7c4a); }
-.dp-del { border: 0; background: none; color: var(--c-999999); padding: 0 2px; }
-.dp-del:hover { color: var(--danger); }
 .dp-empty { color: var(--muted); padding: 14px 4px; line-height: 1.5; }
 
 #browser { position: absolute; left: 8px; top: 8px; width: 290px; max-height: calc(100% - 64px); background: var(--glass); border: 1px solid var(--c-c9cacf); display: flex; flex-direction: column; min-height: 0; z-index: 3; box-shadow: 0 1px 3px var(--ov-08); }
@@ -449,7 +445,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .dark :focus-visible { outline-color: var(--c-7bcda5); }
 @media (prefers-reduced-motion: reduce) { * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 .dp-ver { min-height: 24px; min-width: 24px; }
-.dp-open { cursor: pointer; }
 #doc-tabs #btn-newtab { align-self: center; margin-left: 2px; flex: none; }
 .doc-sel { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; border: 0; background: none; padding: 0; color: inherit; text-align: left; }
 .doc-x { width: 24px; height: 24px; }
@@ -818,3 +813,56 @@ table.cfg .cfg-name { font-weight: 600; width: 104px; }
 .modal-body .two { display: flex; gap: 8px; }
 .modal-body .two input { flex: 1; min-width: 0; }
 .modal-body label output { font-weight: 400; color: var(--muted); }
+
+/* ---- Save dialog, folder tree and folders in the Designs sidebar */
+.sv { gap: 12px; }
+.sv-lab { font-weight: 600; color: var(--c-444444); }
+.sv-loc { display: flex; flex-direction: column; gap: 6px; }
+.sv-bar { display: flex; justify-content: flex-end; }
+.sv-bar .btn { display: inline-flex; align-items: center; gap: 4px; }
+.sv-newrow { display: flex; gap: 6px; align-items: center; }
+.sv-newrow[hidden] { display: none; }
+.sv-newrow input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--c-767c84); border-radius: 4px; font: inherit; }
+.ft { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 4px; background: var(--c-ffffff); max-height: 220px; min-height: 90px; overflow: auto; padding: 3px; }
+.ft-row { display: flex; align-items: center; gap: 6px; border: 0; background: none; text-align: left; padding: 5px 8px; border-radius: 3px; font: inherit; color: inherit; cursor: pointer; min-height: 28px; }
+.ft-row:hover { background: var(--ov-08); }
+.ft-row.on { background: var(--accent-soft); font-weight: 600; }
+.ft-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ft-row svg { flex: none; color: var(--c-555555); }
+.ft-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ft-row small { color: var(--muted); }
+.sv-here { color: var(--muted); font-size: var(--fs-sm); min-height: 1.3em; }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.dp-folder { display: flex; align-items: center; gap: 2px; border-radius: 3px; }
+.dp-folder.dropping, .dp-card.dropping { background: var(--accent-soft); outline: 2px dashed var(--accent); }
+.dp-ftoggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 6px 4px; font: inherit; font-weight: 600; text-align: left; color: inherit; cursor: pointer; border-radius: 3px; min-height: 30px; }
+.dp-ftoggle:hover { background: var(--ov-08); }
+.dp-ftoggle:focus-visible, .dp-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dp-ftoggle small { margin-left: auto; color: var(--muted); font-weight: 400; }
+.dp-fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+.dp-chev { display: inline-grid; transition: transform .12s; }
+.dp-chev.closed { transform: rotate(-90deg); }
+.dp-more { border: 0; background: none; color: var(--c-555555); width: 26px; height: 26px; display: grid; place-items: center; border-radius: 3px; cursor: pointer; flex: none; }
+.dp-more:hover { background: var(--ov-08); }
+.dp-root { padding: 8px 4px 2px; font-weight: 600; color: var(--c-555555); }
+.dp-where { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--fs-sm); }
+.dp-fempty { padding: 4px 0; font-size: var(--fs-sm); }
+.dp-actions .btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+
+.dp-card > .dp-more { position: absolute; right: 4px; top: 4px; }
+.dp-name { padding-right: 28px; }
+.dp-rename { border: 0; background: none; color: var(--c-777777); padding: 2px; border-radius: 3px; display: grid; place-items: center; flex: none; cursor: pointer; min-width: 22px; min-height: 22px; }
+.dp-rename:hover { background: var(--ov-08); color: var(--accent); }
+.dp-rename:focus-visible { outline: 2px solid var(--accent); }
+
+/* ---- Export dialog */
+.ex { gap: 12px; }
+.modal-body select { padding: 7px 9px; border: 1px solid var(--c-767c84); border-radius: 4px; font: inherit; font-weight: 400; background: var(--c-ffffff); color: inherit; }
+.modal-body select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.ex-desc { color: var(--muted); font-size: var(--fs-sm); line-height: 1.45; margin-top: -4px; }
+.ex-desc[hidden] { display: none; }
+.ex-chk { flex-direction: row !important; align-items: center; gap: 8px !important; font-weight: 400 !important; cursor: pointer; }
+.ex-chk input { accent-color: var(--accent); }
+.ex-chk small { color: var(--muted); }
+
+#doc-dirty[data-state="conflict"]::after, #doc-dirty[data-state="error"]::after { color: var(--danger); }

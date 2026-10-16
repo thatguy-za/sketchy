@@ -24,6 +24,16 @@ export class Viewport {
     this.controls.addEventListener('start', () => { this.anim = null; });
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
     this.controls.screenSpacePanning = true;
+    // Two-view layout: pane 0 is the main view; pane 1 is created on demand. this.camera / this.controls / this.persp / this.ortho
+    // always refer to the ACTIVE pane (the one under the pointer), so all the picking and camera code works on whichever view you use.
+    this.layoutWanted = 'single'; this.holds = new Set(); this.active = 0;
+    this.panes = [{ persp: this.persp, ortho: this.ortho, camera: this.camera, controls: this.controls }, null];
+    const host = canvas.parentElement;
+    const track = (e) => { if (e.type === 'pointermove' && e.buttons) return; this.activateAt(e.clientX, e.clientY); };
+    host.addEventListener('pointerdown', track, true); host.addEventListener('pointermove', track, true); host.addEventListener('wheel', track, true);
+    this.paneMark = document.createElement('div');
+    this.paneMark.style.cssText = 'position:absolute;pointer-events:none;border:2px solid var(--accent, #0b6bcb);box-sizing:border-box;display:none;z-index:2';
+    host.appendChild(this.paneMark);
 
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a93a0, 1.1));
     const sun = new THREE.DirectionalLight(0xffffff, 1.7);
@@ -121,9 +131,73 @@ export class Viewport {
     this.scene.add(this.originGroup);
   }
   setOriginVisible(v) { this.originGroup.visible = v; }
+  /** Effective layout: 'single', 'h' (one above the other) or 'v' (side by side). Sketching and the move gizmo need one full view. */
+  get layout() { return this.holds.size ? 'single' : this.layoutWanted; }
+  hold(key, on) {
+    if (this.holds.has(key) === on) return;
+    on ? this.holds.add(key) : this.holds.delete(key);
+    if (on) this.activate(0);
+    this.layoutChanged();
+  }
+  setLayout(mode) {
+    this.layoutWanted = mode;
+    if (mode !== 'single' && !this.panes[1]) {
+      const persp = this.persp.clone(), ortho = this.ortho.clone(), camera = this.opts.ortho ? ortho : persp;
+      const controls = new OrbitControls(camera, this.canvas);
+      controls.enableDamping = false; controls.screenSpacePanning = true; controls.enabled = false;
+      controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
+      controls.target.copy(this.controls.target);
+      camera.position.copy(this.camera.position); camera.up.copy(this.camera.up); camera.quaternion.copy(this.camera.quaternion);
+      this.panes[1] = { persp, ortho, camera, controls };
+    }
+    if (mode === 'single') this.activate(0);
+    this.layoutChanged();
+  }
+  layoutChanged() { this.resize(); this.updatePaneMark(); }
+  /** Pane rectangles in canvas CSS pixels (top-left origin). */
+  paneRects() {
+    const W = this.canvas.clientWidth, H = this.canvas.clientHeight, g = 2, l = this.layout;
+    if (l === 'h') return [{ x: 0, y: 0, w: W, h: (H - g) / 2 }, { x: 0, y: (H + g) / 2, w: W, h: (H - g) / 2 }];
+    if (l === 'v') return [{ x: 0, y: 0, w: (W - g) / 2, h: H }, { x: (W + g) / 2, y: 0, w: (W - g) / 2, h: H }];
+    return [{ x: 0, y: 0, w: W, h: H }];
+  }
+  /** Client-space rectangle of the active pane (what the canvas rectangle is in a single view). */
+  rect() {
+    const r = this.canvas.getBoundingClientRect(), p = this.paneRects()[this.layout === 'single' ? 0 : this.active];
+    return { left: r.left + p.x, top: r.top + p.y, width: p.w, height: p.h, right: r.left + p.x + p.w, bottom: r.top + p.y + p.h };
+  }
+  activateAt(cx, cy) {
+    if (this.layout === 'single') return;
+    const r = this.canvas.getBoundingClientRect(), rs = this.paneRects();
+    const i = rs.findIndex((q) => cx >= r.left + q.x && cx <= r.left + q.x + q.w && cy >= r.top + q.y && cy <= r.top + q.y + q.h);
+    if (i >= 0) this.activate(i);
+  }
+  activate(i) {
+    if (i === this.active || !this.panes[i]) return;
+    const cur = this.panes[this.active];
+    cur.camera = this.camera; cur.controls.enabled = false;
+    const nx = this.panes[i];
+    this.active = i;
+    this.persp = nx.persp; this.ortho = nx.ortho; this.camera = nx.camera; this.controls = nx.controls;
+    this.controls.enabled = true; this.gizmo.camera = this.camera; this.anim = null;
+    this.updatePaneMark();
+  }
+  updatePaneMark() {
+    const split = this.layout !== 'single', m = this.paneMark;
+    m.style.display = split ? 'block' : 'none';
+    if (!split) return;
+    const q = this.paneRects()[this.active];
+    Object.assign(m.style, { left: q.x + 'px', top: q.y + 'px', width: q.w + 'px', height: q.h + 'px' });
+  }
+  /** Run fn once for every pane with that pane active, then restore the active one. */
+  eachPane(fn) {
+    const keep = this.active;
+    this.panes.forEach((pn, i) => { if (pn) { this.activate(i); fn(i); } });
+    this.activate(keep);
+  }
   // Zoom so the pixel rectangle (canvas coords) fills the view.
   zoomToRect(x0, y0, x1, y1) {
-    const r = this.canvas.getBoundingClientRect();
+    const r = this.rect();
     const w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
     if (w < 6 || h < 6) return;
     const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
@@ -306,7 +380,7 @@ export class Viewport {
     const hit = this.ray.intersectObjects(this.bodyGroup.children, false)[0];
     if (!hit) return null;
     const src = hit.object.userData.src;
-    const r = this.canvas.getBoundingClientRect();
+    const r = this.rect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
     let best = null, bd = px;
     for (let k = 0; k < 3; k++) {
@@ -450,7 +524,7 @@ export class Viewport {
     return (b * e - dd) / den;
   }
   toScreen(p) {
-    const r = this.canvas.getBoundingClientRect();
+    const r = this.rect();
     const v = (p.isVector3 ? p.clone() : new THREE.Vector3(...p)).project(this.camera);
     return { x: ((v.x + 1) / 2) * r.width, y: ((1 - v.y) / 2) * r.height, behind: v.z > 1 };
   }
@@ -475,7 +549,7 @@ export class Viewport {
     return this.ray.intersectObjects(this.planeHandles.children, false)[0]?.object.userData.plane || null;
   }
   setRay(ev) {
-    const r = this.canvas.getBoundingClientRect();
+    const r = this.rect();
     this.ray.setFromCamera(new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1), this.camera);
   }
 
@@ -597,7 +671,7 @@ export class Viewport {
     }
   }
   pickEdge(ev, entries = this.pickEntries) {
-    const r = this.canvas.getBoundingClientRect();
+    const r = this.rect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
     const proj = (p) => { const v = p.clone().project(this.camera); return [(v.x + 1) / 2 * r.width, (1 - v.y) / 2 * r.height, v]; };
     let best = null, bd = 7;
@@ -687,6 +761,10 @@ export class Viewport {
   home() { this.camera.up.set(0, 0, 1); this.lookAlong([1, -1.35, 0.95]); this.fit(); }
   setOrtho(on) {
     this.opts.ortho = on;
+    if (this.panes[1]) { this.eachPane(() => this.setOrthoHere(on)); return; }
+    this.setOrthoHere(on);
+  }
+  setOrthoHere(on) {
     const old = this.camera;
     this.camera = on ? this.ortho : this.persp;
     this.camera.position.copy(old.position);
@@ -708,9 +786,14 @@ export class Viewport {
     const w = p.clientWidth, h = p.clientHeight;
     if (!w || !h) return;
     this.renderer.setSize(w, h, false);
-    this.persp.aspect = w / h;
-    this.persp.updateProjectionMatrix();
-    this.updateOrtho();
+    const rs = this.paneRects();
+    this.eachPane((i) => {
+      const q = rs[this.layout === 'single' ? 0 : i] || rs[0];
+      this.persp.aspect = q.w / q.h;
+      this.persp.updateProjectionMatrix();
+      this.updateOrtho();
+    });
+    this.updatePaneMark();
   }
 
   // ---- ViewCube (CSS 3D) ----
@@ -775,11 +858,12 @@ export class Viewport {
     this.gizmo.attach(this.gizmoProxy);
     this.gizmo.setMode(mode);
     this.gizmo.visible = true;
+    this.hold('gizmo', true); // the gizmo only works in a single full view
     this.gizmo.removeEventListener('objectChange', this._gcb);
     this._gcb = () => onChange(this.gizmoProxy.position.toArray(), this.gizmoProxy.rotation.toArray().slice(0, 3).map((r) => (r * 180) / Math.PI));
     this.gizmo.addEventListener('objectChange', this._gcb);
   }
-  hideGizmo() { this.gizmo.detach(); this.gizmo.visible = false; }
+  hideGizmo() { this.hold('gizmo', false); this.gizmo.detach(); this.gizmo.visible = false; }
 
   frame() {
     this.camera.updateMatrixWorld();
@@ -793,6 +877,17 @@ export class Viewport {
     if (this.opts.ortho) this.updateOrtho();
     this.updateCube();
     this.onFrame?.();
-    this.renderer.render(this.scene, this.camera);
+    if (this.layout === 'single') { this.renderer.setScissorTest(false); this.renderer.setViewport(0, 0, this.canvas.clientWidth, this.canvas.clientHeight); this.renderer.render(this.scene, this.camera); return; }
+    const H = this.canvas.clientHeight, rs = this.paneRects(), keepClear = this.renderer.autoClear;
+    this.renderer.setScissorTest(false); this.renderer.autoClear = true; this.renderer.clear();
+    this.renderer.autoClear = keepClear; this.renderer.setScissorTest(true);
+    this.panes.forEach((pn, i) => {
+      if (!pn) return;
+      const cam = i === this.active ? this.camera : pn.camera, q = rs[i];
+      if (i !== this.active) { pn.controls.update(); if (this.opts.ortho) { const d = cam.position.distanceTo(pn.controls.target), hh = Math.tan((pn.persp.fov * Math.PI) / 360) * d; Object.assign(pn.ortho, { left: -hh * pn.persp.aspect, right: hh * pn.persp.aspect, top: hh, bottom: -hh }); pn.ortho.updateProjectionMatrix(); } }
+      this.renderer.setViewport(q.x, H - q.y - q.h, q.w, q.h); this.renderer.setScissor(q.x, H - q.y - q.h, q.w, q.h);
+      this.renderer.render(this.scene, cam);
+    });
+    this.renderer.setScissorTest(false);
   }
 }

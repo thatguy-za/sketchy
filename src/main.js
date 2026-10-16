@@ -17,16 +17,18 @@ import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, planarFace, norm as vnorm } from './edges.js';
 import { acct, call, refreshAccount, ensureSignedIn, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showChangePassword, showAccount, openUserMenu, showAdmin } from './account.js';
 import { evalExpr, resolveParams, applyConfig, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
+import { saveDialog, askName, confirmBox, alertBox, chooseFolder, safeName as fileSafeName } from './files.js';
 import { UNIT_TABLE, UNIT_NAMES, setUnits, getUnits, lenF, dispStr, fmtLen, fmtArea, fmtVolume, niceStep } from './units.js';
 import { findEdgeChains as chainsOf } from './edges.js';
 import { ficon, uicon } from './ficons.js';
 import { createSketchUI } from './sketchui.js';
 import { resolveSketch } from './sketchdims.js';
 import { CON_GLYPH, CON_LABEL } from './sketchcons.js';
-import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR, WORKSPACES } from './commands.js';
+import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR } from './commands.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
 const PRINTERS = {
   'Bambu Lab X1 / P1 (256³)': [256, 256, 256], 'Prusa MK4 (250×210×220)': [250, 210, 220], 'Prusa MINI (180³)': [180, 180, 180],
   'Creality Ender-3 (220×220×250)': [220, 220, 250], 'Voron 2.4 (350³)': [350, 350, 350],
@@ -34,6 +36,7 @@ const PRINTERS = {
 
 // ------------------------------------------------------------------ state
 const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: 'mm', components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
+let bedName = localStorage.getItem('sketchy.bed') || Object.keys(PRINTERS)[0];
 let doc = blankDoc();
 let undoStack = [], redoStack = [];
 let result = { bodies: [], errors: {}, snaps: [], sketchUsed: new Set() };
@@ -54,6 +57,7 @@ const planeHidden = new Set(); // construction planes hidden in the viewport
 let dataOpen = false;
 let lastCmd = null;
 let selPriority = 'body';
+let selMode = 'click';           // click | window | freeform | paint (drag-selection tools)
 let selFace = null;
 let selEdges = [];
 let profSel = new Set(), profHover = null; // idle sketch-region selection: keys "sketchId|profileId"
@@ -65,13 +69,12 @@ let sketch = null;               // active sketch session
 const hiddenBodies = new Set();
 const sketchVis = {};
 const collapsed = { views: true, origin: true };
-let bedName = localStorage.getItem('sketchy.bed') || Object.keys(PRINTERS)[0];
 
 let vp;
 const snapshot = () => ({ features: [...doc.features], marker: doc.marker, nextId: doc.nextId, params: [...(doc.params || [])], appearance: { ...(doc.appearance || {}) }, components: (doc.components || []).map((c) => ({ ...c })), bodyComp: { ...(doc.bodyComp || {}) }, configs: JSON.parse(JSON.stringify(doc.configs || [])), activeConfig: doc.activeConfig || null, canvases: (doc.canvases || []).map((c) => ({ ...c })) });
 const restore = (s) => { doc.features = [...s.features]; doc.marker = s.marker; doc.nextId = s.nextId; doc.params = [...(s.params || [])]; doc.appearance = { ...(s.appearance || {}) }; doc.components = (s.components || []).map((c) => ({ ...c })); doc.bodyComp = { ...(s.bodyComp || {}) }; doc.configs = JSON.parse(JSON.stringify(s.configs || [])); doc.activeConfig = s.activeConfig || null; doc.canvases = (s.canvases || []).map((c) => ({ ...c })); };
 function pushUndo(s) { undoStack.push(s); if (undoStack.length > 100) undoStack.shift(); redoStack = []; markDirty(); }
-function markDirty() { dirty = true; $('#doc-dirty').classList.add('on'); scheduleAutosave(); }
+function markDirty() { dirty = true; $('#doc-dirty').classList.add('on'); scheduleAutosave(); scheduleServerSave(); nameUntitled(); }
 function toast(msg, err = false) {
   const t = $('#toast');
   t.textContent = msg; t.className = err ? 'error' : ''; t.hidden = false;
@@ -115,7 +118,7 @@ function refreshNow() {
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
   vp.setCanvases((doc.canvases || []).map((c) => ({ ...c, hidden: canvasHidden.has(c.id) })));
   vp.setConstructionPlanes(feats.filter((f, i) => f.type === 'plane' && !f.suppressed && i < limit()).map((f) => ({ id: f.id, name: f.name, origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir, hidden: planeHidden.has(f.id) })));
-  try { result = rebuild(feats, limit(), { capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null }); }
+  try { result = rebuild(feats, limit(), { bodyComp: doc.bodyComp, capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null }); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   vp.bodyColors = doc.appearance || {};
@@ -365,7 +368,7 @@ const CUSTOM = {
   drivejoints: () => showDriveJoints(),
   svg: () => pick2D('.svg,image/svg+xml'), dxf: () => pick2D('.dxf'), sk_text: () => showTextDialog(),
   asbuilt: () => startAsBuilt(),
-  print3d: () => exportSTL(false), print3dsel: () => exportSTL(true),
+  export: () => exportDialog(),
   printer: () => printerMenu($('#ribbon')),
   buildvol: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); },
   select: (ev) => selectionMenu(ev?.currentTarget), finishsketch: () => finishSketch(), cancelpick: () => cancelSketch(),
@@ -400,9 +403,8 @@ function selectionMenu(anchor) {
     { label: 'Face priority', check: selPriority === 'face', run: () => { selPriority = 'face'; vp.selected.clear(); vp.refreshMaterials(); toast('Click selects flat faces — then press Q, E (pull), H (hole) or Create Sketch.'); } },
     { sep: true },
     { head: 'SELECTION MODE' },
-    { label: 'Window selection', check: true, run: () => {} },
-    { label: 'Freeform selection', dim: true, run: () => toast('Not available yet.') },
-    { label: 'Paint selection', dim: true, run: () => toast('Not available yet.') },
+    ...[['click', 'Click selection', 'Click picks a body; drag orbits.'], ['window', 'Window selection', 'Drag a rectangle: left to right takes bodies fully inside, right to left takes any it touches.'], ['freeform', 'Freeform selection', 'Drag a loop around bodies to select every body it touches.'], ['paint', 'Paint selection', 'Drag over bodies to select them. Middle mouse or Esc to leave.']]
+      .map(([m, label, tip]) => ({ label, check: selMode === m, run: () => { selMode = m; if (m !== 'click' && selPriority === 'face') { selPriority = 'body'; selFace = null; vp.showFaces([], null); } toast(`${tip}${m !== 'click' ? ' Hold Shift to add. Esc for click selection.' : ''}`); renderRibbon(); } })),
   ]);
 }
 function sketchOnSelectedFace() {
@@ -414,15 +416,10 @@ function sketchOnSelectedFace() {
   sketch = { picking: true, index: doc.marker };
   enterSketch(sketch.index, true, { plane: 'custom', origin: n.map((c) => +(c * d).toFixed(4)), normal: nn.map((c) => +c.toFixed(6)), xdir });
 }
-function workspaceMenu() {
-  const r = $('#btn-workspace').getBoundingClientRect();
-  showMenu(r.left, r.bottom + 2, WORKSPACES.map((w) => ({ label: w, check: w === 'DESIGN', dim: w !== 'DESIGN', run: () => w !== 'DESIGN' && toast(`${w} isn't available in Sketchy.`) })));
-}
-
 function renderRibbon() {
+  vp.hold('sketch', !!sketch);
   const wb = $('#btn-workspace');
-  wb.innerHTML = `<span>DESIGN</span>${uicon('caret', 9, 0)}`; wb.setAttribute('aria-label', 'Design workspace menu');
-  wb.onclick = workspaceMenu; wb.dataset.menu = 1;
+  wb.innerHTML = '<span>DESIGN</span>'; wb.setAttribute('aria-label', 'Design workspace'); wb.disabled = true; wb.style.cursor = 'default';
   const picking = !!sketch?.picking, inSketch = !!sketch && !picking;
   const tabList = sketch ? ['SKETCH'] : WORKSPACE_TABS;
   const tabsEl = $('#tabs');
@@ -936,9 +933,9 @@ function newComponent() {
   });
   toast(sel.length ? `Created a component with ${sel.length} ${sel.length > 1 ? 'bodies' : 'body'}` : 'Created an empty component. Right-click a body to move it in.');
 }
-function renameComponent(id) {
+async function renameComponent(id) {
   const c = (doc.components || []).find((x) => x.id === id);
-  const n = c && prompt('Component name', c.name);
+  const n = c && await askName({ title: 'Rename component', label: 'Component name', value: c.name, ok: 'Rename', raw: true });
   if (n && n.trim()) mutate(() => { doc.components = doc.components.map((x) => (x.id === id ? { ...x, name: n.trim().slice(0, 60) } : x)); });
 }
 function moveToComponent(bodyIds, compId) {
@@ -981,15 +978,6 @@ function showMenu(x, y, items) {
 }
 addEventListener('pointerdown', (e) => { if (!e.target.closest('#menu') && !e.target.closest('[data-menu]')) $('#menu').hidden = true; }, true);
 
-function printerMenu(anchor) {
-  const r = anchor.getBoundingClientRect();
-  showMenu(r.left, r.bottom, [
-    ...Object.keys(PRINTERS).map((n) => ({ label: n, check: n === bedName, run: () => setBed(n, PRINTERS[n]) })),
-    { sep: true },
-    { label: 'Custom…', run: () => { const s = prompt('Build volume X,Y,Z in mm', '200,200,200'); const v = s?.split(',').map(Number); if (v?.length === 3 && v.every((n) => n > 0)) setBed('Custom', v); } },
-  ]);
-}
-function setBed(name, size) { bedName = name; localStorage.setItem('sketchy.bed', name); vp.opts.bedSize = size; vp.opts.bed = true; vp.buildBed(); vp.refreshMaterials(); renderRibbon(); toast(`Build volume: ${name}`); }
 
 function fileMenu() {
   const r = $('#btn-menu').getBoundingClientRect();
@@ -998,17 +986,12 @@ function fileMenu() {
     { label: 'Open…', uicon: 'folder', run: () => toggleDataPanel(true) },
     { label: 'Open from my computer…', uicon: 'upload', run: () => $('#file-proj').click() },
     { sep: true },
-    { label: acct.server ? 'Save' : 'Save (download)', uicon: 'save', hint: 'Ctrl+S', run: () => save(false) },
+    { label: acct.server ? 'Save version' : 'Save (download)', uicon: 'save', hint: 'Ctrl+S', run: () => save(false) },
     { label: 'Save As…', uicon: 'save', run: () => save(true) },
-    { label: 'Export project file', uicon: 'upload', run: downloadProject },
+    { label: 'Export…', uicon: 'upload', run: exportDialog },
     { sep: true },
     { label: `Document units: ${getUnits()}…`, uicon: 'gear', run: () => unitsMenu($('#btn-menu')) },
     { label: 'Insert Mesh (STL)…', ficon: 'insertmesh', run: () => $('#file-stl').click() },
-    { label: 'Export STL (visible bodies)', ficon: 'threed', run: () => exportSTL(false) },
-    { label: 'Export STL (selected)', ficon: 'threed', disabled: !vp.selected.size, run: () => exportSTL(true) },
-    { label: 'Export 3MF (visible, with colours)', ficon: 'threed', run: () => exportMesh('3mf') },
-    { label: 'Export OBJ (visible bodies)', ficon: 'threed', run: () => exportMesh('obj') },
-    { label: 'Export STEP (faceted mesh)', ficon: 'threed', run: () => exportMesh('step') },
   ]);
 }
 
@@ -1256,7 +1239,8 @@ function renderDialog() {
       }
       ctl.appendChild(bar);
     } else if (fld.type === 'soltype') {
-      ctl.innerHTML = `<div class="typebtns"><button type="button" class="tb on" title="Solid">${ficon('extrude', 26)}</button><button type="button" class="tb" disabled title="Thin extrude isn't available yet">${ficon('extrude', 26)}</button></div>`;
+      ctl.innerHTML = `<div class="typebtns"><button type="button" class="tb ${f.params.thin ? '' : 'on'}" data-thin="0" title="Solid" aria-label="Solid" aria-pressed="${!f.params.thin}">${ficon('extrude', 26)}</button><button type="button" class="tb ${f.params.thin ? 'on' : ''}" data-thin="1" title="Thin extrude: a wall around each profile" aria-label="Thin extrude" aria-pressed="${!!f.params.thin}">${ficon('shell', 26)}</button></div>`;
+      ctl.querySelectorAll('button[data-thin]').forEach((bt) => (bt.onclick = () => { set(bt.dataset.thin === '1'); rerender(); }));
     } else if (fld.type === 'static') {
       ctl.appendChild(iconSelect([[fld.text, fld.text]], fld.text, () => {}, () => DLG_ICON[fld.icon], { disabled: true }));
     } else if (fld.type === 'ops') {
@@ -1269,13 +1253,17 @@ function renderDialog() {
       const chosen = sk ? effectiveProfiles(f, sk).size : 0;
       ctl.innerHTML = `<div class="profrow"><div class="selbtn on"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 3l12 11.5-5.2.7 3 5.6-2.6 1.4-3-5.7-4.2 3.2z" fill="#fff" stroke="#333" stroke-width="1.4" stroke-linejoin="round"/></svg><span>${items.length ? `${chosen} selected` : 'No closed profiles'}</span></div><button type="button" class="xclear" title="Reset to the default selection">×</button></div>`;
       ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
+    } else if (fld.type === 'bodies') {
+      const avail = bodiesBefore(idx);
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk" style="font-weight:400"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
+      ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'surfaces') {
       const avail = result.surfSnaps?.[idx] || result.surfaces.map((q) => ({ id: q.id, name: q.name }));
       ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk" style="font-weight:400"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click surfaces in the viewport.</div>' : '<div class="note">No surfaces yet.</div>';
       ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'face' || fld.type === 'faces') {
       const list = fld.type === 'face' ? (val ? [val] : []) : val || [];
-      ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm" style="margin-left:6px">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : 'Click flat faces to open (optional). Click again to deselect.'}</div>`;
+      ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm" style="margin-left:6px">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : (fld.note || 'Click flat faces in the viewport. Click again to deselect.')}</div>`;
       ctl.querySelector('button').onclick = () => { patchParams(idx, { [fld.key]: fld.type === 'face' ? null : [] }); renderDialog(); };
     } else if (fld.type === 'bool') {
       const c = document.createElement('input'); c.type = 'checkbox'; c.setAttribute('aria-label', fld.label); c.checked = !!val; c.onchange = () => { set(c.checked); if (['thread', 'through', 'internal'].includes(fld.key)) rerender(); }; ctl.appendChild(c);
@@ -1317,8 +1305,8 @@ function renderDialog() {
   if (adv.length) { const d = document.createElement('details'); d.className = 'more'; d.innerHTML = '<summary>More options</summary>'; adv.forEach((r) => d.appendChild(r)); body.appendChild(d); }
   if (Object.keys(paramState.values).length) body.insertAdjacentHTML('beforeend', `<div class="note">Fields accept expressions, e.g. <b>${esc(Object.keys(paramState.values)[0])} / 2 + 1 mm</b></div>`);
   body.insertAdjacentHTML('beforeend', '<div id="d-err"></div>');
-  $('#d-ok').onclick = closeDialog.bind(null, true);
-  $('#d-cancel').onclick = closeDialog.bind(null, false);
+  $('#d-ok').onclick = () => closeDialog(true);
+  $('#d-cancel').onclick = () => closeDialog(false);
   renderDialogErrors();
   updateFaceHL();
 }
@@ -1385,6 +1373,8 @@ function bodyFieldPick(e) {
     else { const cur = f.params[sf.key] || []; updateParam(dialog.index, sf.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); }
     renderDialog(); return;
   }
+  const bfld = defOf(f).fields.find((x) => x.type === 'bodies');
+  if (bfld && h) { const cur = f.params[bfld.key] || []; updateParam(dialog.index, bfld.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); renderDialog(); return; }
   const flds = defOf(f).fields.filter((x) => x.type === 'body' && (!x.show || x.show(f.params)));
   if (!flds.length) return;
   if (!h) return;
@@ -1399,15 +1389,30 @@ function renderDialogErrors() {
   const e = result.errors[doc.features[dialog.index]?.id];
   host.innerHTML = e ? `<div class="row err-row">${icon('warn', 14)} ${esc(e)}</div>` : '';
 }
-function closeDialog(ok) {
+function printerMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  showMenu(r.left, r.bottom, [
+    ...Object.keys(PRINTERS).map((n) => ({ label: n, check: n === bedName, run: () => setBed(n, PRINTERS[n]) })),
+    { sep: true },
+    { label: 'Custom…', run: async () => {
+      const s = await askName({ title: 'Custom build volume', label: 'Size X, Y, Z in mm', value: '200,200,200', ok: 'Set', raw: true, validate: (t) => { const v = t.split(',').map(Number); return v.length === 3 && v.every((n) => n > 0) ? '' : 'Enter three positive numbers separated by commas, for example 200,200,200.'; } });
+      if (s) setBed('Custom', s.split(',').map(Number));
+    } },
+  ]);
+}
+function setBed(name, size) { bedName = name; try { localStorage.setItem('sketchy.bed', name); } catch { /* storage unavailable */ } vp.opts.bedSize = size; vp.opts.bed = true; vp.buildBed(); vp.refreshMaterials(); renderRibbon(); toast(`Build volume: ${name}`); }
+function closeDialog(ok, force = false) {
   if (!dialog) return;
+  if (ok && !force && result.errors[doc.features[dialog.index].id]) { // keep a feature that has an error? ask in-app
+    confirmBox({ title: 'This feature has an error', message: `${result.errors[doc.features[dialog.index].id]}\n\nKeep it anyway?`, ok: 'Keep it' }).then((keep) => { if (keep && dialog) closeDialog(true, true); });
+    return;
+  }
   const { pre } = dialog;
   vp.hideGizmo();
   vp.showFaces([], null);
   profileHover = null;
   if (ok) {
     const f = doc.features[dialog.index];
-    if (result.errors[f.id] && !confirm('This feature has an error:\n' + result.errors[f.id] + '\n\nKeep it anyway?')) return;
     if (f.type === 'extrude' && f.params.extent === 'distance') LAST.extrude = Math.abs((resolvedMap[f.id] || f.params).distance) || undefined;
     pushUndo(pre);
   } else restore(pre);
@@ -1935,18 +1940,54 @@ function download(blob, name) {
   a.href = URL.createObjectURL(blob); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
-function exportSTL(selectedOnly) {
-  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id)));
+const EXPORT_FORMATS = [
+  ['stl', 'STL', ''],
+  ['3mf', '3MF', ''],
+  ['obj', 'OBJ', ''],
+  ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
+  ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
+];
+function exportFile(fmt, name, selectedOnly) {
+  if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
+  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: (doc.appearance || {})[b.id] }));
   if (!bodies.length) return toast('Nothing to export.', true);
-  download(writeSTL(bodies, doc.name), `${doc.name}.stl`);
-  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as STL`);
+  const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
+  download(w(bodies, name), `${name}.${fmt}`);
+  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}`);
 }
-function exportMesh(fmt) {
-  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id)).map((b) => ({ ...b, color: (doc.appearance || {})[b.id] }));
-  if (!bodies.length) return toast('Nothing to export.', true);
-  const w = { '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
-  download(w(bodies, doc.name), `${doc.name}.${fmt === 'step' ? 'step' : fmt}`);
-  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}${fmt === 'step' ? ' (faceted mesh, not exact surfaces)' : ''}`);
+function exportDialog() {
+  if (dialog || sketch) return;
+  let last = 'stl'; try { last = localStorage.getItem('sketchy.exportFormat') || 'stl'; } catch { /* storage unavailable */ }
+  if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = 'stl';
+  const hasSel = vp.selected.size > 0, nm = (doc.name === 'Untitled' ? 'design' : doc.name);
+  const m = modal(`<div class="modal-title">Export</div>
+    <form class="modal-body ex">
+      <label>File name<input id="ex-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
+      <label>Format<select id="ex-fmt" name="fmt">${EXPORT_FORMATS.map(([v, l]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + v})</option>`).join('')}</select></label>
+      <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
+      <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
+      <div class="note" id="ex-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
+      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="ex-c">Cancel</button><button type="submit" class="btn primary">Export</button></div>
+    </form>`);
+  const form = m.el.querySelector('form'), fmtSel = m.el.querySelector('#ex-fmt');
+  const sync = () => {
+    const f = fmtSel.value, proj = f === 'sketchy';
+    const d = (EXPORT_FORMATS.find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
+    de.textContent = d; de.hidden = !d;
+    m.el.querySelector('#ex-sel').disabled = proj || !hasSel; m.el.querySelector('#ex-scope').style.opacity = proj || !hasSel ? '.55' : '';
+  };
+  fmtSel.onchange = sync; sync();
+  m.el.querySelector('#ex-c').onclick = () => m.close();
+  setTimeout(() => { const n = m.el.querySelector('#ex-name'); n.focus(); n.select(); }, 0);
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const name = fileSafeName(m.el.querySelector('#ex-name').value);
+    if (!name) { m.el.querySelector('#ex-err').textContent = 'Enter a file name.'; return; }
+    const fmt = fmtSel.value;
+    try { localStorage.setItem('sketchy.exportFormat', fmt); } catch { /* storage unavailable */ }
+    m.close();
+    exportFile(fmt, name, m.el.querySelector('#ex-sel').checked && fmt !== 'sketchy');
+  };
 }
 async function importSTL(file) {
   try {
@@ -1986,17 +2027,17 @@ function captureThumb() {
   } catch { return null; }
 }
 const projectJSON = (name = doc.name, withThumb = false) => { const { rev, ...rest } = doc; return JSON.stringify({ format: 'sketchy', version: 1, ...rest, name, ...(withThumb ? { thumb: captureThumb() } : {}) }); };
-function loadProject(txt, rev = 0) {
+function loadProject(txt, rev = 0, seq = rev) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev, seq };
   setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
   vp.fitted = false; refresh();
 }
 const safeName = (n) => n.replace(/[^\w .()-]/g, '_').slice(0, 80) || 'Untitled';
-const putDesign = (name, ifMatch) => call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true), { 'if-match': String(ifMatch) });
+const putDesign = (name, ifMatch, folder, auto = false) => call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true), { 'if-match': String(ifMatch), ...(folder === undefined ? {} : { 'x-folder': encodeURIComponent(folder) }), ...(auto ? { 'x-autosave': '1' } : {}) });
 const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
 
 /** Ask what to do when the saved design changed elsewhere. Resolves 'overwrite' | 'copy' | 'theirs' | null. */
@@ -2018,33 +2059,42 @@ function conflictDialog(info, name) {
 async function openDesign(name, quiet = false) {
   const d = await call('GET', '/projects/' + encodeURIComponent(name));
   if (!d.ok) return toast(d.data?.error || 'Could not open design.', true);
-  try { loadProject(typeof d.data === 'string' ? d.data : JSON.stringify(d.data), d.rev); doc.name = name; $('#doc-name').textContent = name; bannerRev = d.rev; hideBanner(); refresh(); if (!quiet) toast(`Opened "${name}"`); }
+  const mt = await call('GET', '/projects/' + encodeURIComponent(name) + '/meta'); const dFolder = mt.ok ? mt.data.folder || '' : '';
+  try { loadProject(typeof d.data === 'string' ? d.data : JSON.stringify(d.data), d.rev, d.seq || d.rev); doc.folder = dFolder; doc.name = name; $('#doc-name').textContent = name; bannerRev = doc.seq; rememberLast(name); hideBanner(); refresh(); if (!quiet) toast(`Opened "${name}"`); }
   catch (x) { toast(x.message, true); }
 }
 
 async function save(as) {
-  let name = doc.name;
+  let name = doc.name, folder = doc.folder || '';
   if (acct.server && !(await requireLogin())) return;
-  if (as || name === 'Untitled') { const n = prompt('Design name', name === 'Untitled' ? 'My design' : name); if (!n) return; name = safeName(n); }
+  if (acct.server && (as || name === 'Untitled')) { // in-app Save dialog: name + folder
+    const pick = await saveDialog({ name: name === 'Untitled' ? 'My design' : name, folder, title: as ? 'Save design as' : 'Save design' });
+    if (!pick) return;
+    name = pick.name; folder = pick.folder;
+  } else if (!acct.server && (as || name === 'Untitled')) {
+    const n = await askName({ title: 'Save design', label: 'File name', value: name === 'Untitled' ? 'My design' : name, ok: 'Download', hint: 'There is no Sketchy server here, so the design is downloaded as a file.' });
+    if (!n) return; name = n;
+  }
   if (acct.server) {
     doc.saves = (doc.saves || 0) + 1;
-    const expect = name === doc.name ? doc.rev || 0 : 0; // a new name should not already exist
-    let r = await putDesign(name, expect);
+    const expect = name === doc.name ? doc.seq || 0 : 0; // a new name should not already exist
+    let r = await putDesign(name, expect, folder);
     if (r.status === 409) {
       const choice = await conflictDialog(r.data, name);
-      if (choice === 'overwrite') r = await putDesign(name, '*');
+      if (choice === 'overwrite') r = await putDesign(name, '*', folder);
       else if (choice === 'copy') {
-        let n2 = safeName(prompt('Name for your copy', `${name} (copy)`) || '');
-        if (!n2 || n2 === 'Untitled') return;
-        r = await putDesign(n2, 0);
-        if (r.status === 409) return toast(`"${n2}" already exists — choose another name.`, true);
-        name = n2;
+        const pick = await saveDialog({ name: `${name} (copy)`, folder, title: 'Save a copy', okLabel: 'Save copy' });
+        if (!pick || pick.name === 'Untitled') return;
+        r = await putDesign(pick.name, 0, pick.folder);
+        if (r.status === 409) return toast(`"${pick.name}" already exists — choose another name.`, true);
+        name = pick.name; folder = pick.folder;
       } else if (choice === 'theirs') return openDesign(name);
       else return;
     }
     if (!r.ok) return toast('Save failed: ' + (r.data?.error || r.status), true);
-    doc.rev = r.data.rev; bannerRev = doc.rev; hideBanner();
-    toast(`Saved "${name}" to your designs`);
+    doc.rev = r.data.rev; doc.seq = r.data.seq; doc.conflict = false; bannerRev = doc.seq; hideBanner(); doc.folder = folder; rememberLast(name);
+    toast(`Saved "${name}"${folder ? ` in ${folder}` : ''}`);
+    if ($('#data-panel').classList.contains('open')) renderDataPanel();
   } else download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`);
   doc.name = name; $('#doc-name').textContent = name;
   dirty = false; $('#doc-dirty').classList.remove('on');
@@ -2054,7 +2104,7 @@ async function save(as) {
 let draftT = null, bannerRev = 0;
 const draftKey = () => (doc.name === 'Untitled' ? '__untitled' : safeName(doc.name));
 function scheduleServerDraft() {
-  if (!acct.user) return;
+  if (!acct.user || doc.name !== 'Untitled') return; // named designs autosave to the server itself
   clearTimeout(draftT);
   draftT = setTimeout(async () => { if (acct.user && dirty) await call('PUT', '/drafts/' + encodeURIComponent(draftKey()), projectJSON(doc.name), { 'x-base-rev': String(doc.rev || 0) }); }, 4000);
 }
@@ -2081,19 +2131,19 @@ function showBanner(info) {
   const b = $('#banner');
   b.hidden = false;
   b.innerHTML = `<span>${uicon('warn', 15, 1.6)} "${esc(doc.name)}" was updated${info.device ? ` from <b>${esc(info.device)}</b>` : ''} (revision ${info.rev}).${dirty ? ' You have unsaved changes — saving will ask what to do.' : ''}</span><button class="btn sm" id="bn-reload">${dirty ? 'Discard mine & reload' : 'Reload'}</button><button class="btn sm" id="bn-x">Dismiss</button>`;
-  $('#bn-reload').onclick = () => { if (dirty && !confirm('Discard your unsaved changes and load the latest version?')) return; openDesign(doc.name); };
+  $('#bn-reload').onclick = async () => { if (dirty && !(await confirmBox({ title: 'Discard your changes?', message: 'Load the latest version and discard your unsaved changes?', ok: 'Discard and load', danger: true }))) return; openDesign(doc.name); };
   $('#bn-x').onclick = hideBanner;
 }
 const hideBanner = () => { const b = $('#banner'); if (b) b.hidden = true; };
 function startRemotePolling() {
   setInterval(async () => {
-    if (document.hidden || !acct.user || !doc.rev || doc.name === 'Untitled') return;
+    if (document.hidden || !acct.user || !doc.rev || doc.name === 'Untitled' || asBusy) return;
     const r = await call('GET', '/projects/' + encodeURIComponent(doc.name) + '/meta');
-    if (r.ok && r.data.rev > doc.rev && r.data.rev !== bannerRev) { bannerRev = r.data.rev; showBanner(r.data); }
+    if (r.ok && r.data.seq > doc.seq && r.data.seq !== bannerRev) { bannerRev = r.data.seq; showBanner(r.data); }
   }, 20000);
   addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+  addEventListener('pagehide', () => { if (dirty) { try { localStorage.setItem('sketchy.autosave', projectJSON()); localStorage.setItem('sketchy.autosave.t', String(Date.now())); } catch { /* too large */ } } }); // keep a change made just before closing; the next start restores it
 }
-function downloadProject() { download(new Blob([projectJSON()], { type: 'application/json' }), `${doc.name}.sketchy.json`); }
 function openFromServer() { toggleDataPanel(true); }
 // ------------------------------------------------------------------ document tabs
 // The live design always sits in the module globals (doc, undoStack, ...). Inactive tabs keep a saved copy of that
@@ -2142,13 +2192,16 @@ function activateTab(id) {
   activeTab = id;
   const st = next.state; next.state = null;
   switchToState(st);
+  if (dirty && canAutosave()) scheduleServerSave();
 }
-function closeTab(id) {
+async function closeTab(id) {
   if (busy()) return;
   const t = tabs.find((x) => x.id === id);
   if (!t) return;
-  if (tabDirty(t) && !confirm(`"${tabName(t)}" has unsaved changes. Close it anyway?`)) return;
+  if (t.id === activeTab && dirty && canAutosave()) await serverAutosave(); // let a pending autosave land first
+  if (tabDirty(t) && !(await confirmBox({ title: 'Close without saving?', message: `"${tabName(t)}" has unsaved changes. Close it anyway?`, ok: 'Close tab', danger: true }))) return;
   const i = tabs.indexOf(t);
+  if (i < 0) return;
   tabs.splice(i, 1);
   if (!tabs.length) { // closing the last tab leaves a fresh blank design
     const nt = { id: nextTabId++, state: null }; tabs.push(nt); activeTab = nt.id; switchToState(blankState()); return;
@@ -2164,7 +2217,84 @@ function focusOpenDesign(name) {
   if (!t) return false;
   activateTab(t.id); return true;
 }
-function newDoc() { newTab(); }
+const rememberLast = (name) => { try { localStorage.setItem('sketchy.last', name); } catch { /* storage unavailable */ } };
+let namingNow = false;
+/** Ask for a name and folder, make sure the name is free, and return { name, folder } (or null if cancelled). */
+async function askNewDesign(title, okLabel) {
+  let last = ''; try { last = localStorage.getItem('sketchy.lastFolder') || ''; } catch { /* storage unavailable */ }
+  let name = '';
+  for (;;) {
+    const pick = await saveDialog({ name, folder: doc.folder || last, title, okLabel });
+    if (!pick) return null;
+    const exists = await call('GET', '/projects/' + encodeURIComponent(pick.name) + '/meta');
+    if (!exists.ok) { try { localStorage.setItem('sketchy.lastFolder', pick.folder); } catch { /* storage unavailable */ } return pick; }
+    await alertBox({ title: 'Name already used', message: `You already have a design called "${pick.name}". Choose another name.` });
+    name = pick.name;
+  }
+}
+/** Store the design in the current tab under a new name (its first saved version). */
+async function createOnServer(pick) {
+  const d = doc, r = await putDesign(pick.name, 0, pick.folder);
+  if (!r.ok) { toast(r.status === 409 ? `"${pick.name}" already exists.` : 'Could not create the design: ' + (r.data?.error || r.status), true); return false; }
+  d.name = pick.name; d.folder = pick.folder; d.rev = r.data.rev; d.seq = r.data.seq; d.conflict = false; d.nameAsked = true;
+  if (doc === d) { dirty = false; bannerRev = d.seq; renderDocTabs(); setSaveState('saved'); }
+  rememberLast(pick.name);
+  if ($('#data-panel').classList.contains('open')) renderDataPanel();
+  return true;
+}
+/** New design: ask for its name first (in a new tab, or in the current blank one), so every design is stored from the start. */
+async function newDoc(inPlace = false) {
+  if (!acct.server || !acct.user) { if (!inPlace) newTab(); return; }
+  if (busy() || namingNow) return;
+  namingNow = true;
+  try {
+    const pick = await askNewDesign('New design', 'Create');
+    if (!pick) return;
+    if (!inPlace && !newTab()) return;
+    await createOnServer(pick);
+  } finally { namingNow = false; }
+}
+/** A design that was started without a name (the dialog was dismissed): ask once it has something in it. */
+async function nameUntitled() {
+  if (!acct.server || !acct.user || doc.name !== 'Untitled' || doc.nameAsked || namingNow) return;
+  const d = doc; d.nameAsked = true; namingNow = true;
+  try {
+    const pick = await askNewDesign('Name your design', 'Create');
+    if (pick && doc === d) await createOnServer(pick);
+  } finally { namingNow = false; }
+}
+
+// ---- autosave: a named design is written to the server a moment after each change (no new version; Save adds one)
+let asT = null, asBusy = false, asAgain = false, changeSeq = 0;
+function setSaveState(kind) {
+  const el = $('#doc-dirty'); if (!el) return;
+  el.dataset.state = kind;
+  el.title = { pending: 'Unsaved changes', saving: 'Saving…', saved: 'All changes saved', conflict: 'Not saved: this design was changed elsewhere', error: 'Could not save. Retrying…' }[kind] || '';
+  el.classList.toggle('on', kind !== 'saved');
+}
+const canAutosave = () => !!(acct.server && acct.user && doc.name !== 'Untitled' && doc.rev && !doc.conflict);
+function scheduleServerSave() {
+  changeSeq++;
+  if (!canAutosave()) return;
+  clearTimeout(asT); asT = setTimeout(serverAutosave, 2500); setSaveState('pending');
+}
+async function serverAutosave() {
+  clearTimeout(asT);
+  if (!dirty || !canAutosave()) return;
+  if (asBusy) { asAgain = true; return; }
+  asBusy = true; setSaveState('saving');
+  const d = doc, sent = changeSeq;
+  let r;
+  try { r = await putDesign(d.name, d.seq || 0, d.folder || '', true); } finally { asBusy = false; }
+  if (r.ok) {
+    d.rev = r.data.rev; d.seq = r.data.seq; bannerRev = d.seq;
+    if (doc === d && changeSeq === sent) { dirty = false; setSaveState('saved'); } else if (doc === d) asAgain = true; // edited while saving
+  } else if (r.status === 409) {
+    d.conflict = true;
+    if (doc === d) { setSaveState('conflict'); showBanner(r.data); }
+  } else { if (doc === d) setSaveState('error'); asAgain = true; }
+  if (asAgain) { asAgain = false; asT = setTimeout(serverAutosave, r.ok ? 800 : 8000); }
+}
 function renderDocTabs() {
   const host = $('#doc-tabs');
   if (!host) return;
@@ -2266,7 +2396,7 @@ function bindViewport() {
     const cur = resolvedMap[f.id]?.distance ?? f.params.distance ?? 0;
     const moved = { normal: fc.normal, point: fc.point.map((c, k) => c + fc.normal[k] * cur) };
     if (!tg?.face || tg.id !== f.params.body || !(sameFace(tg, fc) || sameFace(tg, moved))) return;
-    const r = cv.getBoundingClientRect();
+    const r = vp.rect();
     const P0 = new THREE.Vector3(...tg.point), N = new THREE.Vector3(...fc.normal);
     const proj = (p) => { const q = p.clone().project(vp.camera); return [((q.x + 1) / 2) * r.width, ((1 - q.y) / 2) * r.height]; };
     const a = proj(P0), b = proj(P0.clone().addScaledVector(N, 10));
@@ -2337,7 +2467,7 @@ function bindViewport() {
 function applyNavMode() {
   if (!vp) return;
   const B = THREE.MOUSE;
-  vp.controls.mouseButtons.LEFT = sketch && !sketch.picking ? -1 : { orbit: B.ROTATE, pan: B.PAN, zoom: B.DOLLY, zwin: -1 }[navMode];
+  vp.eachPane(() => { vp.controls.mouseButtons.LEFT = sketch && !sketch.picking ? -1 : { orbit: B.ROTATE, pan: B.PAN, zoom: B.DOLLY, zwin: -1 }[navMode]; });
   const hud = { pan: 'Pan: drag to move the view', zoom: 'Zoom: drag up/down', zwin: 'Zoom Window: drag a rectangle' }[navMode];
   if (hud && !sketch && !measure && !dialog) $('#hud').innerHTML = hud + ' · Esc to exit';
   else if (!hud && !sketch && !measure && !dialog && /Pan:|Zoom/.test($('#hud').textContent)) $('#hud').innerHTML = '';
@@ -2393,20 +2523,116 @@ function buildNavBar() {
       { sep: true },
       { head: 'OBJECT VISIBILITY' },
       { label: 'Origin', check: originVis, run: () => { originVis = !originVis; vp.setOriginVisible(originVis); renderTree(); } },
-      { label: 'Build volume', check: vp.opts.bed, run: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); } },
     ]);
   }, { caret: true });
   b('grid2', 'Grid and Snaps', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(r.left - 20, r.top - 100, [
       { label: 'Show Grid', check: vp.opts.grid, run: () => { vp.opts.grid = !vp.opts.grid; vp.refreshMaterials(); } },
+      { label: 'Build volume', check: vp.opts.bed, run: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); } },
       { label: 'Snap to Grid', check: !sketch || sketch.snapOn !== false, run: () => { if (sketch) sketch.snapOn = sketch.snapOn === false; } },
     ]);
   }, { caret: true });
   b('viewports', 'Viewports', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
-    showMenu(r.left - 20, r.top - 100, [{ label: 'Single View', check: true, run: () => {} }, { label: 'Two Views: Horizontal', dim: true, run: () => toast('Multiple viewports are not available yet.') }]);
+    const pick = (m) => () => { vp.setLayout(m); if (m !== 'single') toast('Two views: the one under the pointer is active. The ViewCube and view tools act on it.'); };
+    showMenu(r.left - 20, r.top - 120, [
+      { label: 'Single View', check: vp.layoutWanted === 'single', run: pick('single') },
+      { label: 'Two Views: Horizontal', check: vp.layoutWanted === 'h', run: pick('h') },
+      { label: 'Two Views: Vertical', check: vp.layoutWanted === 'v', run: pick('v') },
+    ]);
   }, { caret: true });
+}
+
+/** Drag-selection tools (window, freeform, paint) for whole bodies. Active only when selMode is not 'click'. */
+function bindSelectTool() {
+  const vpEl = $('#viewport'), cv = $('#gl');
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:3;display:none';
+  const shape = document.createElementNS(NS, 'polyline');
+  shape.setAttribute('fill', 'rgba(60,140,230,.15)'); shape.setAttribute('stroke', '#0b6bcb'); shape.setAttribute('stroke-width', '1.5'); shape.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(shape); vpEl.appendChild(svg);
+  const inPoly = (pt, poly) => { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const a = poly[i], b = poly[j]; if ((a[1] > pt[1]) !== (b[1] > pt[1]) && pt[0] < ((b[0] - a[0]) * (pt[1] - a[1])) / (b[1] - a[1]) + a[0]) c = !c; } return c; };
+  /** Screen positions (client px) of a sample of a body's vertices. */
+  const screenPts = (mesh, rc) => {
+    const src = mesh.userData.src, n = src.verts.length / 3, step = Math.max(1, Math.ceil(n / 20000)), v = new THREE.Vector3(), out = [];
+    mesh.updateWorldMatrix(true, false);
+    for (let i = 0; i < n; i += step) {
+      v.set(src.verts[i * 3], src.verts[i * 3 + 1], src.verts[i * 3 + 2]).applyMatrix4(mesh.matrixWorld).project(vp.camera);
+      if (v.z > 1 || v.z < -1) continue;
+      out.push([rc.left + ((v.x + 1) / 2) * rc.width, rc.top + ((1 - v.y) / 2) * rc.height]);
+    }
+    return out;
+  };
+  const meshes = () => vp.bodyGroup.children.filter((m) => m.visible && m.userData.src);
+  const apply = (ids, add) => {
+    if (!add) vp.selected.clear();
+    ids.forEach((id) => vp.selected.add(id));
+    vp.refreshMaterials(); renderTree(); renderRibbon();
+  };
+  vpEl.addEventListener('pointerdown', (e) => {
+    if (selMode === 'click' || e.button !== 0 || e.target !== cv || sketch || dialog || measure || navMode !== 'orbit' || vp.gizmo.dragging) return;
+    if (selPriority !== 'body') return;
+    e.stopPropagation();
+    vp.activateAt(e.clientX, e.clientY);
+    const host = vpEl.getBoundingClientRect(), rc = vp.rect(), add = e.shiftKey || e.ctrlKey || e.metaKey, mode = selMode;
+    const start = [e.clientX, e.clientY];
+    let path = [start], hits = new Set(), last = start;
+    if (!add && mode === 'paint') vp.selected.clear();
+    const draw = (cur) => {
+      svg.style.display = 'block';
+      if (mode === 'window') shape.setAttribute('points', [start, [cur[0], start[1]], cur, [start[0], cur[1]]].map((q) => `${q[0] - host.left},${q[1] - host.top}`).join(' '));
+      else shape.setAttribute('points', path.map((q) => `${q[0] - host.left},${q[1] - host.top}`).join(' '));
+      shape.setAttribute('fill', mode === 'paint' ? 'none' : 'rgba(60,140,230,.15)');
+      shape.setAttribute('stroke-width', mode === 'paint' ? '8' : '1.5'); shape.setAttribute('stroke-opacity', mode === 'paint' ? '.45' : '1');
+    };
+    const paintAt = (x, y) => { const h = vp.pickBody({ clientX: x, clientY: y }); if (h && !hits.has(h.id)) { hits.add(h.id); vp.selected.add(h.id); vp.refreshMaterials(); } };
+    if (mode === 'paint') paintAt(...start);
+    const move = (ev) => {
+      const cur = [ev.clientX, ev.clientY];
+      if (mode !== 'window') path.push(cur);
+      if (mode === 'paint') {
+        const d = Math.hypot(cur[0] - last[0], cur[1] - last[1]), k = Math.max(1, Math.ceil(d / 4));
+        for (let i = 1; i <= k; i++) paintAt(last[0] + ((cur[0] - last[0]) * i) / k, last[1] + ((cur[1] - last[1]) * i) / k);
+        last = cur;
+      }
+      draw(cur);
+    };
+    const up = (ev) => {
+      removeEventListener('pointermove', move);
+      svg.style.display = 'none';
+      const end = [ev.clientX, ev.clientY];
+      if (mode === 'paint') { renderTree(); renderRibbon(); return; }
+      if (mode === 'window' && Math.abs(end[0] - start[0]) < 4 && Math.abs(end[1] - start[1]) < 4) { // a plain click still picks
+        const h = vp.pickBody(ev); selectBody(h?.id, add); return;
+      }
+      const pp = mode === 'window' ? [start, end] : path; // a lasso's extent is its whole path, not just its two ends
+      const x0 = Math.min(...pp.map((q) => q[0])), x1 = Math.max(...pp.map((q) => q[0])), y0 = Math.min(...pp.map((q) => q[1])), y1 = Math.max(...pp.map((q) => q[1]));
+      const enclosed = end[0] >= start[0]; // left-to-right: whole body must be inside
+      const ids = [];
+      for (const m of meshes()) {
+        const pts = screenPts(m, rc);
+        if (!pts.length) continue;
+        const inside = mode === 'window' ? (q) => q[0] >= x0 && q[0] <= x1 && q[1] >= y0 && q[1] <= y1 : (q) => inPoly(q, path);
+        const hit = mode === 'window' && enclosed ? pts.every(inside) : pts.some(inside);
+        if (hit) ids.push(m.userData.id);
+      }
+      if (!(mode === 'window' && enclosed)) { // crossing and freeform also take any body visible anywhere inside the shape, not only bodies with a corner inside it
+        const gx = Math.max(10, (x1 - x0) / 20), gy = Math.max(10, (y1 - y0) / 20);
+        for (let yy = y0; yy <= y1; yy += gy) for (let xx = x0; xx <= x1; xx += gx) {
+          if (mode !== 'window' && !inPoly([xx, yy], path)) continue;
+          const h = vp.pickBody({ clientX: xx, clientY: yy });
+          if (h && !ids.includes(h.id)) ids.push(h.id);
+        }
+      }
+      apply(ids, add);
+      if (!ids.length && !add) toast('Nothing selected');
+    };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', up, { once: true });
+  }, true);
 }
 
 function bindZoomWindow() {
@@ -2425,7 +2651,7 @@ function bindZoomWindow() {
     const up = (ev) => {
       removeEventListener('pointermove', move);
       z.style.display = 'none';
-      const cr = cv.getBoundingClientRect();
+      const cr = vp.rect();
       vp.zoomToRect(st.x + r.left - cr.left, st.y + r.top - cr.top, ev.clientX - cr.left, ev.clientY - cr.top);
       st = null;
       setNavMode('orbit');
@@ -2552,10 +2778,10 @@ async function showVersions(pr) {
       if (b.dataset.a === 'open') {
         if (!newTab({ reuseBlank: true })) return;
         m.close();
-        loadProject(txt, pr.ver); doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh();
+        loadProject(txt, pr.ver, pr.seq || pr.ver); doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh();
         toast(`Opened V${rev} of "${pr.name}". Save to make it the latest version.`);
       } else {
-        if (!confirm(`Restore V${rev}? It becomes the new latest version; the current one is kept in the history.`)) return;
+        if (!(await confirmBox({ title: `Restore V${rev}?`, message: 'It becomes the new latest version; the current one is kept in the history.', ok: 'Restore' }))) return;
         const p = await call('PUT', '/projects/' + encodeURIComponent(pr.name), txt, { 'if-match': String(pr.ver) });
         if (!p.ok) return toast(p.status === 409 ? 'The design changed on another device. Reload the list and try again.' : (p.data?.error || 'Restore failed.'), true);
         m.close(); renderDataPanel(); toast(`Restored V${rev} as V${p.data.rev}`);
@@ -2569,7 +2795,7 @@ async function renderDataPanel() {
   host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
     <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
     <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
-    <div class="dp-actions"><button class="btn primary" id="dp-new">New Design</button></div>`;
+    <div class="dp-actions"><button class="btn primary" id="dp-new">New Design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New Folder</button></div>`;
   $('#dp-close').onclick = () => toggleDataPanel(false);
   $('#dp-refresh').onclick = renderDataPanel;
   $('#dp-new').onclick = () => { newDoc(); };
@@ -2580,42 +2806,139 @@ async function renderDataPanel() {
     const when = o.modified ? new Date(o.modified) : new Date();
     const fmt = 'Edited ' + when.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     el.innerHTML = `<div class="dp-thumb">${o.thumb ? `<img alt="" src="/api/projects/${encodeURIComponent(name)}/thumb?${o.modified | 0}">` : ficon('box', 40)}</div>
-      <div class="dp-info"><div class="dp-name"><span>${esc(name)}</span></div>
-      <div class="dp-date">${fmt}</div><div class="dp-bottom">${o.del ? `<button class="dp-del" title="Delete">${uicon('remove', 15)}</button>` : ''}<button class="dp-ver" title="Version history">V${o.ver || 1} ▾</button></div></div>
-      <button type="button" class="dp-open" title="Open" aria-label="Open design">${uicon('file', 16)}</button>`;
+      <div class="dp-info"><div class="dp-name"><span>${esc(name)}</span>${o.del ? `<button type="button" class="dp-rename" title="Rename" aria-label="Rename ${esc(name)}">${uicon('pencil', 14)}</button>` : ''}</div>
+      <div class="dp-date">${fmt}</div><div class="dp-bottom"><button type="button" class="dp-ver" title="Versions" aria-haspopup="menu">V${o.ver || 1} ▾</button></div></div>`;
     return el;
   };
   if (acct.server && acct.user) {
-    const r = await call('GET', '/projects');
+    const [r, fr] = await Promise.all([call('GET', '/projects'), call('GET', '/folders')]);
     if (!r.ok) { grid.innerHTML = `<div class="dp-empty">${esc(r.data?.error || 'Could not load designs.')}</div>`; return; }
+    const folders = fr.ok ? fr.data.folders : [];
     $('#dp-count').textContent = `${r.data.length} design${r.data.length === 1 ? '' : 's'}`;
+    $('#dp-newfolder').onclick = () => newFolder('');
+    const collapsed = new Set(JSON.parse(localStorage.getItem('sketchy.folders.collapsed') || '[]'));
+    const saveCollapsed = () => { try { localStorage.setItem('sketchy.folders.collapsed', JSON.stringify([...collapsed])); } catch { /* storage unavailable */ } };
+    const newFolder = async (parent) => {
+      const nm = await askName({ title: parent ? `New folder in ${parent}` : 'New folder', label: 'Folder name', ok: 'Create' });
+      if (!nm) return;
+      const rr = await call('POST', '/folders', { path: (parent ? parent + '/' : '') + nm });
+      if (!rr.ok) return toast(rr.data?.error || 'Could not create the folder.', true);
+      collapsed.delete(parent); saveCollapsed(); renderDataPanel();
+    };
+    const moveDesign = async (name, folder) => {
+      const rr = await call('POST', '/projects/' + encodeURIComponent(name) + '/move', { folder });
+      if (!rr.ok) return toast(rr.data?.error || 'Could not move the design.', true);
+      if (name === doc.name) doc.folder = folder;
+      renderDataPanel();
+    };
     const q = $('#dp-q'), draw = () => {
-    grid.innerHTML = '';
-    const items = r.data.filter((x) => x.name.toLowerCase().includes(q.value.trim().toLowerCase())).sort((a, b) => b.modified - a.modified);
-    if (!r.data.length) grid.innerHTML = '<div class="dp-empty">No designs yet. Use <b>Save</b> (Ctrl+S) to store the current model in your profile.</div>';
-    else if (!items.length) grid.innerHTML = '<div class="dp-empty">No designs match your search.</div>';
-    for (const pr of items) {
-      const el = card(pr.name, { modified: pr.modified, thumb: pr.thumb, ver: pr.ver, del: true });
-      el.onclick = async (e) => {
-        if (e.target.closest('.dp-del')) return;
-        if (focusOpenDesign(pr.name)) return;
-        if (!newTab({ reuseBlank: true })) return;
-        const dr = await call('GET', '/drafts');
-        const draft = dr.ok && dr.data.find((x) => x.key === pr.name && x.modified > pr.modified + 2000);
-        if (draft && confirm(`A newer autosaved draft of "${pr.name}" exists (${draft.device || 'another device'}, ${ago(draft.modified)}).\n\nOK = resume the draft, Cancel = open the saved version.`)) {
-          const g = await call('GET', '/drafts/' + encodeURIComponent(pr.name));
-          if (g.ok) { loadProject(typeof g.data === 'string' ? g.data : JSON.stringify(g.data), draft.base ?? 0); doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh(); return; }
+      grid.innerHTML = '';
+      const term = q.value.trim().toLowerCase();
+      if (!r.data.length && !folders.length) { grid.innerHTML = '<div class="dp-empty">No designs yet. Use <b>Save</b> (Ctrl+S) to store the current model in your profile.</div>'; return; }
+      const designCard = (pr, showPath) => {
+        const el = card(pr.name, { modified: pr.modified, thumb: pr.thumb, ver: pr.ver, del: true });
+        if (showPath && pr.folder) el.querySelector('.dp-date').insertAdjacentHTML('afterend', `<div class="dp-where">${uicon('folder', 13)} ${esc(pr.folder)}</div>`);
+        el.draggable = true;
+        el.ondragstart = (e) => { e.dataTransfer.setData('text/x-sketchy-design', pr.name); e.dataTransfer.effectAllowed = 'move'; };
+        el.onclick = async (e) => {
+          if (e.target.closest('.dp-rename,.dp-more,.dp-ver')) return;
+          if (focusOpenDesign(pr.name)) return;
+          if (!newTab({ reuseBlank: true })) return;
+          const dr = await call('GET', '/drafts');
+          const draft = dr.ok && dr.data.find((x) => x.key === pr.name && x.modified > pr.modified + 2000);
+          if (draft && await confirmBox({ title: 'Resume the autosaved draft?', message: `A newer autosaved draft of "${pr.name}" exists (${draft.device || 'another device'}, ${ago(draft.modified)}). Resume it, or open the saved version?`, ok: 'Resume draft' })) {
+            const g = await call('GET', '/drafts/' + encodeURIComponent(pr.name));
+            if (g.ok) { loadProject(typeof g.data === 'string' ? g.data : JSON.stringify(g.data), draft.base ?? 0); doc.folder = pr.folder || ''; doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh(); return; }
+          }
+          openDesign(pr.name);
+        };
+        el.querySelector('.dp-ver').onclick = (e) => {
+          e.stopPropagation(); const b = e.currentTarget.getBoundingClientRect();
+          showMenu(b.left, b.bottom + 2, [{ head: `CURRENT: V${pr.ver || 1}` }, { label: 'Version history…', uicon: 'refresh', run: () => showVersions(pr) }]);
+        };
+        const rename = async () => {
+          const nm = await askName({ title: 'Rename design', label: 'Name', value: pr.name, ok: 'Rename' });
+          if (!nm || nm === pr.name) return;
+          const rr = await call('POST', '/projects/' + encodeURIComponent(pr.name) + '/rename', { to: nm });
+          if (!rr.ok) return toast(rr.data?.error || 'Could not rename the design.', true);
+          if (pr.name === doc.name) { doc.name = nm; $('#doc-name').textContent = nm; }
+          renderDataPanel();
+        };
+        el.querySelector('.dp-rename').onclick = (e) => { e.stopPropagation(); rename(); };
+        const more = document.createElement('button'); more.type = 'button'; more.className = 'dp-more'; more.title = 'More actions'; more.setAttribute('aria-label', `More actions for ${pr.name}`); more.setAttribute('aria-haspopup', 'menu'); more.innerHTML = uicon('more', 16);
+        const menu = (x, y) => showMenu(x, y, [
+          { label: 'Move to folder…', uicon: 'folder', run: async () => { const f = await chooseFolder({ title: `Move "${pr.name}" to`, current: pr.folder || '' }); if (f !== null) moveDesign(pr.name, f); } },
+          { label: 'Delete', uicon: 'trash', run: async () => {
+            if (!(await confirmBox({ title: 'Delete design', message: `Delete "${pr.name}" permanently? Its version history goes with it.`, ok: 'Delete', danger: true }))) return;
+            await call('DELETE', '/projects/' + encodeURIComponent(pr.name));
+            renderDataPanel();
+          } },
+        ]);
+        more.onclick = (e) => { e.stopPropagation(); const b = more.getBoundingClientRect(); menu(b.left, b.bottom + 2); };
+        el.oncontextmenu = (e) => { e.preventDefault(); menu(e.clientX, e.clientY); };
+        el.appendChild(more);
+        return el;
+      };
+      if (term) { // searching: a flat list across all folders
+        const items = r.data.filter((x) => x.name.toLowerCase().includes(term)).sort((a, b) => b.modified - a.modified);
+        if (!items.length) grid.innerHTML = '<div class="dp-empty">No designs match your search.</div>';
+        for (const pr of items) grid.appendChild(designCard(pr, true));
+        return;
+      }
+      const drop = (el, path) => {
+        el.ondragover = (e) => { if ([...e.dataTransfer.types].includes('text/x-sketchy-design')) { e.preventDefault(); el.classList.add('dropping'); } };
+        el.ondragleave = () => el.classList.remove('dropping');
+        el.ondrop = (e) => { e.preventDefault(); el.classList.remove('dropping'); const n = e.dataTransfer.getData('text/x-sketchy-design'); if (n) moveDesign(n, path); };
+      };
+      const hidden = (path) => { const parts = path.split('/'); for (let i = 1; i < parts.length; i++) if (collapsed.has(parts.slice(0, i).join('/'))) return true; return false; };
+      for (const path of [...folders].sort((a, b) => a.localeCompare(b))) {
+        if (hidden(path)) continue;
+        const depth = path.split('/').length - 1, isClosed = collapsed.has(path);
+        const inside = r.data.filter((x) => x.folder === path);
+        const total = r.data.filter((x) => x.folder === path || (x.folder || '').startsWith(path + '/')).length;
+        const row = document.createElement('div');
+        row.className = 'dp-folder'; row.style.marginLeft = depth * 14 + 'px';
+        row.innerHTML = `<button type="button" class="dp-ftoggle" aria-expanded="${!isClosed}" aria-label="${isClosed ? 'Expand' : 'Collapse'} folder ${esc(path.split('/').pop())}"><span class="dp-chev${isClosed ? ' closed' : ''}">${uicon('caret', 12)}</span>${uicon('folder', 16)}<span class="dp-fname">${esc(path.split('/').pop())}</span><small>${total}</small></button>
+          <button type="button" class="dp-more" title="Folder actions" aria-haspopup="menu" aria-label="Actions for folder ${esc(path.split('/').pop())}">${uicon('more', 16)}</button>`;
+        row.querySelector('.dp-ftoggle').onclick = () => { isClosed ? collapsed.delete(path) : collapsed.add(path); saveCollapsed(); draw(); };
+        const fmenu = (x, y) => showMenu(x, y, [
+          { label: 'New subfolder…', uicon: 'plus', run: () => newFolder(path) },
+          { label: 'Rename…', uicon: 'file', run: async () => {
+            const nm = await askName({ title: 'Rename folder', label: 'Folder name', value: path.split('/').pop(), ok: 'Rename' });
+            if (!nm) return;
+            const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+            const rr = await call('PATCH', '/folders', { from: path, to: parent + nm });
+            if (!rr.ok) return toast(rr.data?.error || 'Could not rename the folder.', true);
+            if ((doc.folder || '') === path || (doc.folder || '').startsWith(path + '/')) doc.folder = parent + nm + (doc.folder || '').slice(path.length);
+            renderDataPanel();
+          } },
+          { label: 'Move to folder…', uicon: 'folder', run: async () => {
+            const dest = await chooseFolder({ title: `Move folder "${path.split('/').pop()}" to`, current: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '', exclude: path });
+            if (dest === null) return;
+            const rr = await call('PATCH', '/folders', { from: path, to: (dest ? dest + '/' : '') + path.split('/').pop() });
+            if (!rr.ok) return toast(rr.data?.error || 'Could not move the folder.', true);
+            renderDataPanel();
+          } },
+          { label: 'Delete folder', uicon: 'trash', run: async () => {
+            if (!(await confirmBox({ title: 'Delete folder', message: `Delete the folder "${path}"? It must be empty of designs.`, ok: 'Delete', danger: true }))) return;
+            const rr = await call('DELETE', '/folders?path=' + encodeURIComponent(path));
+            if (!rr.ok) return toast(rr.data?.error || 'Could not delete the folder.', true);
+            renderDataPanel();
+          } },
+        ]);
+        row.querySelector('.dp-more').onclick = (e) => { const b = e.currentTarget.getBoundingClientRect(); fmenu(b.left, b.bottom + 2); };
+        row.oncontextmenu = (e) => { e.preventDefault(); fmenu(e.clientX, e.clientY); };
+        drop(row, path);
+        grid.appendChild(row);
+        if (!isClosed) {
+          if (!inside.length && !folders.some((f) => f.startsWith(path + '/'))) grid.insertAdjacentHTML('beforeend', `<div class="dp-empty dp-fempty" style="margin-left:${depth * 14 + 22}px">Empty folder. Drag designs here, or choose Save and pick it.</div>`);
+          for (const pr of inside.sort((a, b) => b.modified - a.modified)) { const c = designCard(pr, false); c.style.marginLeft = depth * 14 + 14 + 'px'; grid.appendChild(c); }
         }
-        openDesign(pr.name);
-      };
-      el.querySelector('.dp-ver').onclick = (e) => { e.stopPropagation(); showVersions(pr); };
-      el.querySelector('.dp-del').onclick = async () => {
-        if (!confirm(`Delete "${pr.name}" permanently?`)) return;
-        await call('DELETE', '/projects/' + encodeURIComponent(pr.name));
-        renderDataPanel();
-      };
-      grid.appendChild(el);
-    }
+      }
+      const loose = r.data.filter((x) => !x.folder).sort((a, b) => b.modified - a.modified);
+      if (folders.length && loose.length) { const h = document.createElement('div'); h.className = 'dp-folder dp-root'; h.innerHTML = `<span class="dp-fname">${uicon('folder', 16)} Not in a folder</span>`; drop(h, ''); grid.appendChild(h); }
+      for (const pr of loose) grid.appendChild(designCard(pr, false));
+      if (folders.length && !loose.length) { const h = document.createElement('div'); h.className = 'dp-empty'; h.textContent = 'Drag a design here to take it out of its folder.'; drop(h, ''); grid.appendChild(h); }
     };
     q.oninput = draw; draw();
   } else {
@@ -2673,6 +2996,7 @@ function bindKeys() {
     if (mod && key === 'y') { e.preventDefault(); redo(); return; }
     if (e.key === 'Escape') {
       if (navMode !== 'orbit') { setNavMode('orbit'); return; }
+      if (selMode !== 'click' && !sketch && !dialog && !measure) { selMode = 'click'; toast('Click selection'); return; }
       if (sketch && !sketch.picking) { SU.key(e); return; }
       if (!dialog && !measure && (selEdges.length || selFace || profSel.size)) { profSel.clear(); updateProfileView(); selEdges = []; selFace = null; vp.showFaces([], null); updateEdgeView(); renderRibbon(); return; }
       if (measure) { endMeasure(); return; }
@@ -2701,7 +3025,7 @@ async function boot() {
   const caret = uicon('caret', 7, 0).replace('class="ui"', 'class="ui caret"');
   const set = (id, html) => { $('#' + id).innerHTML = html; };
   set('btn-home', uicon('home', 18, 1.5)); set('btn-data', uicon('grid', 18, 1.5));
-  set('btn-menu', uicon('file', 18, 1.5) + caret); set('btn-save', uicon('save', 18, 1.5));
+  set('btn-menu', uicon('file', 18, 1.5) + caret);
   set('btn-undo', uicon('undo', 18, 1.5) + caret); set('btn-redo', uicon('redo', 18, 1.5) + caret);
   set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('sparkle', 18, 1.4));
   set('btn-bell', uicon('bell', 18, 1.5));
@@ -2720,15 +3044,14 @@ async function boot() {
     cons: () => curSketch().params.cons || [], setCons: (c) => setSketchCons(c),
     toast: (m) => toast(m), evalExpr: (t, kind = 'len') => evalExpr(t, (n) => paramState.values[n], kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
-  buildNavBar(); bindViewport(); bindZoomWindow(); bindKeys(); bindManip();
+  buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip();
   bindTooltips();
   $('#btn-menu').dataset.menu = 1;
   $('#btn-menu').onclick = fileMenu;
-  $('#btn-save').onclick = () => save(false);
   $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
   $('#btn-home').onclick = () => toggleDataPanel(true);
   $('#btn-data').onclick = () => toggleDataPanel();
-  $('#btn-newtab').onclick = newDoc;
+  $('#btn-newtab').onclick = () => newDoc();
   renderDocTabs();
   $('#btn-ext').onclick = openQuickSearch;
   $('#btn-bell').onclick = () => toast('No new notifications.');
@@ -2768,12 +3091,36 @@ async function boot() {
     isDark: () => getTheme() === 'dark', onTheme: () => setTheme(getTheme() === 'dark' ? 'light' : 'dark'),
     onLogout: async () => { await signOut(); try { localStorage.removeItem('sketchy.autosave'); } catch { /* ignore */ } location.reload(); },
   }));
-  try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length) { loadProject(a); toast('Restored your last session'); } } } catch { /* ignore */ }
   if (localStorage.getItem('sketchy.data') === '1') toggleDataPanel(true);
   setAccountChangeHandler(() => { if (dataOpen) renderDataPanel(); });
   startRemotePolling();
-  checkDrafts();
   refresh();
   window.__sketchy = { moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
+  openLastOrCreate().then(checkDrafts); // not awaited: the New design dialog must not hold up the rest of start-up
+}
+/** On start: reopen the design you were last in; otherwise restore unsaved work, or ask for a name for a new design. */
+async function openLastOrCreate() {
+  if (!acct.server || !acct.user) { // no server: the old behaviour, restore the last session from this browser
+    try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length) { loadProject(a); toast('Restored your last session'); } } } catch { /* ignore */ }
+    return;
+  }
+  let last = ''; try { last = localStorage.getItem('sketchy.last') || ''; } catch { /* storage unavailable */ }
+  if (last && !(await call('GET', '/projects/' + encodeURIComponent(last) + '/meta')).ok) last = ''; // deleted or renamed since
+  if (last) {
+    await openDesign(last, true);
+    if (doc.name === last && doc.rev) {
+      try { // work saved only in this browser (the tab closed before the autosave landed) wins if it is newer
+        const a = JSON.parse(localStorage.getItem('sketchy.autosave') || 'null'), t = +localStorage.getItem('sketchy.autosave.t') || 0;
+        const mt = await call('GET', '/projects/' + encodeURIComponent(last) + '/meta');
+        if (a && a.name === last && mt.ok && t > mt.data.modified + 2000 && JSON.stringify(a.features) !== JSON.stringify(doc.features)) {
+          const rev = doc.rev, seq = doc.seq, folder = doc.folder;
+          loadProject(JSON.stringify(a), rev, seq); doc.folder = folder; markDirty(); toast('Restored changes that had not reached the server');
+        }
+      } catch { /* ignore */ }
+      return;
+    }
+  }
+  try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length && (d.name === 'Untitled' || !d.name)) { loadProject(a); toast('Restored your unsaved design'); await nameUntitled(); return; } } } catch { /* ignore */ }
+  await newDoc(true);
 }
 boot();
