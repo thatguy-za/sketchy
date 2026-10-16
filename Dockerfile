@@ -16,9 +16,12 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY server.js mcp.js ./
+RUN apk add --no-cache su-exec
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY src ./src
 COPY --from=build --chown=node:node /data-empty /data
 VOLUME /data
 EXPOSE 8080
-USER node
+# starts as root to fix the ownership of /data, then drops to the node user (see docker-entrypoint.sh)
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "server.js"]
