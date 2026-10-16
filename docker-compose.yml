@@ -1,11 +1,15 @@
 services:
   sketchy:
-    build: .
-    ports: ["8080:8080"]
-    volumes: ["sketchy-data:/data"]
+    image: ghcr.io/thatguy-za/sketchy:latest
+    container_name: sketchy
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
     environment:
       # set to "false" once your users have signed up
       ALLOW_REGISTRATION: "true"
-    restart: unless-stopped
+    volumes:
+      - sketchy-data:/data
+
 volumes:
   sketchy-data:

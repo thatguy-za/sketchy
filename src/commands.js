@@ -73,7 +73,7 @@ export const CMD = {
   dxf: C('Insert DXF', 'sketch'),
   sk_text: C('Text', 'sketch'),
   canvas: C('Canvas', 'canvas', { off: true }),
-  section: C('Section Analysis', 'sectionan', { off: true }),
+  section: C('Section Analysis', 'sectionan'),
   interference: C('Interference', 'combine'),
   drivejoints: C('Drive Joints', 'joint'),
   draft: C('Draft', 'chamfer', { off: true }),
@@ -98,7 +98,7 @@ export const CMD = {
   sk_project: C('Project / Include', 'select', { off: true }),
 };
 
-export const WORKSPACE_TABS = ['SOLID', 'SURFACE', 'MESH', 'SHEET METAL', 'PLASTIC', 'MANAGE', 'UTILITIES'];
+export const WORKSPACE_TABS = ['SOLID', 'SURFACE', 'MESH', 'MANAGE', 'UTILITIES'];
 
 // show = buttons on the toolbar; menu = full dropdown ('|' = separator)
 export const TOOLBAR = {
@@ -109,7 +109,7 @@ export const TOOLBAR = {
     { label: 'CONSTRUCT', show: ['offsetplane'], menu: ['offsetplane'] },
     { label: 'INSPECT', show: ['measure', 'section'], menu: ['measure', 'angle', 'edgelen', 'faces', '|', 'properties', 'section', 'interference'] },
     { label: 'INSERT', show: ['derive', 'canvas', 'importstl'], menu: ['derive', 'canvas', 'importstl', 'svg', 'dxf'] },
-    { label: 'ASSEMBLE', show: ['joint'], menu: ['newcomp', 'joint', 'asbuilt', 'drivejoints'], right: true },
+    { label: 'ASSEMBLE', show: ['joint'], menu: ['newcomp', 'joint', 'asbuilt', 'drivejoints'] },
     { label: 'SELECT', show: ['select'], menu: ['select'], big: true },
   ],
   SURFACE: [
@@ -120,8 +120,6 @@ export const TOOLBAR = {
     { label: 'CREATE', show: ['importstl'], menu: ['importstl'] },
     { label: 'MODIFY', show: ['shell', 'combine'], menu: [], allOff: true },
   ],
-  'SHEET METAL': [{ label: 'CREATE', show: ['extrude', 'loft'], menu: [], allOff: true }],
-  PLASTIC: [{ label: 'CREATE', show: ['shell', 'rib'], menu: [], allOff: true }],
   MANAGE: [
     { label: 'PARAMETERS', show: ['parameters'], menu: ['parameters'] },
     { label: 'INSPECT', show: ['measure', 'properties'], menu: ['measure', 'angle', 'edgelen', 'faces', '|', 'properties'] },

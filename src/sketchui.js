@@ -205,9 +205,9 @@ export function createSketchUI(app) {
     if (s.pts?.length && cur) {
       const typed = s.dim?.typed || {};
       if (s.tool === 'line' || s.tool === 'path') {
-        vp.overlay.add(line3(pathPolygon(previewPathPts(s, cur, typed), false), 0xf08c00));
+        vp.overlay.add(line3(pathPolygon(previewPathPts(s, cur, typed), false), (vp.dark ? 0xe6e8eb : 0x2d3138)));
       } else if (s.tool === 'arc') {
-        vp.overlay.add(line3(pathPolygon(arcPreviewPts(s, cur, typed), false), 0xf08c00));
+        vp.overlay.add(line3(pathPolygon(arcPreviewPts(s, cur, typed), false), (vp.dark ? 0xe6e8eb : 0x2d3138)));
       } else if (s.tool === 'offset' && s.off) {
         const res = offsetShape(shapes()[s.off.idx], typed.d ?? s.offD ?? 2);
         if (res) vp.overlay.add(line3(shapeToPolygon(res), 0xf08c00, true));
@@ -216,7 +216,7 @@ export function createSketchUI(app) {
         if (res) vp.overlay.add(line3(shapeToPolygon(res), 0xf08c00, res.t !== 'path' || !res.open));
       } else {
         const sh = drawnShape(s.tool, s.pts, cur, typed);
-        if (sh) vp.overlay.add(line3(shapeToPolygon(sh), 0xf08c00, true));
+        if (sh) vp.overlay.add(line3(shapeToPolygon(sh), (vp.dark ? 0xe6e8eb : 0x2d3138), true));
       }
     }
     // inference markers + guides
@@ -257,11 +257,11 @@ export function createSketchUI(app) {
     if (!dimbox) {
       dimbox = document.createElement('div');
       dimbox.id = 'dimbox';
-      dimbox.innerHTML = fields.map((f) => `<label><span>${f.l}</span><input data-k="${f.k}" inputmode="decimal" autocomplete="off" spellcheck="false"></label>`).join('');
+      dimbox.innerHTML = '<svg class="dimsvg"></svg>' + fields.map((f) => `<label data-k="${f.k}"><span>${f.l}</span><input data-k="${f.k}" inputmode="decimal" autocomplete="off" spellcheck="false"><i class="lk" title="Locked: you typed this value"></i></label>`).join('');
       view.appendChild(dimbox);
       const inputs = [...dimbox.querySelectorAll('input')];
       inputs.forEach((inp, i) => {
-        inp.onfocus = () => inp.select();
+        inp.onfocus = () => { inp.value = inp.value.replace(/\s*(mm|cm|m|in|ft|°)$/, ''); inp.select(); };
         inp.oninput = () => {
           const k = inp.dataset.k, txt = inp.value.trim();
           if (!s.dim.exprs) s.dim.exprs = {};
@@ -279,19 +279,68 @@ export function createSketchUI(app) {
     }
     updateDimbox();
   }
+  const ARROW = 5;
+  /** Dimension line from a to b (screen px) with arrowheads and extension lines from the measured points p and q. */
+  function dimLine(a, b, p, q) {
+    const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
+    const head = (t, dir) => `<path d="M${t.x} ${t.y}l${dir * (ux * 9 - uy * ARROW)} ${dir * (uy * 9 + ux * ARROW)}M${t.x} ${t.y}l${dir * (ux * 9 + uy * ARROW)} ${dir * (uy * 9 - ux * ARROW)}"/>`;
+    const ext = (from, to) => { const ex = to.x - from.x, ey = to.y - from.y, el = Math.hypot(ex, ey) || 1; return `<line x1="${from.x + (ex / el) * 4}" y1="${from.y + (ey / el) * 4}" x2="${to.x + (ex / el) * 8}" y2="${to.y + (ey / el) * 8}"/>`; };
+    return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"/>${head(a, 1)}${head(b, -1)}${ext(p, a)}${ext(q, b)}`;
+  }
+  /** Fusion-style on-canvas dimension fields: each value sits on its own dimension line beside the shape. */
+  function layoutDimbox(s, lv) {
+    const svg = dimbox.querySelector('.dimsvg'), place = {};
+    let lines = '';
+    const cur = s.cursor, typed = s.dim.typed;
+    if (['rect', 'crect', 'rrect'].includes(s.tool)) {
+      const sh = drawnShape(s.tool, s.pts, cur, typed);
+      const c = [[sh.x, sh.y], [sh.x + sh.w, sh.y], [sh.x + sh.w, sh.y + sh.h], [sh.x, sh.y + sh.h]].map(scr);
+      const L = Math.min(...c.map((q) => q.x)), R = Math.max(...c.map((q) => q.x)), T = Math.min(...c.map((q) => q.y)), B = Math.max(...c.map((q) => q.y));
+      const yb = B + 34, xl = L - 50;
+      lines += dimLine({ x: L, y: yb }, { x: R, y: yb }, { x: L, y: B }, { x: R, y: B });
+      lines += dimLine({ x: xl, y: T }, { x: xl, y: B }, { x: L, y: T }, { x: L, y: B });
+      place.w = { x: (L + R) / 2, y: yb };
+      place.h = { x: xl, y: (T + B) / 2 };
+      if (place.r) place.r = null;
+    } else if ((s.tool === 'line' || s.tool === 'path') && s.pts.length) {
+      const a = s.pts[s.pts.length - 1], e = segEnd(s.pts, cur, typed), A = scr(a), E = scr(e);
+      const dx = E.x - A.x, dy = E.y - A.y, L = Math.hypot(dx, dy);
+      if (L > 30) {
+        let nx = -dy / L, ny = dx / L; if (ny > 0) { nx = -nx; ny = -ny; } // offset to the upper side of the line
+        const o = 30, A2 = { x: A.x + nx * o, y: A.y + ny * o }, E2 = { x: E.x + nx * o, y: E.y + ny * o };
+        lines += dimLine(A2, E2, A, E);
+        place.len = { x: (A2.x + E2.x) / 2, y: (A2.y + E2.y) / 2 };
+        place.ang = { x: A.x - 56 * Math.sign(dx || 1), y: A.y + 24 };
+      }
+    } else if (s.tool === 'circle' && s.pts.length) {
+      const sh = drawnShape('circle', s.pts, cur, typed), C = scr([sh.cx, sh.cy]), r = ppmAt([sh.cx, sh.cy]) * sh.r;
+      lines += `<line x1="${C.x - r}" y1="${C.y}" x2="${C.x + r}" y2="${C.y}"/>`;
+      place.d = { x: C.x + r + 70, y: C.y };
+      lines += `<line x1="${C.x + r}" y1="${C.y}" x2="${C.x + r + 12}" y2="${C.y}"/>`;
+    }
+    svg.innerHTML = lines;
+    const labels = [...dimbox.querySelectorAll('label')], vw = view.clientWidth, vh = view.clientHeight;
+    const stack = scr(cur);
+    let n = 0;
+    for (const lb of labels) {
+      const pos = place[lb.dataset.k];
+      lb.classList.toggle('placed', !!pos);
+      if (pos) { lb.style.left = Math.max(70, Math.min(vw - 70, pos.x)) + 'px'; lb.style.top = Math.max(16, Math.min(vh - 16, pos.y)) + 'px'; }
+      else { lb.style.left = Math.min(stack.x + 82, vw - 70) + 'px'; lb.style.top = Math.min(stack.y + 30 + n * 30, vh - 20) + 'px'; n++; }
+    }
+  }
   function updateDimbox() {
     const s = S();
     if (!dimbox || !s.pts?.length || !s.cursor) return;
-    const lv = live(s.tool, s.pts, s.cursor);
+    const lv = live(s.tool, s.pts, s.cursor), unit = getUnits();
     for (const inp of dimbox.querySelectorAll('input')) {
       const k = inp.dataset.k;
       const typed = s.dim.typed[k] != null;
       inp.classList.toggle('live', !typed);
-      if (document.activeElement !== inp && !typed) inp.value = k === 'ang' ? fmt(lv.ang) : dispStr(lv[k]);
+      inp.parentNode.classList.toggle('typed', typed);
+      if (document.activeElement !== inp && !typed) inp.value = k === 'ang' ? fmt(lv.ang) + '°' : `${dispStr(lv[k])} ${unit}`;
     }
-    const sp = scr(s.cursor);
-    dimbox.style.left = Math.min(sp.x + 22, view.clientWidth - 150) + 'px';
-    dimbox.style.top = Math.min(sp.y + 22, view.clientHeight - 100) + 'px';
+    layoutDimbox(s, lv);
   }
 
   // ------------------------------------------------------------ commit / cancel

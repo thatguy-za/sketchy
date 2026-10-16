@@ -11,7 +11,8 @@ THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 export class Viewport {
   constructor(canvas, cubeEl) {
     this.canvas = canvas;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, stencil: true, preserveDrawingBuffer: true });
+    this.renderer.localClippingEnabled = true;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.scene = new THREE.Scene();
     this.persp = new THREE.PerspectiveCamera(35, 1, 0.5, 20000);
@@ -20,6 +21,7 @@ export class Viewport {
     this.persp.position.set(90, -120, 80);
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = false;
+    this.controls.addEventListener('start', () => { this.anim = null; });
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
     this.controls.screenSpacePanning = true;
 
@@ -76,10 +78,16 @@ export class Viewport {
   }
 
   // ---- static scene furniture ----
-  buildGrid() {
+  /** Rebuild the ground grid with tones that suit the theme (subtle lines on a dark canvas). */
+  applyTheme(dark) {
+    const vis = this.grid?.visible ?? true;
+    if (this.grid) { this.scene.remove(this.grid); this.grid.traverse((o) => o.geometry?.dispose()); }
+    this.buildGrid(dark); this.grid.visible = vis;
+  }
+  buildGrid(dark = false) {
     this.grid = new THREE.Group();
     const mk = (size, div, c1, c2) => { const g = new THREE.GridHelper(size, div, c1, c2); g.rotation.x = Math.PI / 2; g.material.transparent = true; g.material.opacity = 0.9; return g; };
-    this.grid.add(mk(1000, 100, 0xaab2bd, 0xbcc3cc), mk(1000, 1000, 0xcdd3da, 0xcdd3da));
+    this.grid.add(...(dark ? [mk(1000, 100, 0x4a525c, 0x3a4048), mk(1000, 1000, 0x2b3037, 0x2b3037)] : [mk(1000, 100, 0xaab2bd, 0xbcc3cc), mk(1000, 1000, 0xcdd3da, 0xcdd3da)]));
     this.grid.children[1].material.opacity = 0.55;
     this.grid.position.z = -0.02;
     this.scene.add(this.grid);
@@ -178,7 +186,39 @@ export class Viewport {
       this.bodyGroup.add(mesh);
     }
     this.refreshMaterials();
+    this.rebuildSection();
     if (!this.fitted && bodies.length) { this.fit(); this.fitted = true; }
+  }
+
+  // ---- section analysis: clip plane + stencil-capped cut face
+  setSection(sec) { // {axis:'X'|'Y'|'Z', offset, flip} or null
+    this.section = null;
+    if (sec) {
+      const n = new THREE.Vector3(); n['xyz'['XYZ'.indexOf(sec.axis)]] = sec.flip ? 1 : -1;
+      this.section = { ...sec, plane: new THREE.Plane(n, -n.dot(this.sectionAxisVec(sec.axis).multiplyScalar(sec.offset))) };
+    }
+    this.refreshMaterials(); this.rebuildSection();
+  }
+  sectionAxisVec(a) { const v = new THREE.Vector3(); v['xyz'['XYZ'.indexOf(a)]] = 1; return v; }
+  rebuildSection() {
+    if (this.sectionGroup) { this.scene.remove(this.sectionGroup); this.sectionGroup.traverse((o) => o.material?.dispose?.()); this.sectionGroup = null; }
+    if (!this.section) return;
+    const g = new THREE.Group(), plane = this.section.plane;
+    const stencil = (side, op) => new THREE.MeshBasicMaterial({ side, colorWrite: false, depthWrite: false, depthTest: false, clippingPlanes: [plane], stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op });
+    for (const m of this.bodyGroup.children) {
+      const back = new THREE.Mesh(m.geometry, stencil(THREE.BackSide, THREE.IncrementWrapStencilOp));
+      const front = new THREE.Mesh(m.geometry, stencil(THREE.FrontSide, THREE.DecrementWrapStencilOp));
+      for (const x of [back, front]) { x.renderOrder = 1; x.raycast = () => {}; g.add(x); }
+    }
+    const size = this.bounds().getSize(new THREE.Vector3()).length() * 4 + 100;
+    const cap = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshStandardMaterial({ color: 0xe0584d, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide, stencilWrite: true, stencilRef: 0, stencilFunc: THREE.NotEqualStencilFunc, stencilFail: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp, stencilZPass: THREE.ReplaceStencilOp }));
+    cap.renderOrder = 1.1; cap.raycast = () => {};
+    const n = plane.normal.clone();
+    cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    plane.coplanarPoint(cap.position);
+    cap.onAfterRender = (r) => r.clearStencil();
+    g.add(cap);
+    this.sectionGroup = g; this.scene.add(g);
   }
 
   // Per-body appearance colour (doc.appearance); falls back to the default steel material.
@@ -197,6 +237,11 @@ export class Viewport {
       e.visible = this.opts.edges;
       e.material = sel ? this.mats.edgeSel : this.mats.edge;
     }
+    const clip = this.section ? [this.section.plane] : null;
+    for (const mm of [this.mats.body, this.mats.sel, this.mats.hover, this.mats.edge, this.mats.edgeSel, ...Object.values(this.colorMats || {})]) {
+      if ((mm.clippingPlanes === null) !== (clip === null)) mm.needsUpdate = true;
+      mm.clippingPlanes = clip;
+    }
     this.mats.body.wireframe = this.mats.sel.wireframe = this.mats.hover.wireframe = this.opts.wire;
     for (const mm of Object.values(this.colorMats || {})) mm.wireframe = this.opts.wire;
     this.grid.visible = this.opts.grid && !this.hideGround;
@@ -206,7 +251,7 @@ export class Viewport {
   pickBody(ev) {
     this.setRay(ev);
     const hit = this.ray.intersectObjects(this.bodyGroup.children, false)[0];
-    return hit ? { id: hit.object.userData.id, point: hit.point, normal: hit.face?.normal?.toArray() } : null;
+    return hit ? { id: hit.object.userData.id, point: hit.point, normal: hit.face?.normal?.toArray(), distance: hit.distance } : null;
   }
   // Planar face under the cursor: {id, point, normal, tris, mesh, face:true} | {curved:true, ...} | null
   pickPlanarFace(ev) {
@@ -241,35 +286,47 @@ export class Viewport {
   }
   // ---- sketch profile regions (shaded, pickable) ----
   // items: [{id, polys}] from kernel.profilesOf; params: sketch plane params.
-  setProfiles(items, params, pickable = true) {
+  setProfiles(items, params, pickable = true) { this.setProfileGroups(items?.length ? [{ items, params, pickable }] : []); }
+  /** groups: [{items, params, pickable, sk?}]. With `sk`, mesh ids are "sk|id" so several sketches can be shown and picked together. */
+  setProfileGroups(groups) {
     for (const c of [...this.profileGroup.children]) { c.geometry.dispose(); c.material.dispose(); this.profileGroup.remove(c); }
     this.profileMeshes = [];
-    if (!items?.length) return;
-    const M = this.planeMatrix(params);
-    for (const it of items) {
-      const area = (pl) => pl.reduce((a, [x1, y1], i) => { const [x2, y2] = pl[(i + 1) % pl.length]; return a + (x1 * y2 - x2 * y1); }, 0) / 2;
-      const outers = it.polys.filter((pl) => area(pl) > 0), holes = it.polys.filter((pl) => area(pl) < 0);
-      for (const o of outers) {
-        const shape = new THREE.Shape(o.map(([x, y]) => new THREE.Vector2(x, y)));
-        for (const h of holes) shape.holes.push(new THREE.Path(h.map(([x, y]) => new THREE.Vector2(x, y))));
-        const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({ color: 0x5aa7ee, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false, depthTest: !pickable, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }));
-        mesh.matrixAutoUpdate = false;
-        mesh.matrix.copy(M);
-        mesh.userData.pid = it.id;
-        mesh.userData.pickable = pickable;
-        mesh.renderOrder = 2;
-        if (!pickable) mesh.raycast = () => {};
-        this.profileGroup.add(mesh);
-        this.profileMeshes.push(mesh);
+    for (const { items, params, pickable = true, sk } of groups) {
+      if (!items?.length) continue;
+      const M = this.planeMatrix(params);
+      for (const it of items) {
+        const area = (pl) => pl.reduce((a, [x1, y1], i) => { const [x2, y2] = pl[(i + 1) % pl.length]; return a + (x1 * y2 - x2 * y1); }, 0) / 2;
+        const outers = it.polys.filter((pl) => area(pl) > 0), holes = it.polys.filter((pl) => area(pl) < 0);
+        for (const o of outers) {
+          const shape = new THREE.Shape(o.map(([x, y]) => new THREE.Vector2(x, y)));
+          for (const h of holes) shape.holes.push(new THREE.Path(h.map(([x, y]) => new THREE.Vector2(x, y))));
+          const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({ color: 0x5aa7ee, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false, depthTest: !pickable, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }));
+          mesh.matrixAutoUpdate = false;
+          mesh.matrix.copy(M);
+          mesh.userData.pid = sk ? `${sk}|${it.id}` : it.id;
+          mesh.userData.rawId = it.id; mesh.userData.sk = sk || null;
+          mesh.userData.pickable = pickable;
+          mesh.renderOrder = 2;
+          if (!pickable) mesh.raycast = () => {};
+          this.profileGroup.add(mesh);
+          this.profileMeshes.push(mesh);
+        }
       }
     }
   }
   setProfileState(selected, hover) {
     for (const m of this.profileMeshes || []) {
       const id = m.userData.pid, sel = selected?.has(id), hov = id === hover;
-      m.material.opacity = m.userData.pickable ? (sel ? 0.4 : hov ? 0.4 : 0.14) : sel ? 0.62 : hov ? 0.5 : 0.28;
+      m.material.opacity = m.userData.pickable ? (sel ? 0.8 : hov ? 0.4 : 0.14) : sel ? 0.62 : hov ? 0.5 : 0.28;
       m.material.color.setHex(sel ? 0x2f7fe0 : hov ? 0x3c93f2 : 0x5aa7ee);
     }
+  }
+  /** Like pickProfile but returns {sk, id, key, distance} so callers can compare against body hits. */
+  pickProfileAt(ev) {
+    if (!this.profileMeshes?.length) return null;
+    this.setRay(ev);
+    const hit = this.ray.intersectObjects(this.profileMeshes.filter((m) => m.userData.pickable), false)[0];
+    return hit ? { sk: hit.object.userData.sk, id: hit.object.userData.rawId, key: hit.object.userData.pid, distance: hit.distance } : null;
   }
   pickProfile(ev) {
     if (!this.profileMeshes?.length) return null;
@@ -305,10 +362,10 @@ export class Viewport {
     g.setIndex(new THREE.BufferAttribute(pv.tris, 1));
     g.computeVertexNormals();
     const cut = pv.op === 'cut';
-    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: cut ? 0xe0584d : 0x3d95f0, transparent: true, opacity: cut ? 0.42 : 0.4, side: THREE.DoubleSide, depthWrite: false, roughness: 0.6 }));
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: cut ? 0xe0584d : 0x9aa1ab, transparent: true, opacity: cut ? 0.45 : 0.62, side: THREE.DoubleSide, depthWrite: false, roughness: 0.7 }));
     m.raycast = () => {};
     m.renderOrder = 3;
-    const e = new THREE.LineSegments(new THREE.EdgesGeometry(g, 30), new THREE.LineBasicMaterial({ color: cut ? 0xb0342b : 0x1d63b8 }));
+    const e = new THREE.LineSegments(new THREE.EdgesGeometry(g, 30), new THREE.LineBasicMaterial({ color: cut ? 0xb0342b : 0x4a5058 }));
     e.raycast = () => {};
     m.add(e);
     this.previewGroup.add(m);
@@ -320,26 +377,30 @@ export class Viewport {
     this.manip = null;
     if (!base) return;
     const n = new THREE.Vector3(...dir).normalize(), p0 = new THREE.Vector3(...base);
-    const size = Math.max(this.bounds().getSize(new THREE.Vector3()).length() * 0.07, 3);
+    this.manipArgs = [base, dir, dist];
+    const H = this.canvas.clientHeight || 600, cam = this.camera;
+    const perPx = this.opts.ortho ? (cam.top - cam.bottom) / cam.zoom / H : (2 * cam.position.distanceTo(p0) * Math.tan((cam.fov * Math.PI) / 360)) / H;
+    this.manipPx = perPx;
+    const size = perPx * 11; // head about 8px wide, like Fusion's slim arrow
     const tip = p0.clone().addScaledVector(n, dist);
     const mat = new THREE.MeshBasicMaterial({ color: 0x0d5bd6, depthTest: false });
-    const baseDot = new THREE.Mesh(new THREE.SphereGeometry(size * 0.2, 12, 8), mat);
+    const baseDot = new THREE.Mesh(new THREE.SphereGeometry(size * 0.28, 12, 8), mat);
     baseDot.position.copy(p0); baseDot.renderOrder = 12; baseDot.raycast = () => {};
     this.manipGroup.add(baseDot);
     const sign = dist >= 0 ? 1 : -1;
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.1, size * 0.1, Math.max(Math.abs(dist), 0.01), 8), mat);
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.07, size * 0.07, Math.max(Math.abs(dist), 0.01), 8), mat);
     const mid = p0.clone().addScaledVector(n, dist / 2);
     shaft.position.copy(mid);
     const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
     shaft.quaternion.copy(q);
-    const cone = new THREE.Mesh(new THREE.ConeGeometry(size * 0.38, size * 0.8, 16), mat);
-    cone.position.copy(tip).addScaledVector(n, sign * size * 0.35);
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(size * 0.4, size * 1.1, 16), mat);
+    cone.position.copy(tip).addScaledVector(n, sign * size * 0.5);
     cone.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n.clone().multiplyScalar(sign)));
-    const hit = new THREE.Mesh(new THREE.SphereGeometry(size * 0.6, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
-    hit.position.copy(tip).addScaledVector(n, sign * size * 0.3);
+    const hit = new THREE.Mesh(new THREE.SphereGeometry(size * 1.3, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+    hit.position.copy(tip).addScaledVector(n, sign * size * 0.4);
     for (const o of [shaft, cone, hit]) { o.renderOrder = 12; this.manipGroup.add(o); }
     shaft.raycast = () => {};
-    this.manip = { p0, n, tip, hit, label: tip.clone().addScaledVector(n, sign * size * 0.9) };
+    this.manip = { p0, n, tip, hit, label: tip.clone().addScaledVector(n, sign * size * 1.4) };
   }
   pickManip(ev) {
     if (!this.manip) return false;
@@ -552,11 +613,37 @@ export class Viewport {
     this.camera.position.copy(c).addScaledVector(dir, r / Math.sin((this.persp.fov * Math.PI) / 360) * 1.05);
     this.updateOrtho();
   }
-  lookAlong(dir, up = [0, 0, 1]) {
+  lookAlong(dir, up = [0, 0, 1], animate = false) {
+    const d = new THREE.Vector3(...dir).normalize();
+    const m = new THREE.Matrix4().lookAt(d, new THREE.Vector3(), new THREE.Vector3(...up));
+    this.orientTo(new THREE.Quaternion().setFromRotationMatrix(m), animate);
+  }
+  /** Turn the camera (orbiting the target) to orientation q, optionally with a short eased animation. */
+  orientTo(q1, animate = false) {
     const dist = this.camera.position.distanceTo(this.controls.target);
-    this.camera.position.copy(this.controls.target).addScaledVector(new THREE.Vector3(...dir).normalize(), dist);
-    this.camera.up.set(...up);
+    const q0 = this.camera.quaternion.clone();
+    this.anim = null;
+    if (!animate || q0.angleTo(q1) < 1e-3) return this.applyOrientation(q1, dist);
+    this.anim = { t0: performance.now(), dur: 100 + 280 * Math.min(1, q0.angleTo(q1) / Math.PI), q0, q1, dist };
+  }
+  applyOrientation(q, dist) {
+    const z = new THREE.Vector3(0, 0, 1).applyQuaternion(q), y = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+    this.camera.position.copy(this.controls.target).addScaledVector(z, dist);
+    this.camera.up.copy(y);
     this.controls.update();
+  }
+  stepAnim() {
+    const a = this.anim;
+    if (!a) return;
+    const t = Math.min(1, (performance.now() - a.t0) / a.dur), e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    this.applyOrientation(a.q0.clone().slerp(a.q1, e), a.dist);
+    if (t >= 1) this.anim = null;
+  }
+  /** Rotate the view by 90 degrees about a camera axis: 'x' (up/down), 'y' (left/right) or 'z' (roll). */
+  turnView(axis, deg) {
+    const q = this.anim ? this.anim.q1.clone() : this.camera.quaternion.clone();
+    const r = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(axis === 'x', axis === 'y', axis === 'z'), (deg * Math.PI) / 180);
+    this.orientTo(q.multiply(r), true);
   }
   lookAtPlane(params) {
     const { n, y } = planeFrame(params);
@@ -606,19 +693,20 @@ export class Viewport {
         const cell = document.createElement('i');
         const dir = n.map((q, k) => q + (c - 1) * u[k] + (r - 1) * v[k]);
         if (r === 1 && c === 1) { cell.className = 'c'; cell.textContent = label; }
-        cell.onclick = (ev) => { ev.stopPropagation(); this.lookAlong(dir, Math.abs(dir[2]) > 0.9 * Math.hypot(...dir) ? [0, 1, 0] : [0, 0, 1]); };
+        cell.onclick = (ev) => { ev.stopPropagation(); this.lookAlong(dir, Math.abs(dir[2]) > 0.9 * Math.hypot(...dir) ? [0, 1, 0] : [0, 0, 1], true); };
         d.appendChild(cell);
       }
-      d.style.gridTemplate = '13px 1fr 13px / 13px 1fr 13px';
+      d.style.gridTemplate = '11px 1fr 11px / 11px 1fr 11px';
       el.appendChild(d);
       return { d, n: new THREE.Vector3(...n), u: new THREE.Vector3(...u), v: new THREE.Vector3(...v) };
     });
-    const axesEl = document.getElementById('cube-axes');
-    const axes = [['X', [1, 0, 0], '#d8473d'], ['Y', [0, 1, 0], '#2f9e4f'], ['Z', [0, 0, 1], '#3b6fe0']].map(([t, a, color]) => {
-      const b = document.createElement('b');
-      b.textContent = t; b.style.color = color;
-      axesEl?.appendChild(b);
-      return { b, a: new THREE.Vector3(...a) };
+    const NS = 'http://www.w3.org/2000/svg', triad = document.getElementById('cube-axes');
+    const axes = [['X', [1, 0, 0], '#d12f2f'], ['Y', [0, 1, 0], '#1b7f3a'], ['Z', [0, 0, 1], '#3446e0']].map(([t, a, color]) => {
+      const g = document.createElementNS(NS, 'g'), l = document.createElementNS(NS, 'line'), tx = document.createElementNS(NS, 'text');
+      l.setAttribute('stroke', color); l.setAttribute('stroke-width', '2'); l.setAttribute('stroke-linecap', 'round');
+      tx.textContent = t; tx.setAttribute('fill', color); tx.setAttribute('font-size', '19'); tx.setAttribute('font-weight', '700'); tx.setAttribute('text-anchor', 'middle'); tx.setAttribute('dominant-baseline', 'central');
+      g.append(l, tx); triad?.appendChild(g);
+      return { g, l, tx, a: new THREE.Vector3(...a) };
     });
     return { el, faces, axes };
   }
@@ -630,11 +718,18 @@ export class Viewport {
       const u = tx(f.u), v = tx(f.v), n = tx(f.n), c = tx(f.n.clone().multiplyScalar(h));
       f.d.style.transform = `matrix3d(${u[0]},${u[1]},${u[2]},0,${v[0]},${v[1]},${v[2]},0,${n[0]},${n[1]},${n[2]},0,${c[0]},${c[1]},${c[2]},1)`;
     }
+    // axis letters sit on the cube's back-bottom-left corner like Fusion: each axis continues past the cube edge
+    // with a short stub and a letter; perspective makes the axis pointing at the viewer fan out diagonally.
+    const hc = 29 * 1.3, ext = 13, lab = 25, PERSP = 520;
+    const proj = (v) => { const p = v.clone().applyMatrix4(R), k = PERSP / (PERSP - p.z); return [55 + p.x * k, 55 - p.y * k]; };
+    const corner = new THREE.Vector3(-hc, -hc, -hc);
     for (const ax of this.cube.axes) {
-      const p = ax.a.clone().applyMatrix4(R);
-      ax.b.style.left = `${55 + p.x * 66}px`;
-      ax.b.style.top = `${55 - p.y * 66}px`;
-      ax.b.style.opacity = p.z < -0.2 ? 0.45 : 1;
+      const dirz = ax.a.clone().applyMatrix4(R).z;
+      ax.g.style.opacity = dirz < -0.5 ? 0 : 1; // pointing away from the viewer: it would sit behind the cube
+      const at = (d) => proj(corner.clone().addScaledVector(ax.a, d));
+      const [x1, y1] = at(2 * hc), [x2, y2] = at(2 * hc + ext), [tx, ty] = at(2 * hc + lab);
+      ax.l.setAttribute('x1', x1); ax.l.setAttribute('y1', y1); ax.l.setAttribute('x2', x2); ax.l.setAttribute('y2', y2);
+      ax.tx.setAttribute('x', tx); ax.tx.setAttribute('y', ty);
     }
   }
 
@@ -656,6 +751,8 @@ export class Viewport {
     this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
     this.camLight.position.copy(this.camera.position).sub(this.controls.target).normalize();
     this.camLight.target.position.set(0, 0, 0);
+    this.stepAnim();
+    if (this.manip && this.manipArgs) { const pp = this.opts.ortho ? (this.camera.top - this.camera.bottom) / this.camera.zoom / (this.canvas.clientHeight || 600) : (2 * this.camera.position.distanceTo(this.manip.p0) * Math.tan((this.camera.fov * Math.PI) / 360)) / (this.canvas.clientHeight || 600); if (Math.abs(pp - this.manipPx) / this.manipPx > 0.03) this.setManip(...this.manipArgs); }
     this.controls.update();
     this.gizmo.camera = this.camera;
     if (this.opts.ortho) this.updateOrtho();

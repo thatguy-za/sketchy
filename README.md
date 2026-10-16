@@ -12,8 +12,10 @@ An open-source, self-hosted, **lightweight parametric CAD** for 3D designers and
 ## Run
 
 ```bash
-docker compose up --build        # http://localhost:8080
+docker compose up -d             # http://localhost:8080 (pulls ghcr.io/thatguy-za/sketchy:latest)
 ```
+
+To build from source instead: `docker build -t sketchy . && docker run -d -p 8080:8080 -v sketchy-data:/data sketchy`.
 
 ### Prebuilt images
 
@@ -26,7 +28,7 @@ docker run -d -p 8080:8080 -v sketchy-data:/data ghcr.io/thatguy-za/sketchy:late
 
 ### Architectures (amd64 + arm64)
 
-The same Dockerfile works on x86-64 PCs, **Raspberry Pi 4/5 (64-bit OS)** and **Apple silicon**: the app is plain JavaScript + WebAssembly with no native modules, and the Node base image is multi-arch. `docker compose up --build` builds for the machine you run it on. To produce images for both architectures (needs Docker buildx):
+The same Dockerfile works on x86-64 PCs, **Raspberry Pi 4/5 (64-bit OS)** and **Apple silicon**: the app is plain JavaScript + WebAssembly with no native modules, and the Node base image is multi-arch. `docker build .` builds for the machine you run it on. To produce images for both architectures (needs Docker buildx):
 
 ```bash
 ./build-multiarch.sh                      # build amd64 + arm64
@@ -37,13 +39,27 @@ All modelling runs in your browser, so the Pi only serves files and stores desig
 
 ### Accounts & saved designs
 
-Click **Sign in** (top right) to create an account, then **File → Save to My Designs** (Ctrl+S). **File → My Designs…** lists, opens and deletes your saved models. Each user only sees their own designs.
+With the server running, Sketchy opens on a full-page **sign-up** screen the first time (the first account becomes the administrator) and on a **login** screen on later visits. Your session is kept in a long-lived `HttpOnly` cookie (one year, renewed whenever you use the app), so you stay signed in until you sign out. Then use **File → Save to My Designs** (Ctrl+S). **File → My Designs…** lists, opens and deletes your saved models. Each user only sees their own designs.
 
 * Data lives in the `sketchy-data` volume (`/data`): `users.json` (scrypt-hashed passwords), `sessions.json`, `projects/<user-id>/*.json`
 * Set `ALLOW_REGISTRATION=false` in `docker-compose.yml` to close sign-ups once your users exist
 * Sessions are HttpOnly + SameSite=Strict cookies and the API requires a custom header, which blocks cross-site requests. Put it behind HTTPS (e.g. a reverse proxy) if you expose it beyond your LAN — the app itself serves plain HTTP
-* click your name for **Change password**; the admin sees **Users…** (list, reset a password, delete). Server drafts keep an in-progress design synced across devices and warn on conflicting edits
+* click your initial (top right) for a menu with **Account**, **Server settings** (admins only), a **Dark mode** switch (remembered per browser, defaults to your system setting) and **Log out**. The Account dialog has three tabs: **Profile**, **Security** (change password) and **AI assistants** (MCP tokens). **Server settings** controls open registration and AI access, and lets admins reset passwords for, promote or delete users. Server drafts keep an in-progress design synced across devices and warn on conflicting edits
+* **Version history:** every save keeps the previous revision (`projects/<user-id>/.versions/<design>/`). Click the **V3 ▾** badge on a design in the sidebar to **Open** an older version in the editor or **Restore** it as the new latest (nothing is lost). Set `MAX_VERSIONS` (default 20, `0` disables) to change how many earlier versions are kept per design
 * Without the server (e.g. `npm run dev`) saving downloads a `.sketchy.json` file; the last session is also auto-restored from browser storage
+
+### AI assistants (MCP)
+
+Sketchy runs a [Model Context Protocol](https://modelcontextprotocol.io) server at `/mcp` so Claude, ChatGPT or any MCP client can build designs for you.
+
+1. Sign in, click your initial → **Account** → **AI assistants (MCP)** → **Create token**. Tokens belong to your account only, are shown once, and can be revoked there. (Admins can switch MCP off for the whole server under **Server settings**, or set `ALLOW_MCP=false`.)
+2. Add the server to your assistant. The Account page gives copy-paste snippets, for example:
+   * Claude Code: `claude mcp add --transport http sketchy https://your-host/mcp --header "Authorization: Bearer <token>"`
+   * Claude Desktop: the `mcp-remote` config shown on the Account page
+   * ChatGPT and other web assistants: use `https://your-host/mcp/<token>` (they need a publicly reachable **https** address, so put Sketchy behind a reverse proxy; treat that URL like a password)
+3. Ask it to build something: *"Make a 60×30×8 mm bracket with two 10 mm holes, call it Bracket"*.
+
+Tools: `list_designs`, `create_design`, `get_design`, `describe_feature_types`, `add_feature`, `update_feature`, `delete_feature`, `set_parameters`, `inspect_design`, `export_stl`. The server replays the design with the same modelling kernel the app uses, so every call returns the real bodies, sizes, volumes and any errors, and a change that would break the model is rejected rather than saved. Designs show up in your sidebar like any other, and every assistant edit is a new revision in the version history. Limits: the transport is plain JSON over HTTP (no streaming), authentication is bearer tokens (no OAuth), and features that need picking edges or faces in the 3D view (fillet, chamfer, press/pull) can't be placed from here yet.
 
 ### Develop
 
@@ -75,9 +91,12 @@ npm run dev         # http://localhost:5173
 | **Export** | STL, **3MF** (with body colours), **OBJ**, and **STEP (faceted mesh)** — triangles only, not exact surfaces |
 | **Joint** | Rigid, revolute, slider, cylindrical, planar and ball joints positioning one body relative to another |
 | **Parameters** | Name dimensions (`width = 40 mm`) and use expressions in any numeric field (`width/2 + 3 mm`, `sin(30)*r`). Changing a parameter rebuilds the whole timeline |
+| **Section Analysis** (Inspect tab) | Clip the model with an XY/XZ/YZ plane (slider or typed offset, flip side); the cut face is capped. View-only, not stored in the timeline |
 | **Measure** (Inspect tab) | Distance (vertex snap), angle, edge length (detects circles), angle/distance between faces |
 
-The UI follows Fusion's current layout: application bar with design tab, `DESIGN ▾` workspace menu, workspace tabs with icon-only toolbar groups (click a group label for its full dropdown), floating Browser/Comments cards, ViewCube with clickable faces/edges/corners, navigation bar, a timeline of feature icons, a Data panel (grid icon) listing your saved designs with thumbnails, and a right-click **marking menu**.
+**Tabs:** every open design is a tab. **+** opens a blank design in a new tab, designs opened from the sidebar get their own tab (an already-open design is just focused), and each tab keeps its own undo history, view and hidden bodies. Closing the last tab leaves a fresh blank design.
+
+The UI follows Fusion's current layout: application bar with design tab, `DESIGN ▾` workspace menu, workspace tabs with icon-only toolbar groups (click a group label for its full dropdown), floating Browser card, ViewCube with clickable faces/edges/corners, navigation bar, a timeline of feature icons, a Data panel (grid icon) listing your saved designs with thumbnails, and a right-click **marking menu**.
 
 Shortcuts (Fusion defaults): `F2` rename · `Enter` accepts a dialog · `S` command search · `E` extrude · `Q` press pull · `F` fillet · `M` move/copy · `H` hole · `J` joint · `I` measure · `L`/`R`/`C` line/rectangle/circle in a sketch · `Del` delete · `Ctrl+Z / Ctrl+Shift+Z` undo/redo · `Ctrl+S` save · `Ctrl+N` new · `Esc` cancel.
 
@@ -97,6 +116,14 @@ Shortcuts (Fusion defaults): `F2` rename · `Enter` accepts a dialog · `S` comm
 * **Timeline** — drag items to reorder (blocked if a feature depends on another), `Ctrl`/`Shift` multi-select, right-click for Edit / Rename (`F2`) / Roll back / Suppress (dependents are suppressed with it, and restored together) / Delete.
 * **Browser** — right-click bodies for Rename, Hide, Isolate, Appearance colours, Properties, Delete; hovering a body row highlights it in the model.
 * **Navigation** — middle-drag pan, `Shift` + middle-drag orbit, double-click middle to fit, mouse wheel zoom; left-drag also orbits.
+
+### Typography
+
+One system font stack (`system-ui`, falling back through Segoe UI / Roboto / Helvetica / Arial) and a seven-step size scale defined as CSS variables in `style.css`: `--fs-xs` 11px (ribbon labels, hints, shortcuts), `--fs-sm` 12px (base UI), `--fs-md` 13px (tabs, card titles), `--fs-lg` 14px (dialogs and forms), `--fs-xl` 16px (large inputs, on-canvas readouts), `--fs-2xl` 18px and `--fs-3xl` 22px (headings). Weights are 400 regular, 500 for titles and 600 for emphasis; code uses `--font-mono`. Use the variables rather than pixel sizes.
+
+### Accessibility
+
+The interface chrome (menus, dialogs, sidebar, sign-up / login) targets **WCAG 2.2 AA**: text contrast of at least 4.5:1, control borders of at least 3:1, visible keyboard focus, accessible names on icon buttons, keyboard-operable menus (arrows, Enter, Esc) and 24px minimum target sizes. The palette is built on flag green `#169B62` (buttons and links use `#0E7C4A` so white text passes). Checked with axe-core on the main screen, the Extrude dialog, the sidebar, menus and the sign-in page. **Not covered:** the 3D viewport and sketching tools are pointer-driven and have no keyboard or screen-reader equivalent, and this has not had a manual screen-reader review.
 
 ### Known limits
 

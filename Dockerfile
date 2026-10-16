@@ -11,8 +11,12 @@ RUN npm run build && mkdir -p /data-empty
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production DATA_DIR=/data PORT=8080
+COPY package*.json ./
+# runtime needs only the modelling kernel (manifold-3d + three's triangulation) for the MCP server; the other browser libraries are bundled into dist
+RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
-COPY server.js package.json ./
+COPY server.js mcp.js ./
+COPY src ./src
 COPY --from=build --chown=node:node /data-empty /data
 VOLUME /data
 EXPOSE 8080

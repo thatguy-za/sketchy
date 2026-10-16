@@ -1,13 +1,13 @@
 // Parametric kernel: replays the feature timeline on top of manifold-3d (WASM).
 import Module from 'manifold-3d';
-import wasmUrl from 'manifold-3d/manifold.wasm?url';
 import { findEdgeChains, matchChain, planarFace } from './edges.js';
 import { pathPolygon, openLoops } from './sketchgeo.js';
 import { ringMesh, loftRings, sweepRings, helixRings, smoothPath, axisFrame, sub, add, scl, dot, len, unit } from './solids.js';
 
 let K;
-export async function initKernel() {
-  K = await Module({ locateFile: () => wasmUrl });
+/** Browser: pass { locateFile } pointing at the bundled wasm. Node (the MCP server): no options needed. */
+export async function initKernel(opts = {}) {
+  K = await Module(opts);
   K.setup();
   return K;
 }

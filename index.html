@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sketchy — open source CAD</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2L21 7V17L12 22L3 17V7Z' fill='%23f08c00'/%3E%3Cpath d='M12 12L21 7M12 12V22M12 12L3 7' stroke='%23fff' stroke-width='1.5' fill='none'/%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2064%2064%22%3E%3Crect%20x=%224%22%20y=%224%22%20width=%2256%22%20height=%2256%22%20rx=%2214%22%20fill=%22%23169b62%22/%3E%3Cpath%20d=%22M40%2022C36%2017%2024%2018%2024%2026C24%2034%2040%2030%2040%2039C40%2047%2027%2048%2022%2042%22%20fill=%22none%22%20stroke=%22%23fff%22%20stroke-width=%227%22%20stroke-linecap=%22round%22/%3E%3C/svg%3E" />
 </head>
 <body>
   <div id="app">
@@ -20,14 +20,11 @@
           <button class="abtn wide" id="btn-undo" title="Undo (Ctrl+Z)"></button>
           <button class="abtn wide" id="btn-redo" title="Redo (Ctrl+Shift+Z)"></button>
         </div>
-        <div class="doc-tab"><span class="doc-ic"></span><span id="doc-name">Untitled</span><span id="doc-dirty"></span><button class="doc-x" id="btn-closedoc" title="Close design"></button></div>
+        <div id="doc-tabs" role="group" aria-label="Open designs"></div>
         <div class="ab-right">
           <button class="abtn" id="btn-newtab" title="New design"></button>
-          <button class="abtn" id="btn-job" title="Job status"></button>
           <button class="abtn" id="btn-ext" title="Extensions"></button>
-          <button class="abtn" id="btn-clock" title="Data queue"></button>
           <button class="abtn" id="btn-bell" title="Notifications"></button>
-          <button class="abtn" id="btn-help" title="Help"></button>
           <button id="btn-acct" class="avatar" title="Account"></button>
         </div>
       </header>
@@ -45,9 +42,8 @@
             <div class="panel-title"><span class="pt-l" id="pt-collapse"></span><span>BROWSER</span><span class="pt-r" id="pt-min"></span></div>
             <div id="tree"></div>
           </aside>
-          <div id="comments"><span>COMMENTS</span><button id="btn-addcomment" title="Add comment"></button></div>
-          <div id="viewcube"><div id="cube"></div><div id="cube-axes"></div><button id="cube-home" title="Home"></button><button id="cube-menu" title="View options"></button></div>
-          <div id="manip-label" hidden><input type="text" inputmode="decimal" autocomplete="off" spellcheck="false"></div>
+          <div id="viewcube"><div id="cube"></div><svg id="cube-axes" viewBox="0 0 110 110" width="110" height="110"></svg><svg id="vc-rolls" viewBox="-100 -100 200 200" width="200" height="200"></svg><button id="cube-home" title="Home"></button><button id="cube-menu" title="View options"></button><button class="vc-arrow" data-t="y,-90" id="vc-l" title="Look from the left"></button><button class="vc-arrow" data-t="y,90" id="vc-r" title="Look from the right"></button><button class="vc-arrow" data-t="x,-90" id="vc-u" title="Look from above"></button><button class="vc-arrow" data-t="x,90" id="vc-d" title="Look from below"></button></div>
+          <div id="manip-tip" hidden></div><div id="manip-label" hidden><span class="grip"></span><input type="text" inputmode="decimal" autocomplete="off" spellcheck="false"><span class="dots"></span></div>
           <div id="props-wrap"></div>
           <div id="banner" hidden></div>
           <div id="hud"></div>

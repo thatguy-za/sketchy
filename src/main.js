@@ -4,12 +4,17 @@ import { icon } from './icons.js';
 import { initKernel, rebuild, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { parseSTL, writeSTL } from './stl.js';
+import wasmUrl from 'manifold-3d/manifold.wasm?url';
+import { initA11y } from './a11y.js';
+import { initTheme, getTheme, setTheme, onTheme } from './theme.js';
+initTheme();
+const LOGO_MARK = '<svg viewBox="0 0 64 64" width="16" height="16"><rect x="4" y="4" width="56" height="56" rx="14" fill="#169b62"/><path d="M40 22C36 17 24 18 24 26C24 34 40 30 40 39C40 47 27 48 22 42" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"/></svg>';
 import { parseSVG, parseDXF, textShapes } from './import2d.js';
 import { repairSoup, describeRepair } from './meshrepair.js';
 import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
 import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, planarFace, norm as vnorm } from './edges.js';
-import { acct, call, refreshAccount, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showChangePassword, showAdmin } from './account.js';
+import { acct, call, refreshAccount, ensureSignedIn, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showChangePassword, showAccount, openUserMenu, showAdmin } from './account.js';
 import { evalExpr, resolveParams, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
 import { UNIT_TABLE, UNIT_NAMES, setUnits, getUnits, lenF, dispStr, fmtLen, fmtArea, fmtVolume, niceStep } from './units.js';
 import { findEdgeChains as chainsOf } from './edges.js';
@@ -48,6 +53,7 @@ let lastCmd = null;
 let selPriority = 'body';
 let selFace = null;
 let selEdges = [];
+let profSel = new Set(), profHover = null; // idle sketch-region selection: keys "sketchId|profileId"
 let edgeHover = null;
 const chainCache = new WeakMap();
 let playTimer = null;
@@ -138,6 +144,18 @@ function updateProfileView() {
     const df = doc.features[dialog.index];
     if (defOf(df)?.fields.some((x) => x.type === 'profiles')) { sk = doc.features.find((k) => k.id === df.params.sketch); pickable = true; if (sk) selected = effectiveProfiles(df, sk); }
   }
+  if (!sk && !sketch && !dialog && !measure) { // nothing active: show the regions of visible, unused sketches so they can be picked
+    const groups = [];
+    doc.features.forEach((f, i) => {
+      if (f.type !== 'sketch' || f.suppressed || i >= limit() || !(sketchVis[f.id] ?? !result.sketchUsed.has(f.id))) return;
+      groups.push({ items: profilesFor(f), params: resolvedMap[f.id] || f.params, pickable: true, sk: f.id });
+    });
+    const live = new Set(groups.flatMap((g) => g.items.map((it) => `${g.sk}|${it.id}`)));
+    profSel = new Set([...profSel].filter((k) => live.has(k)));
+    vp.setProfileGroups(groups);
+    vp.setProfileState(profSel, profHover);
+    return;
+  }
   if (!sk || sk.type !== 'sketch') { vp.setProfiles([], null); return; }
   vp.setProfiles(profilesFor(sk), sk.params, pickable);
   vp.setProfileState(selected, profileHover);
@@ -203,7 +221,7 @@ function edgesOfFace(f) {
 function updateManip() {
   if (!vp) return;
   const box = $('#manip-label');
-  const hide = () => { vp.setManip(null); box.hidden = true; };
+  const hide = () => { vp.setManip(null); box.hidden = true; $('#manip-tip').hidden = true; };
   if (!dialog) return hide();
   const df = doc.features[dialog.index], m = defOf(df)?.manip;
   const rp = resolvedMap[df.id] || df.params;
@@ -245,9 +263,12 @@ function bindManip() {
   const box = $('#manip-label'), inp = box.querySelector('input'), cv = $('#gl');
   const manipFrame = () => {
     if (box.hidden || !vp.manip) return;
-    const sp = vp.toScreen(vp.manip.label);
-    box.style.left = sp.x + 'px'; box.style.top = sp.y + 'px';
-    box.style.display = sp.behind ? 'none' : '';
+    const sp = vp.toScreen(vp.manip.label), tipEl = $('#manip-tip');
+    tipEl.hidden = false; tipEl.textContent = inp.value && /^[-\d.]/.test(inp.value) ? (+parseFloat(inp.value)).toFixed(2) : inp.value;
+    tipEl.style.left = (sp.x + 24) + 'px'; tipEl.style.top = (sp.y - 4) + 'px';
+    box.style.left = (sp.x + 100) + 'px'; box.style.top = (sp.y + 34) + 'px'; // value box sits off to the lower right of the arrow
+    const hide = sp.behind ? 'none' : '';
+    box.style.display = hide; tipEl.style.display = hide;
   };
   vp.onFrame = () => { manipFrame(); if (sketch && !sketch.picking && SU) SU.frame(); };
   inp.oninput = () => {
@@ -324,6 +345,7 @@ const CUSTOM = {
   measure: () => startMeasure('dist'), angle: () => startMeasure('angle'), edgelen: () => startMeasure('edge'), faces: () => startMeasure('faces'),
   properties: () => showInfo(),
   interference: () => showInterference(),
+  section: () => showSection(),
   drivejoints: () => showDriveJoints(),
   svg: () => pick2D('.svg,image/svg+xml'), dxf: () => pick2D('.dxf'), sk_text: () => showTextDialog(),
   asbuilt: () => startAsBuilt(),
@@ -383,7 +405,7 @@ function workspaceMenu() {
 
 function renderRibbon() {
   const wb = $('#btn-workspace');
-  wb.innerHTML = `<span>DESIGN</span>${uicon('caret', 9, 0)}`;
+  wb.innerHTML = `<span>DESIGN</span>${uicon('caret', 9, 0)}`; wb.setAttribute('aria-label', 'Design workspace menu');
   wb.onclick = workspaceMenu; wb.dataset.menu = 1;
   const picking = !!sketch?.picking, inSketch = !!sketch && !picking;
   const tabList = sketch ? ['SKETCH'] : WORKSPACE_TABS;
@@ -409,6 +431,7 @@ function renderRibbon() {
       b.innerHTML = ficon(c.icon, g.big ? 40 : 30) + (g.finish ? '<span>FINISH SKETCH</span>' : '');
       b.disabled = !!dialog && !sketch;
       b.onclick = (ev) => runCommand(id, ev);
+      b.setAttribute('aria-label', c.label); if (off) b.setAttribute('aria-disabled', 'true');
       el.firstChild.appendChild(b);
     }
     const lab = el.lastChild;
@@ -740,15 +763,30 @@ function showMenu(x, y, items) {
     if (it.head) { m.insertAdjacentHTML('beforeend', `<div class="mh">${esc(it.head)}</div>`); continue; }
     const e = document.createElement('div');
     e.className = 'mi' + (it.disabled ? ' disabled' : '') + (it.check !== undefined ? ' check' + (it.check ? ' on' : '') : '');
+    if (it.disabled) e.setAttribute('aria-disabled', 'true');
+    e.setAttribute('role', 'menuitem'); e.tabIndex = -1;
     if (it.dim) e.style.opacity = '.55';
     const ic = it.swatch ? `<span class="swatch" style="background:${it.swatch}"></span>` : it.ficon ? ficon(it.ficon, 22) : it.uicon ? uicon(it.uicon, 16) : it.icon ? icon(it.icon, 16) : it.check === undefined ? '<span class="ph"></span>' : '';
     e.innerHTML = ic + `<span>${esc(it.label)}</span>` + (it.hint ? `<small>${it.hint}</small>` : '');
     e.onclick = () => { m.hidden = true; it.run(); };
     m.appendChild(e);
   }
+  m.setAttribute('role', 'menu');
+  if (!m.dataset.kb) { // keyboard: arrows move, Enter/Space choose, Esc closes and returns focus
+    m.dataset.kb = '1';
+    m.addEventListener('keydown', (e) => {
+      const its = [...m.querySelectorAll('.mi:not(.disabled)')], i = its.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown') { e.preventDefault(); its[(i + 1) % its.length]?.focus(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); its[(i - 1 + its.length) % its.length]?.focus(); }
+      else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.activeElement?.click?.(); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); m.hidden = true; m.opener?.focus?.(); }
+    });
+  }
+  m.opener = document.activeElement;
   m.hidden = false;
   m.style.left = Math.max(4, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
   m.style.top = Math.max(4, Math.min(y, innerHeight - m.offsetHeight - 10)) + 'px';
+  m.querySelector('.mi:not(.disabled)')?.focus({ preventScroll: true });
 }
 addEventListener('pointerdown', (e) => { if (!e.target.closest('#menu') && !e.target.closest('[data-menu]')) $('#menu').hidden = true; }, true);
 
@@ -799,6 +837,8 @@ const ctx = () => {
   const ctr = (b) => (b ? b.bbox.min.map((v, k) => +((v + b.bbox.max[k]) / 2).toFixed(3)) : [0, 0, 0]);
   return {
     lastSketch: sks.length ? sks[sks.length - 1].id : '',
+    selSketch: profSel.size ? [...profSel][0].split('|')[0] : '',
+    selProfiles: profSel.size ? [...profSel].filter((k) => k.startsWith([...profSel][0].split('|')[0] + '|')).map((k) => k.split('|')[1]) : null,
     sketches: sks.map((k) => k.id),
     pathSketch: [...sks].reverse().find((k) => k.params.shapes.some((sh) => sh.open))?.id || '',
     lastSketchOnFace: sks.length > 0 && sks[sks.length - 1].params.plane === 'custom',
@@ -823,6 +863,7 @@ function startFeature(key) {
   if (def.needsBodies && result.bodies.length < def.needsBodies) return toast(`${def.label} needs at least ${def.needsBodies} bodies.`, true);
   const pre = snapshot();
   const params = def.make(c);
+  if (['extrude', 'revolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
   if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
     params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
@@ -902,14 +943,46 @@ function patchParams(i, patch) {
   refresh();
 }
 
+const DLG_ICON = {
+  start: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M5 3.5v17" stroke="#16304f" stroke-width="2.4"/><path d="M8.5 12H20M16.5 8.2L20.3 12l-3.8 3.8" fill="none" stroke="#16304f" stroke-width="1.8"/></svg>',
+  dir: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M7 7l9-3.5 4 4.5-9 3.5z" fill="#f2a67e" stroke="#c9672f"/><path d="M4 20.5l7.5-8M4 20.5h5M4 20.5v-5" stroke="#555" stroke-width="1.6" fill="none"/></svg>',
+  ext: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 4.5v15M20 4.5v15M6.5 12h11M6.5 12l3-2.6M6.5 12l3 2.6M17.5 12l-3-2.6M17.5 12l-3 2.6" stroke="#16304f" fill="none" stroke-width="1.6"/></svg>',
+};
+/** Fusion-style dropdown: icon + label + caret, popup list below with an icon per option. */
+function iconSelect(opts, val, onPick, iconFor, { disabled = false } = {}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'isel' + (disabled ? ' off' : '');
+  const cur = opts.find(([v]) => String(v) === String(val)) || opts[0];
+  wrap.innerHTML = `<button type="button" class="isel-btn"><span class="ico">${iconFor(cur[0])}</span><span class="lbl">${esc(cur[1])}</span><i class="caret"></i></button>`;
+  if (disabled) return wrap;
+  const btn = wrap.firstChild;
+  btn.onclick = (ev) => {
+    ev.stopPropagation();
+    document.querySelectorAll('.isel-pop').forEach((q) => q.remove());
+    const r = btn.getBoundingClientRect(), pop = document.createElement('div');
+    pop.className = 'isel-pop';
+    pop.style.cssText = `left:${r.left}px;top:${r.bottom + 2}px;min-width:${r.width}px`;
+    pop.innerHTML = opts.map(([v, l]) => `<div class="it${String(v) === String(cur[0]) ? ' on' : ''}" data-v="${esc(String(v))}"><span class="ico">${iconFor(v)}</span><span>${esc(l)}</span></div>`).join('');
+    pop.onclick = (e) => { const it = e.target.closest('.it'); if (!it) return; pop.remove(); onPick(opts.find(([v]) => String(v) === it.dataset.v)[0]); };
+    document.body.appendChild(pop);
+    const off = (e) => { if (!pop.contains(e.target)) { pop.remove(); removeEventListener('pointerdown', off, true); } };
+    addEventListener('pointerdown', off, true);
+  };
+  return wrap;
+}
+const OP_ORDER = ['join', 'cut', 'intersect', 'new', 'auto'];
+
 function renderDialog() {
   if (!dialog) return;
   const f = doc.features[dialog.index];
   const def = defOf(f);
   const wrap = $('#props-wrap');
-  wrap.innerHTML = `<div class="props"><div class="title">${ficon(fiName(f), 20)}${esc(f.name.toUpperCase())}</div><div class="body"></div>
-    <div class="foot"><button class="btn" id="d-cancel">Cancel</button><button class="btn primary" id="d-ok">OK</button></div></div>`;
+  const hint = def.fields.some((x) => x.type === 'profiles') ? 'Click inside a shaded region in the canvas to add or remove profiles. Hold Shift to modify the selection.' : def.label;
+  wrap.innerHTML = `<div class="props"><div class="title"><button class="tmin" title="Collapse">−</button><span>${esc((def.label || f.name).toUpperCase())}</span></div><div class="body"></div>
+    <div class="foot"><span class="info" title="${esc(hint)}">i</span><button class="btn primary" id="d-ok">OK</button><button class="btn" id="d-cancel">Cancel</button></div></div>`;
+  wrap.querySelector('.tmin').onclick = () => wrap.querySelector('.props').classList.toggle('collapsed');
   const body = wrap.querySelector('.body');
+  const adv = []; // rows tucked under More options
   if (def.gizmo) {
     body.insertAdjacentHTML('beforeend', `<div class="row"><label>Gizmo</label><select id="d-mode"><option value="translate">Translate</option><option value="rotate">Rotate</option></select></div><div class="sep"></div>`);
     const s = body.querySelector('#d-mode'); s.value = dialog.mode;
@@ -919,6 +992,7 @@ function renderDialog() {
   const rerender = () => { renderDialog(); setupGizmo(); };
   for (const fld of def.fields) {
     if (fld.show && !fld.show(f.params)) continue;
+    if (fld.key === 'sketch' && 'profiles' in f.params && sketchesBefore(idx).length < 2) continue; // Fusion has no sketch row; the profile pick chooses it
     const row = document.createElement('div');
     row.className = 'row';
     row.innerHTML = `<label>${fld.label}</label><div class="ctl"></div>`;
@@ -933,7 +1007,9 @@ function renderDialog() {
       const expr = f.exprs?.[path];
       const isLen = fieldKind(f, path.split('.')[0]) === 'len';
       const show = (x) => (isLen ? `${dispStr(x)} ${getUnits()}` : String(+(+x).toFixed(4)));
-      n.value = expr ?? (isLen ? dispStr(v) : String(+(+v).toFixed(4)));
+      n.setAttribute('aria-label', fld.label);
+      n.value = expr ?? (isLen ? `${dispStr(v)} ${getUnits()}` : fld.unit ? `${(+v).toFixed(1)} ${fld.unit}` : String(+(+v).toFixed(4)));
+      n.onfocus = () => n.select();
       const calc = document.createElement('small');
       calc.className = 'calc';
       if (expr) { const rv = resolvedAt(f, path); calc.textContent = typeof rv === 'number' ? `= ${show(rv)}` : ''; }
@@ -963,7 +1039,7 @@ function renderDialog() {
       return g;
     };
     if (fld.type === 'edges') {
-      ctl.innerHTML = `<span>${val.length} selected</span> <button class="btn" id="d-edgeclear" style="margin-left:8px">Clear</button><div style="color:var(--muted);font-size:11px;margin-top:4px">Click edges in the viewport to add or remove them.</div>`;
+      ctl.innerHTML = `<span>${val.length} selected</span> <button class="btn" id="d-edgeclear" style="margin-left:8px">Clear</button><div style="color:var(--muted);font-size:var(--fs-xs);margin-top:4px">Click edges in the viewport to add or remove them.</div>`;
       ctl.querySelector('button').onclick = () => { set([]); renderDialog(); };
     } else if (fld.type === 'num') ctl.appendChild(numIn(fld.key, val));
     else if (fld.type === 'vec3') ctl.appendChild(vec3());
@@ -984,25 +1060,20 @@ function renderDialog() {
         bar.appendChild(cb);
       }
       ctl.appendChild(bar);
+    } else if (fld.type === 'soltype') {
+      ctl.innerHTML = `<div class="typebtns"><button type="button" class="tb on" title="Solid">${ficon('extrude', 26)}</button><button type="button" class="tb" disabled title="Thin extrude isn't available yet">${ficon('extrude', 26)}</button></div>`;
+    } else if (fld.type === 'static') {
+      ctl.appendChild(iconSelect([[fld.text, fld.text]], fld.text, () => {}, () => DLG_ICON[fld.icon], { disabled: true }));
     } else if (fld.type === 'ops') {
       const ico = { join: 'opjoin', cut: 'opcut', intersect: 'opintersect', new: 'opnew', auto: 'opauto' };
-      const bar = document.createElement('div');
-      bar.className = 'opbar';
-      for (const [v, l] of fld.options) {
-        const b = document.createElement('button');
-        b.type = 'button'; b.className = 'opbtn' + (val === v ? ' on' : ''); b.title = l; b.innerHTML = ficon(ico[v] || 'opnew', 24);
-        b.onclick = () => { set(v); rerender(); };
-        bar.appendChild(b);
-      }
-      ctl.appendChild(bar);
-      ctl.insertAdjacentHTML('beforeend', `<div class="note">${esc(fld.options.find(([v]) => v === val)?.[1] || '')}</div>`);
+      const opts = [...fld.options].sort((x, y) => OP_ORDER.indexOf(x[0]) - OP_ORDER.indexOf(y[0]));
+      ctl.appendChild(iconSelect(opts, val, (v) => { set(v); rerender(); }, (v) => ficon(ico[v] || 'opnew', 22)));
     } else if (fld.type === 'profiles') {
       const sk = doc.features.find((k) => k.id === f.params.sketch);
       const items = sk ? profilesFor(sk) : [];
       const chosen = sk ? effectiveProfiles(f, sk).size : 0;
-      const explicit = !!f.params.profiles?.length;
-      ctl.innerHTML = `<span>${items.length ? (explicit ? `${chosen} selected` : `${chosen} of ${items.length} (auto)`) : 'No closed profiles'}</span> <button class="btn sm" style="margin-left:6px">Reset</button><div class="note">Click inside a shaded region to add or remove it.</div>`;
-      ctl.querySelector('button').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
+      ctl.innerHTML = `<div class="profrow"><div class="selbtn on"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 3l12 11.5-5.2.7 3 5.6-2.6 1.4-3-5.7-4.2 3.2z" fill="#fff" stroke="#333" stroke-width="1.4" stroke-linejoin="round"/></svg><span>${items.length ? `${chosen} selected` : 'No closed profiles'}</span></div><button type="button" class="xclear" title="Reset to the default selection">×</button></div>`;
+      ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
     } else if (fld.type === 'face' || fld.type === 'faces') {
       const list = fld.type === 'face' ? (val ? [val] : []) : val || [];
       ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm" style="margin-left:6px">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : 'Click flat faces to open (optional). Click again to deselect.'}</div>`;
@@ -1030,14 +1101,19 @@ function renderDialog() {
       else if (fld.type === 'body') opts = [['', fld.optional || 'Select body…'], ...bodiesBefore(idx).map((b) => [b.id, b.name])];
       else opts = [['', 'Select sketch…'], ...sketchesBefore(idx).map((k) => [k.id, k.name])];
       s.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+      if (fld.icon && fld.type === 'select') {
+        ctl.appendChild(iconSelect(opts, val, (v) => { if (fld.boolSelect) { set(v === true || v === 'true'); return; } set(v); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype'].includes(fld.key)) rerender(); }, () => DLG_ICON[fld.icon]));
+        body.appendChild(row); continue;
+      }
       s.value = String(val ?? '');
       s.onfocus = () => { dialog.focusKey = fld.key; };
       s.onchange = () => { if (fld.boolSelect) { set(s.value === 'true'); return; } if (fld.key === 'sketch' && 'profiles' in f.params) { patchParams(idx, { sketch: s.value, profiles: null }); rerender(); return; } set(s.value); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype'].includes(fld.key)) rerender(); else if (def.gizmo) setupGizmo(); };
       ctl.appendChild(s);
       if (fld.type === 'body') ctl.insertAdjacentHTML('beforeend', '<div class="note">…or click a body in the viewport.</div>');
     }
-    body.appendChild(row);
+    if (fld.adv) adv.push(row); else body.appendChild(row);
   }
+  if (adv.length) { const d = document.createElement('details'); d.className = 'more'; d.innerHTML = '<summary>More options</summary>'; adv.forEach((r) => d.appendChild(r)); body.appendChild(d); }
   if (Object.keys(paramState.values).length) body.insertAdjacentHTML('beforeend', `<div class="note">Fields accept expressions, e.g. <b>${esc(Object.keys(paramState.values)[0])} / 2 + 1 mm</b></div>`);
   body.insertAdjacentHTML('beforeend', '<div id="d-err"></div>');
   $('#d-ok').onclick = closeDialog.bind(null, true);
@@ -1526,6 +1602,31 @@ function showDriveJoints() {
   });
   $('#i-close').onclick = () => { wrap.classList.remove('open'); };
 }
+function showSection() {
+  if (dialog || sketch) return;
+  if (!result.bodies.length) return toast('Nothing to section yet.', true);
+  const wrap = $('#props-wrap'), st = { axis: 'Z', offset: 0, flip: false };
+  const range = () => { const b = vp.bounds(), k = 'xyz'['XYZ'.indexOf(st.axis)]; return [b.min[k], b.max[k]]; };
+  const apply = () => vp.setSection({ ...st });
+  const render = () => {
+    const [lo, hi] = range(), u = getUnits();
+    st.offset = Math.min(hi, Math.max(lo, st.offset));
+    wrap.innerHTML = `<div class="props"><div class="title">${ficon('sectionan', 20)}SECTION ANALYSIS</div><div class="body">
+      <div class="row"><label>Plane</label><select id="sa-ax"><option value="X"${st.axis === 'X' ? ' selected' : ''}>YZ (normal X)</option><option value="Y"${st.axis === 'Y' ? ' selected' : ''}>XZ (normal Y)</option><option value="Z"${st.axis === 'Z' ? ' selected' : ''}>XY (normal Z)</option></select></div>
+      <div class="row"><label>Offset (${u})</label><input id="sa-off" type="number" step="any" value="${+(st.offset / lenF()).toFixed(4)}"></div>
+      <input id="sa-sl" type="range" min="${lo}" max="${hi}" step="${Math.max((hi - lo) / 400, 0.01)}" value="${st.offset}" style="width:100%">
+      <div class="row"><label>Flip side</label><input id="sa-fl" type="checkbox"${st.flip ? ' checked' : ''}></div>
+      <div class="note">Hides everything beyond the plane and caps the cut. Nothing is added to the timeline.</div></div>
+      <div class="foot"><button class="btn primary" id="i-close">Done</button></div></div>`;
+    $('#sa-ax').onchange = (e) => { st.axis = e.target.value; const [l, h] = range(); st.offset = (l + h) / 2; render(); apply(); };
+    $('#sa-off').oninput = (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { st.offset = v * lenF(); $('#sa-sl').value = st.offset; apply(); } };
+    $('#sa-sl').oninput = (e) => { st.offset = +e.target.value; $('#sa-off').value = +(st.offset / lenF()).toFixed(4); apply(); };
+    $('#sa-fl').onchange = (e) => { st.flip = e.target.checked; apply(); };
+    $('#i-close').onclick = () => { wrap.classList.remove('open'); vp.setSection(null); };
+  };
+  { const [l, h] = range(); st.offset = (l + h) / 2; }
+  render(); wrap.classList.add('open'); apply();
+}
 function pick2D(accept) { const i = $('#file-2d'); i.accept = accept; i.click(); }
 /** Add imported 2D shapes to the open sketch, or start a new one on the XY plane first. */
 function addImportedShapes(shapes, label) {
@@ -1750,10 +1851,94 @@ function startRemotePolling() {
 }
 function downloadProject() { download(new Blob([projectJSON()], { type: 'application/json' }), `${doc.name}.sketchy.json`); }
 function openFromServer() { toggleDataPanel(true); }
-function newDoc() {
-  if (dirty && !confirm('Discard unsaved changes?')) return;
-  doc = blankDoc(); setUnits('mm'); undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
-  dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = 'Untitled'; vp.fitted = false; refresh();
+// ------------------------------------------------------------------ document tabs
+// The live design always sits in the module globals (doc, undoStack, ...). Inactive tabs keep a saved copy of that
+// state in tab.state; switching saves the active one and loads the other.
+let tabs = [{ id: 1, state: null }], activeTab = 1, nextTabId = 2;
+const tabName = (t) => (t.id === activeTab ? doc.name : t.state.doc.name);
+const tabDirty = (t) => (t.id === activeTab ? dirty : t.state.dirty);
+function captureTabState() {
+  return {
+    doc, undoStack, redoStack, dirty, hidden: [...hiddenBodies], sketchVis: { ...sketchVis }, originVis, selFeature, selSet: new Set(selSet),
+    cam: vp ? { pos: vp.camera.position.toArray(), target: vp.controls.target.toArray(), up: vp.camera.up.toArray() } : null,
+  };
+}
+function applyTabState(st) {
+  doc = st.doc; undoStack = st.undoStack; redoStack = st.redoStack; dirty = st.dirty;
+  hiddenBodies.clear(); st.hidden.forEach((h) => hiddenBodies.add(h));
+  for (const k of Object.keys(sketchVis)) delete sketchVis[k];
+  Object.assign(sketchVis, st.sketchVis);
+  originVis = st.originVis; vp.setOriginVisible(originVis);
+  selFeature = st.selFeature; selSet = new Set(st.selSet);
+  selEdges = []; selFace = null; edgeHover = null; profSel = new Set(); profHover = null; vp.showFaces([], null);
+  vp.selected.clear(); setUnits(doc.units || 'mm'); hideBanner();
+  $('#doc-dirty').classList.toggle('on', dirty);
+  if (st.cam) { vp.camera.position.fromArray(st.cam.pos); vp.controls.target.fromArray(st.cam.target); vp.camera.up.fromArray(st.cam.up); vp.controls.update(); vp.fitted = true; } else vp.fitted = false;
+}
+const blankState = () => ({ doc: blankDoc(), undoStack: [], redoStack: [], dirty: false, hidden: [], sketchVis: {}, originVis: false, selFeature: null, selSet: new Set(), cam: null });
+const isPristine = () => !dirty && !doc.features.length && doc.name === 'Untitled' && !doc.rev;
+function busy() { if (dialog || sketch || measure) { toast('Finish the current command first.', true); return true; } return false; }
+function switchToState(st) { applyTabState(st); renderDocTabs(); refresh(); }
+/** Open a blank design in a new tab. With reuseBlank, an untouched blank tab is reused instead. */
+function newTab({ reuseBlank = false } = {}) {
+  if (busy()) return false;
+  if (reuseBlank && isPristine()) return true;
+  const cur = tabs.find((t) => t.id === activeTab);
+  cur.state = captureTabState();
+  const t = { id: nextTabId++, state: null };
+  tabs.push(t); activeTab = t.id;
+  cur.state = cur.state; switchToState(blankState());
+  return true;
+}
+function activateTab(id) {
+  if (id === activeTab || busy()) return;
+  const cur = tabs.find((t) => t.id === activeTab), next = tabs.find((t) => t.id === id);
+  if (!next) return;
+  cur.state = captureTabState();
+  activeTab = id;
+  const st = next.state; next.state = null;
+  switchToState(st);
+}
+function closeTab(id) {
+  if (busy()) return;
+  const t = tabs.find((x) => x.id === id);
+  if (!t) return;
+  if (tabDirty(t) && !confirm(`"${tabName(t)}" has unsaved changes. Close it anyway?`)) return;
+  const i = tabs.indexOf(t);
+  tabs.splice(i, 1);
+  if (!tabs.length) { // closing the last tab leaves a fresh blank design
+    const nt = { id: nextTabId++, state: null }; tabs.push(nt); activeTab = nt.id; switchToState(blankState()); return;
+  }
+  if (id === activeTab) {
+    const next = tabs[Math.min(i, tabs.length - 1)];
+    activeTab = next.id; const st = next.state; next.state = null; switchToState(st);
+  } else renderDocTabs();
+}
+/** Focus the tab that already has this saved design open. */
+function focusOpenDesign(name) {
+  const t = tabs.find((x) => tabName(x) === name && (x.id === activeTab ? doc.rev : x.state.doc.rev));
+  if (!t) return false;
+  activateTab(t.id); return true;
+}
+function newDoc() { newTab(); }
+function renderDocTabs() {
+  const host = $('#doc-tabs');
+  if (!host) return;
+  const plus = $('#btn-newtab');
+  host.innerHTML = '';
+  for (const t of tabs) {
+    const active = t.id === activeTab, el = document.createElement('div');
+    el.className = 'doc-tab' + (active ? ' active' : '');
+    el.innerHTML = `<button class="doc-sel"${active ? ' aria-current="true"' : ''}><span class="doc-ic"></span><span class="doc-name"${active ? ' id="doc-name"' : ''}></span><span class="doc-dirty${tabDirty(t) ? ' on' : ''}"${active ? ' id="doc-dirty"' : ''}></span></button><button class="doc-x" title="Close design" aria-label="Close ${esc(tabName(t))}"></button>`;
+    el.querySelector('.doc-name').textContent = tabName(t);
+    el.querySelector('.doc-ic').innerHTML = LOGO_MARK;
+    el.querySelector('.doc-x').innerHTML = uicon('close', 12, 2);
+    el.title = tabName(t);
+    el.onclick = (e) => { if (e.target.closest('.doc-x')) closeTab(t.id); else activateTab(t.id); };
+    el.onauxclick = (e) => { if (e.button === 1) closeTab(t.id); };
+    host.appendChild(el);
+  }
+  host.appendChild(plus); // the + sits right after the last tab
 }
 let autosaveT;
 function scheduleAutosave() {
@@ -1800,6 +1985,20 @@ function bindViewport() {
     }
     const eh = vp.pickEdge(e, edgeEntries());
     if (eh) { toggleSelEdge(eh, e.shiftKey || e.ctrlKey || e.metaKey); return; }
+    const add = e.shiftKey || e.ctrlKey || e.metaKey;
+    const pf = vp.pickProfileAt(e);
+    if (pf) { // a sketch region under the cursor (unless a body surface is in front of it)
+      const bh = vp.pickBody(e);
+      if (!bh || pf.distance <= bh.distance + 0.01) {
+        const was = profSel.has(pf.key);
+        if (!add) profSel.clear();
+        was && add ? profSel.delete(pf.key) : profSel.add(pf.key);
+        selFace = null; vp.showFaces([], null); vp.selected.clear(); vp.refreshMaterials();
+        updateProfileView(); renderTree(); renderRibbon();
+        return;
+      }
+    }
+    if (profSel.size && !add) { profSel.clear(); updateProfileView(); }
     if (selEdges.length && !(e.shiftKey || e.ctrlKey || e.metaKey)) { selEdges = []; updateEdgeView(); }
     if (selPriority === 'face') {
       const tg = vp.pickPlanarFace(e);
@@ -1873,6 +2072,10 @@ function bindViewport() {
       const en = vp.pickEdge(e, edgeEntries());
       if ((en?.chain || null) !== (edgeHover?.chain || null)) { edgeHover = en; updateEdgeView(); }
       if (en) { $('#gl').style.cursor = 'pointer'; if (vp.hover) { vp.hover = null; vp.refreshMaterials(); } vp.showFaces(selFace ? [selFace] : [], null); return; }
+      const pf = vp.pickProfileAt(e);
+      const pk = pf ? pf.key : null;
+      if (pk !== profHover) { profHover = pk; vp.setProfileState(profSel, profHover); }
+      if (pf) { $('#gl').style.cursor = 'pointer'; return; }
       $('#gl').style.cursor = '';
       if (selPriority === 'face') {
         const tg = vp.pickPlanarFace(e);
@@ -1900,7 +2103,7 @@ function lookAtNearest() {
   const ax = [d.x, d.y, d.z].map(Math.abs);
   const k = ax.indexOf(Math.max(...ax));
   const v = [0, 0, 0]; v[k] = Math.sign([d.x, d.y, d.z][k]) || 1;
-  vp.lookAlong(v, k === 2 ? [0, 1, 0] : [0, 0, 1]);
+  vp.lookAlong(v, k === 2 ? [0, 1, 0] : [0, 0, 1], true);
 }
 function showAll() { hiddenBodies.clear(); Object.keys(sketchVis).forEach((k) => delete sketchVis[k]); originVis = false; vp.setOriginVisible(false); refresh(); }
 
@@ -2089,39 +2292,69 @@ function toggleDataPanel(force) {
   if (dataOpen) renderDataPanel();
   setTimeout(() => vp?.resize(), 0);
 }
+async function showVersions(pr) {
+  const r = await call('GET', '/projects/' + encodeURIComponent(pr.name) + '/versions');
+  if (!r.ok) return toast(r.data?.error || 'Could not load versions.', true);
+  const when = (t) => new Date(t).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const rows = [{ rev: pr.ver, modified: pr.modified, device: pr.device, cur: true }, ...r.data];
+  const m = modal(`<div class="modal-title">Versions of ${esc(pr.name)}</div><div class="modal-body">${rows.map((v) => `<div class="ver-row" data-rev="${v.rev}"><div><b>V${v.rev}</b>${v.cur ? ' <span class="ver-cur">latest</span>' : ''}<div class="ver-sub">${when(v.modified)}${v.device ? ' · ' + esc(v.device) : ''}</div></div>${v.cur ? '' : '<div class="ver-btns"><button class="btn" data-a="open">Open</button><button class="btn" data-a="restore">Restore</button></div>'}</div>`).join('')}${r.data.length ? '' : '<div class="ver-sub">No earlier versions yet. Each save keeps the previous one.</div>'}<div class="ver-sub">The server keeps the most recent earlier versions of each design.</div></div>`);
+  m.el.querySelectorAll('.ver-row button').forEach((b) => {
+    b.onclick = async () => {
+      const rev = +b.closest('.ver-row').dataset.rev;
+      const g = await call('GET', `/projects/${encodeURIComponent(pr.name)}/versions/${rev}`);
+      if (!g.ok) return toast(g.data?.error || 'Could not load that version.', true);
+      const txt = typeof g.data === 'string' ? g.data : JSON.stringify(g.data);
+      if (b.dataset.a === 'open') {
+        if (!newTab({ reuseBlank: true })) return;
+        m.close();
+        loadProject(txt, pr.ver); doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh();
+        toast(`Opened V${rev} of "${pr.name}". Save to make it the latest version.`);
+      } else {
+        if (!confirm(`Restore V${rev}? It becomes the new latest version; the current one is kept in the history.`)) return;
+        const p = await call('PUT', '/projects/' + encodeURIComponent(pr.name), txt, { 'if-match': String(pr.ver) });
+        if (!p.ok) return toast(p.status === 409 ? 'The design changed on another device. Reload the list and try again.' : (p.data?.error || 'Restore failed.'), true);
+        m.close(); renderDataPanel(); toast(`Restored V${rev} as V${p.data.rev}`);
+        if (doc.name === pr.name) openDesign(pr.name, true);
+      }
+    };
+  });
+}
 async function renderDataPanel() {
   const host = $('#data-panel');
-  host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-search" title="Search">${uicon('search', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
-    <div class="dp-tabs"><button class="dp-tab active">Data</button></div>
-    <div class="dp-actions"><button class="btn" id="dp-new">New Design</button></div>
-    <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>`;
+  host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
+    <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
+    <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
+    <div class="dp-actions"><button class="btn primary" id="dp-new">New Design</button></div>`;
   $('#dp-close').onclick = () => toggleDataPanel(false);
   $('#dp-refresh').onclick = renderDataPanel;
-  $('#dp-search').onclick = () => toast('Search is not available yet.');
   $('#dp-new').onclick = () => { newDoc(); };
   const grid = $('#dp-grid');
   const card = (name, o = {}) => {
     const el = document.createElement('div');
     el.className = 'dp-card' + (name === doc.name ? ' current' : '');
     const when = o.modified ? new Date(o.modified) : new Date();
-    const fmt = `${String(when.getDate()).padStart(2, '0')}/${String(when.getMonth() + 1).padStart(2, '0')}/${when.getFullYear()} ${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`;
+    const fmt = 'Edited ' + when.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     el.innerHTML = `<div class="dp-thumb">${o.thumb ? `<img alt="" src="/api/projects/${encodeURIComponent(name)}/thumb?${o.modified | 0}">` : ficon('box', 40)}</div>
-      <div class="dp-info"><div class="dp-name"><svg class="ui" viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L21 7V17L12 22L3 17V7Z" fill="#f08c00"/><path d="M12 12L21 7M12 12V22M12 12L3 7" stroke="#fff" stroke-width="1.5" fill="none"/></svg><span>${esc(name)}</span></div>
-      <div class="dp-date">${fmt}</div><div class="dp-bottom">${o.del ? `<button class="dp-del" title="Delete">${uicon('remove', 15)}</button>` : ''}<span class="dp-ver">V${o.ver || 1} ▾</span></div></div>
-      <span class="dp-open" title="Open">${uicon('file', 16)}</span>`;
+      <div class="dp-info"><div class="dp-name"><span>${esc(name)}</span></div>
+      <div class="dp-date">${fmt}</div><div class="dp-bottom">${o.del ? `<button class="dp-del" title="Delete">${uicon('remove', 15)}</button>` : ''}<button class="dp-ver" title="Version history">V${o.ver || 1} ▾</button></div></div>
+      <button type="button" class="dp-open" title="Open" aria-label="Open design">${uicon('file', 16)}</button>`;
     return el;
   };
   if (acct.server && acct.user) {
     const r = await call('GET', '/projects');
     if (!r.ok) { grid.innerHTML = `<div class="dp-empty">${esc(r.data?.error || 'Could not load designs.')}</div>`; return; }
     $('#dp-count').textContent = `${r.data.length} design${r.data.length === 1 ? '' : 's'}`;
+    const q = $('#dp-q'), draw = () => {
     grid.innerHTML = '';
+    const items = r.data.filter((x) => x.name.toLowerCase().includes(q.value.trim().toLowerCase())).sort((a, b) => b.modified - a.modified);
     if (!r.data.length) grid.innerHTML = '<div class="dp-empty">No designs yet. Use <b>Save</b> (Ctrl+S) to store the current model in your profile.</div>';
-    for (const pr of r.data) {
+    else if (!items.length) grid.innerHTML = '<div class="dp-empty">No designs match your search.</div>';
+    for (const pr of items) {
       const el = card(pr.name, { modified: pr.modified, thumb: pr.thumb, ver: pr.ver, del: true });
       el.onclick = async (e) => {
         if (e.target.closest('.dp-del')) return;
-        if (dirty && !confirm('Discard unsaved changes?')) return;
+        if (focusOpenDesign(pr.name)) return;
+        if (!newTab({ reuseBlank: true })) return;
         const dr = await call('GET', '/drafts');
         const draft = dr.ok && dr.data.find((x) => x.key === pr.name && x.modified > pr.modified + 2000);
         if (draft && confirm(`A newer autosaved draft of "${pr.name}" exists (${draft.device || 'another device'}, ${ago(draft.modified)}).\n\nOK = resume the draft, Cancel = open the saved version.`)) {
@@ -2130,6 +2363,7 @@ async function renderDataPanel() {
         }
         openDesign(pr.name);
       };
+      el.querySelector('.dp-ver').onclick = (e) => { e.stopPropagation(); showVersions(pr); };
       el.querySelector('.dp-del').onclick = async () => {
         if (!confirm(`Delete "${pr.name}" permanently?`)) return;
         await call('DELETE', '/projects/' + encodeURIComponent(pr.name));
@@ -2137,6 +2371,8 @@ async function renderDataPanel() {
       };
       grid.appendChild(el);
     }
+    };
+    q.oninput = draw; draw();
   } else {
     $('#dp-count').textContent = acct.server ? 'Signed out' : 'Offline';
     grid.innerHTML = '';
@@ -2193,7 +2429,7 @@ function bindKeys() {
     if (e.key === 'Escape') {
       if (navMode !== 'orbit') { setNavMode('orbit'); return; }
       if (sketch && !sketch.picking) { SU.key(e); return; }
-      if (!dialog && !measure && (selEdges.length || selFace)) { selEdges = []; selFace = null; vp.showFaces([], null); updateEdgeView(); renderRibbon(); return; }
+      if (!dialog && !measure && (selEdges.length || selFace || profSel.size)) { profSel.clear(); updateProfileView(); selEdges = []; selFace = null; vp.showFaces([], null); updateEdgeView(); renderRibbon(); return; }
       if (measure) { endMeasure(); return; }
       if (sketch?.pts) { sketch.pts = null; vp.overlay.clear(); } else if (sketch) cancelSketch(); else if (dialog) closeDialog(false);
       return;
@@ -2222,14 +2458,12 @@ async function boot() {
   set('btn-home', uicon('home', 18, 1.5)); set('btn-data', uicon('grid', 18, 1.5));
   set('btn-menu', uicon('file', 18, 1.5) + caret); set('btn-save', uicon('save', 18, 1.5));
   set('btn-undo', uicon('undo', 18, 1.5) + caret); set('btn-redo', uicon('redo', 18, 1.5) + caret);
-  set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-job', uicon('jobs', 20, 1.5)); set('btn-ext', uicon('sparkle', 18, 1.4));
-  set('btn-clock', uicon('clock', 18, 1.5)); set('btn-bell', uicon('bell', 18, 1.5)); set('btn-help', uicon('help', 18, 1.5));
-  set('btn-closedoc', uicon('close', 12, 2));
-  document.querySelector('.doc-ic').innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L21 7V17L12 22L3 17V7Z" fill="#f08c00"/><path d="M12 12L21 7M12 12V22M12 12L3 7" stroke="#fff" stroke-width="1.5" fill="none"/></svg>';
-  set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2)); set('btn-addcomment', uicon('plus', 14, 2));
+  set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('sparkle', 18, 1.4));
+  set('btn-bell', uicon('bell', 18, 1.5));
+  set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
   set('tl-settings', uicon('gear', 18, 1.5)); set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
   $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" style="position:absolute;inset:0;display:grid;place-items:center;color:#667">Loading CAD kernel…</div>');
-  await initKernel();
+  await initKernel({ locateFile: () => wasmUrl });
   vp = new Viewport($('#gl'), $('#cube'));
   vp.opts.bedSize = PRINTERS[bedName] || vp.opts.bedSize;
   vp.buildBed();
@@ -2249,25 +2483,46 @@ async function boot() {
   $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
   $('#btn-home').onclick = () => toggleDataPanel(true);
   $('#btn-data').onclick = () => toggleDataPanel();
-  $('#btn-newtab').onclick = newDoc; $('#btn-closedoc').onclick = newDoc;
-  $('#btn-job').onclick = () => toast('No background jobs.');
+  $('#btn-newtab').onclick = newDoc;
+  renderDocTabs();
   $('#btn-ext').onclick = openQuickSearch;
-  $('#btn-clock').onclick = () => toast('Recent saves appear in the data panel.');
   $('#btn-bell').onclick = () => toast('No new notifications.');
-  $('#btn-help').onclick = () => toast('Tip: press S to search every command, right-click for the marking menu.');
   $('#pt-min').onclick = $('#pt-collapse').onclick = () => $('#browser').classList.toggle('min');
-  $('#btn-addcomment').onclick = () => toast('Comments are not available yet.');
   $('#tl-settings').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 150, r.top - 80, [{ label: 'Capture position', dim: true, run: () => toast('Not available yet.') }, { label: 'Collapse all features', dim: true, run: () => toast('Not available yet.') }]); };
   $('#cube-home').onclick = () => vp.home();
+  document.querySelectorAll('.vc-arrow').forEach((b) => { const [ax, d] = b.dataset.t.split(','); b.onclick = () => vp.turnView(ax, +d); });
+  { // Fusion-style roll arrows: two outlined arcs around the cube's top-right corner
+    const R = 76, pt = (deg, r = R) => [r * Math.cos((deg * Math.PI) / 180), -r * Math.sin((deg * Math.PI) / 180)];
+    const arrow = (from, to, dirSign, title, turn) => {
+      const [x0, y0] = pt(from), [x1, y1] = pt(to), sweep = to > from ? 0 : 1;
+      const end = pt(to), tan = pt(to + dirSign * 90, 1), nrm = pt(to, 1), L = 8, Wd = 8; // head points along the travel direction
+      const tip = [end[0] + tan[0] * L, end[1] + tan[1] * L], a = [end[0] + nrm[0] * Wd, end[1] + nrm[1] * Wd], b = [end[0] - nrm[0] * Wd, end[1] - nrm[1] * Wd];
+      const d = `M${x0} ${y0}A${R} ${R} 0 0 ${sweep} ${x1} ${y1}`;
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'ra'); g.innerHTML = `<title>${title}</title><path class="o" d="${d}"/><path class="i" d="${d}"/><polygon class="h" points="${tip} ${a} ${b}"/>`;
+      g.onclick = () => vp.turnView('z', turn);
+      return g;
+    };
+    const host = $('#vc-rolls');
+    host.append(arrow(49, 72, 1, 'Roll counter-clockwise', -90), arrow(41, 18, -1, 'Roll clockwise', 90));
+  }
   $('#cube-menu').dataset.menu = 1;
   $('#cube-menu').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 140, r.bottom + 4, [{ label: 'Go Home', uicon: 'home', run: () => vp.home() }, { sep: true }, { label: 'Orthographic', check: vp.opts.ortho, run: () => vp.setOrtho(true) }, { label: 'Perspective', check: !vp.opts.ortho, run: () => vp.setOrtho(false) }]); };
   $('#file-2d').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) import2D(f); };
   $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importSTL(f); };
-  $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { loadProject(await f.text()); } catch (x) { toast(x.message, true); } };
+  $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { const txt = await f.text(); if (!newTab({ reuseBlank: true })) return; loadProject(txt); renderDocTabs(); } catch (x) { toast(x.message, true); } };
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
   $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.stl$/i.test(f.name)) importSTL(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
+  initA11y();
+  const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x7fb6f0 : 0x2b6cb0); sketchMatActive.color.setHex(d ? 0x5aa7ee : 0x0b6bcb); };
+  paint(getTheme()); onTheme(paint);
   await refreshAccount();
-  setAccountMenuHandler((anchor) => { const r = anchor.getBoundingClientRect(); showMenu(r.right - 200, r.bottom + 4, [{ head: `SIGNED IN AS ${acct.user.toUpperCase()}${acct.admin ? ' (ADMIN)' : ''}` }, { label: 'My Designs…', uicon: 'folder', run: () => toggleDataPanel(true) }, { label: 'Change password…', uicon: 'gear', run: showChangePassword }, ...(acct.admin ? [{ label: 'Users…', uicon: 'user', run: showAdmin }] : []), { sep: true }, { label: 'Sign out', run: async () => { await signOut(); toast('Signed out'); if (dataOpen) renderDataPanel(); } }]); });
+  await ensureSignedIn(); // server mode: sign-up on first visit, login afterwards
+  setAccountMenuHandler((anchor) => openUserMenu(anchor, {
+    onAccount: () => showAccount(), onSettings: showAdmin,
+    isDark: () => getTheme() === 'dark', onTheme: () => setTheme(getTheme() === 'dark' ? 'light' : 'dark'),
+    onLogout: async () => { await signOut(); try { localStorage.removeItem('sketchy.autosave'); } catch { /* ignore */ } location.reload(); },
+  }));
   try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length) { loadProject(a); toast('Restored your last session'); } } } catch { /* ignore */ }
   if (localStorage.getItem('sketchy.data') === '1') toggleDataPanel(true);
   setAccountChangeHandler(() => { if (dataOpen) renderDataPanel(); });
