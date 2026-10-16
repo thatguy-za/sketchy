@@ -32,7 +32,7 @@ volumes:
 **3.** Open <http://localhost:8080> and create an account. The first account becomes the administrator.
 
 * Update with `docker compose pull && docker compose up -d`. Your designs live in the `sketchy-data` volume and survive updates.
-* Using a folder on your computer instead of a volume (for example `./sketchy-data:/data`) works too. The container fixes the folder's ownership when it starts, so you don't need to `chmod` or `chown` anything.
+* Using a folder on your computer instead of a volume (for example `./sketchy-data:/data`) works too. The container fixes the folder's ownership when it starts, so you don't need to `chmod` or `chown` anything. To make the saved files belong to your own user, set `PUID` and `PGID` (the output of `id -u` and `id -g`; both default to 1000), for example `PUID: "1026"` and `PGID: "100"` under `environment:`.
 * Works on Intel/AMD and ARM (Raspberry Pi 4/5, Apple silicon). Other people on your network can use it too and only see their own designs.
 * Sketchy serves plain HTTP, so put it behind HTTPS if you expose it to the internet. [Here's how](docs/HTTPS.md).
 * Forgot your password? An administrator can reset it under your initial (top right) → *Server settings*, or run `docker exec -it sketchy node server.js reset-password YOUR_USERNAME`.
