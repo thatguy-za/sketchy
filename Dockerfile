@@ -20,17 +20,14 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:22-alpine
 WORKDIR /app
-ENV NODE_ENV=production DATA_DIR=/data PORT=8080
+ENV NODE_ENV=production DATA_DIR=/data PORT=8080 SKETCHY_DROP_ROOT=1
 COPY package*.json ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server.js mcp.js ./
-RUN apk add --no-cache su-exec
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY src ./src
 COPY --from=build --chown=node:node /data-empty /data
 VOLUME /data
 EXPOSE 8080
-# starts as root to fix the ownership of /data, then drops to the node user (see docker-entrypoint.sh)
-ENTRYPOINT ["docker-entrypoint.sh"]
+# starts as root only to fix the ownership of /data, then server.js switches to PUID:PGID (default 1000:1000)
 CMD ["node", "server.js"]

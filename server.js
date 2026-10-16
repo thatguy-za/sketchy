@@ -18,6 +18,25 @@ const MAX_VERSIONS = Math.max(0, parseInt(process.env.MAX_VERSIONS ?? '20', 10) 
 const SESSION_MS = 365 * 24 * 3600 * 1000; // sliding: renewed whenever the app is opened, so active users stay signed in
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png' };
 
+// In the Docker image the server starts as root, makes the data directory writable, and then switches to an unprivileged user
+// (PUID and PGID, default 1000:1000). Doing it here means the image needs no extra tools, so building it runs nothing under
+// emulation. Only when SKETCHY_DROP_ROOT is set (the image sets it); a normal install is untouched.
+if (process.getuid?.() === 0 && process.env.SKETCHY_DROP_ROOT) {
+  const num = (v, d) => (v === undefined || v === '' ? d : /^\d+$/.test(v) ? +v : NaN);
+  const uid = num(process.env.PUID, 1000), gid = num(process.env.PGID, 1000);
+  if (Number.isNaN(uid) || Number.isNaN(gid)) { console.error(`PUID and PGID must be numbers (got PUID=${process.env.PUID ?? ''} PGID=${process.env.PGID ?? ''})`); process.exit(1); }
+  if (uid === 0) console.error('Warning: PUID=0 runs the server as root. Use your own user id instead.');
+  else {
+    await fs.mkdir(dataDir, { recursive: true });
+    const chownAll = async (dir) => {
+      await fs.lchown(dir, uid, gid);
+      for (const e of await fs.readdir(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); if (e.isDirectory()) await chownAll(f); else await fs.lchown(f, uid, gid); }
+    };
+    try { await chownAll(dataDir); } catch (e) { console.error(`Warning: could not change the owner of ${dataDir} (${e.code}); a read-only or network mount?`); }
+    process.setgroups([]); process.setgid(gid); process.setuid(uid);
+  }
+}
+
 const usersFile = path.join(dataDir, 'users.json');
 const sessionsFile = path.join(dataDir, 'sessions.json');
 const settingsFile = path.join(dataDir, 'settings.json');
