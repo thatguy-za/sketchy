@@ -1,6 +1,6 @@
 # Sketchy
 
-**A lightweight, self-hosted 3D design app that is familiar to Fusion 360 users.**
+**A lightweight, self-hosted 3D design app, familiar to anyone who has used a parametric CAD tool.**
 
 Sketchy is focused on 3D design and 3D printing: sketches with constraints, a parametric timeline, named parameters, patterns, sweeps and lofts, version history, and an MCP server so AI assistants can build for you. It runs in your browser, saves to a machine you control, and is free and open source. It leaves out simulation, CAM, rendering and the rest of a full CAD suite to stay small and fast.
 

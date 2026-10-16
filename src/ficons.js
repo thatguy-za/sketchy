@@ -1,4 +1,4 @@
-// Fusion-style icon set: colourful isometric feature icons (ficon) + thin UI chrome icons (uicon).
+// Icon set: colourful isometric feature icons (ficon) + thin UI chrome icons (uicon).
 const B = { t: '#a9d2f7', l: '#4f9be8', r: '#2c6fc6', s: '#245a9f' };      // blue solid (top / left / right / stroke)
 const G = { t: '#f7f8f9', l: '#d9dce0', r: '#b8bdc4', s: '#7c858f' };      // gray solid
 const GREEN = '#35a853', ORANGE = '#f08c00', RED = '#e0453a', INK = '#3a444f';

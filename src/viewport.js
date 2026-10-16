@@ -95,7 +95,7 @@ export class Viewport {
 
   buildOrigin() {
     const line = (a, b, c, o) => new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...a), new THREE.Vector3(...b)]), new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: o }));
-    // long X (red) and Y (green) axis lines through the grid like Fusion; short Z stub
+    // long X (red) and Y (green) axis lines through the grid; short Z stub
     this.scene.add(line([-600, 0, 0], [600, 0, 0], 0xe27d78, 0.75), line([0, -600, 0], [0, 600, 0], 0x7fcf92, 0.75), line([0, 0, 0], [0, 0, 60], 0x6f9be8, 0.9));
     const ring = new THREE.Mesh(new THREE.RingGeometry(1.6, 2.4, 28), new THREE.MeshBasicMaterial({ color: 0x8b9096, side: THREE.DoubleSide, transparent: true, opacity: 0.8, depthWrite: false }));
     const dot = new THREE.Mesh(new THREE.CircleGeometry(0.7, 12), new THREE.MeshBasicMaterial({ color: 0x8b9096, side: THREE.DoubleSide }));
@@ -381,7 +381,7 @@ export class Viewport {
     const H = this.canvas.clientHeight || 600, cam = this.camera;
     const perPx = this.opts.ortho ? (cam.top - cam.bottom) / cam.zoom / H : (2 * cam.position.distanceTo(p0) * Math.tan((cam.fov * Math.PI) / 360)) / H;
     this.manipPx = perPx;
-    const size = perPx * 11; // head about 8px wide, like Fusion's slim arrow
+    const size = perPx * 11; // head about 8px wide, slim arrow
     const tip = p0.clone().addScaledVector(n, dist);
     const mat = new THREE.MeshBasicMaterial({ color: 0x0d5bd6, depthTest: false });
     const baseDot = new THREE.Mesh(new THREE.SphereGeometry(size * 0.28, 12, 8), mat);
@@ -718,7 +718,7 @@ export class Viewport {
       const u = tx(f.u), v = tx(f.v), n = tx(f.n), c = tx(f.n.clone().multiplyScalar(h));
       f.d.style.transform = `matrix3d(${u[0]},${u[1]},${u[2]},0,${v[0]},${v[1]},${v[2]},0,${n[0]},${n[1]},${n[2]},0,${c[0]},${c[1]},${c[2]},1)`;
     }
-    // axis letters sit on the cube's back-bottom-left corner like Fusion: each axis continues past the cube edge
+    // axis letters sit on the cube's back-bottom-left corner each axis continues past the cube edge
     // with a short stub and a letter; perspective makes the axis pointing at the viewer fan out diagonally.
     const hc = 29 * 1.3, ext = 13, lab = 25, PERSP = 520;
     const proj = (v) => { const p = v.clone().applyMatrix4(R), k = PERSP / (PERSP - p.z); return [55 + p.x * k, 55 - p.y * k]; };

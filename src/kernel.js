@@ -73,7 +73,7 @@ function shapeToCS(s, t) {
 }
 
 /**
- * Split a sketch into closed regions ("profiles"), like Fusion: every closed area bounded by the sketch
+ * Split a sketch into closed regions ("profiles"), as in most CAD tools: every closed area bounded by the sketch
  * shapes is its own selectable region. Returns [{id, cs, sig, defaultOn}].
  * Default selection: nested shapes alternate (a circle inside a rectangle is a hole), partial overlaps all count.
  */

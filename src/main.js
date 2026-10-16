@@ -336,7 +336,7 @@ function renderStatus() {
   $('#statusbar').textContent = `${n} ${n === 1 ? 'body' : 'bodies'} · ${tris.toLocaleString()} triangles · ${getUnits()}`;
 }
 
-// ------------------------------------------------------------------ toolbar (Fusion-style)
+// ------------------------------------------------------------------ toolbar (familiar CAD style)
 CMD.cancelpick = { label: 'Cancel', icon: 'remove' };
 const MEASURE_MODE = { measure: 'dist', angle: 'angle', edgelen: 'edge', faces: 'faces' };
 const CUSTOM = {
@@ -948,7 +948,7 @@ const DLG_ICON = {
   dir: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M7 7l9-3.5 4 4.5-9 3.5z" fill="#f2a67e" stroke="#c9672f"/><path d="M4 20.5l7.5-8M4 20.5h5M4 20.5v-5" stroke="#555" stroke-width="1.6" fill="none"/></svg>',
   ext: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 4.5v15M20 4.5v15M6.5 12h11M6.5 12l3-2.6M6.5 12l3 2.6M17.5 12l-3-2.6M17.5 12l-3 2.6" stroke="#16304f" fill="none" stroke-width="1.6"/></svg>',
 };
-/** Fusion-style dropdown: icon + label + caret, popup list below with an icon per option. */
+/** Dropdown: icon + label + caret, popup list below with an icon per option. */
 function iconSelect(opts, val, onPick, iconFor, { disabled = false } = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'isel' + (disabled ? ' off' : '');
@@ -992,7 +992,7 @@ function renderDialog() {
   const rerender = () => { renderDialog(); setupGizmo(); };
   for (const fld of def.fields) {
     if (fld.show && !fld.show(f.params)) continue;
-    if (fld.key === 'sketch' && 'profiles' in f.params && sketchesBefore(idx).length < 2) continue; // Fusion has no sketch row; the profile pick chooses it
+    if (fld.key === 'sketch' && 'profiles' in f.params && sketchesBefore(idx).length < 2) continue; // no sketch row: the profile pick chooses it
     const row = document.createElement('div');
     row.className = 'row';
     row.innerHTML = `<label>${fld.label}</label><div class="ctl"></div>`;
@@ -1956,7 +1956,7 @@ function bindViewport() {
   const cv = $('#gl');
   let down = null, rdown = null;
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
-  // Fusion navigation: middle = pan, Shift + middle = orbit, double-click middle = fit
+  // Navigation: middle = pan, Shift + middle = orbit, double-click middle = fit
   cv.addEventListener('pointerdown', (e) => {
     if (e.button !== 1) return;
     if (e.detail === 2) { vp.fit(); return; }
@@ -2384,7 +2384,7 @@ async function renderDataPanel() {
   }
 }
 
-// ------------------------------------------------------------------ tooltips (Fusion-style rich tips)
+// ------------------------------------------------------------------ tooltips (rich tips)
 function bindTooltips() {
   const tip = document.createElement('div');
   tip.id = 'tip'; tip.hidden = true;
@@ -2491,7 +2491,7 @@ async function boot() {
   $('#tl-settings').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 150, r.top - 80, [{ label: 'Capture position', dim: true, run: () => toast('Not available yet.') }, { label: 'Collapse all features', dim: true, run: () => toast('Not available yet.') }]); };
   $('#cube-home').onclick = () => vp.home();
   document.querySelectorAll('.vc-arrow').forEach((b) => { const [ax, d] = b.dataset.t.split(','); b.onclick = () => vp.turnView(ax, +d); });
-  { // Fusion-style roll arrows: two outlined arcs around the cube's top-right corner
+  { // roll arrows: two outlined arcs around the cube's top-right corner
     const R = 76, pt = (deg, r = R) => [r * Math.cos((deg * Math.PI) / 180), -r * Math.sin((deg * Math.PI) / 180)];
     const arrow = (from, to, dirSign, title, turn) => {
       const [x0, y0] = pt(from), [x1, y1] = pt(to), sweep = to > from ? 0 : 1;

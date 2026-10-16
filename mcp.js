@@ -6,7 +6,7 @@
 const VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const SERVER = { name: 'sketchy', version: '0.0.2' };
 
-const INSTRUCTIONS = `Sketchy is a parametric 3D CAD tool. You build a design as an ordered timeline of features (sketch, extrude, hole, fillet...), like Fusion 360. Everything is in millimetres.
+const INSTRUCTIONS = `Sketchy is a parametric 3D CAD tool. You build a design as an ordered timeline of features (sketch, extrude, hole, fillet...), like other parametric CAD tools. Everything is in millimetres.
 
 Workflow: create_design (or list_designs / get_design) -> add_feature one step at a time -> inspect the result (every add_feature returns the bodies, sizes, volumes and any errors) -> fix with update_feature / delete_feature. Call describe_feature_types to see every feature kind with its parameters and defaults.
 

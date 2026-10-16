@@ -1,8 +1,8 @@
-// Command registry + Fusion-style toolbar layout. Commands are looked up by id from toolbars,
+// Command registry + toolbar layout. Commands are looked up by id from toolbars,
 // dropdown menus, the marking menu and the quick-search palette.
 //   feature: id of a FEATURES entry started by startFeature()
 //   sk:      sketch tool id
-//   off:     placeholder that exists in Fusion but isn't implemented here (shown disabled)
+//   off:     placeholder for a common CAD command that isn't implemented here (shown disabled)
 const C = (label, icon, extra = {}) => ({ label, icon, ...extra });
 
 export const CMD = {
@@ -65,7 +65,7 @@ export const CMD = {
   sk_select: C('Select (edit shapes)', 'select', { sk: 'select', key: 'Esc' }),
   sk_delete: C('Delete Shape', 'remove', { skAction: 'delete' }),
   finishsketch: C('Finish Sketch', 'finish', { key: '' }),
-  // --- placeholders that exist in Fusion ---
+  // --- placeholders for common CAD commands ---
   offsetplane: C('Offset Plane', 'offsetplane', { off: true }),
   newcomp: C('New Component', 'joint', { off: true }),
   asbuilt: C('As-built Joint', 'joint'),

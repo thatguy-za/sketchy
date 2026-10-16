@@ -1,4 +1,4 @@
-// Sketch interaction layer (Fusion-style): inference snapping, type-in dimensions while drawing,
+// Sketch interaction layer (familiar CAD style): inference snapping, type-in dimensions while drawing,
 // and a Select tool with hover, drag, resize handles and editable dimension labels.
 //
 // `app` provides: vp, THREE, sketch() (state, may be null), params() (current sketch params),
@@ -287,7 +287,7 @@ export function createSketchUI(app) {
     const ext = (from, to) => { const ex = to.x - from.x, ey = to.y - from.y, el = Math.hypot(ex, ey) || 1; return `<line x1="${from.x + (ex / el) * 4}" y1="${from.y + (ey / el) * 4}" x2="${to.x + (ex / el) * 8}" y2="${to.y + (ey / el) * 8}"/>`; };
     return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"/>${head(a, 1)}${head(b, -1)}${ext(p, a)}${ext(q, b)}`;
   }
-  /** Fusion-style on-canvas dimension fields: each value sits on its own dimension line beside the shape. */
+  /** On-canvas dimension fields: each value sits on its own dimension line beside the shape. */
   function layoutDimbox(s, lv) {
     const svg = dimbox.querySelector('.dimsvg'), place = {};
     let lines = '';
