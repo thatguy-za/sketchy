@@ -4,7 +4,7 @@
 // Zero dependencies; the modelling kernel (src/headless.js) is loaded lazily on first use.
 
 const VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER = { name: 'sketchy', version: '0.0.2' };
+const SERVER = { name: 'sketchy', version: '0.0.3' };
 
 const INSTRUCTIONS = `Sketchy is a parametric 3D CAD tool. You build a design as an ordered timeline of features (sketch, extrude, hole, fillet...), like other parametric CAD tools. Everything is in millimetres.
 
