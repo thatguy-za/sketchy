@@ -2,7 +2,8 @@
 import Module from 'manifold-3d';
 import { findEdgeChains, matchChain, planarFace } from './edges.js';
 import { pathPolygon, openLoops } from './sketchgeo.js';
-import { ringMesh, loftRings, sweepRings, helixRings, smoothPath, axisFrame, sub, add, scl, dot, len, unit } from './solids.js';
+import { repairSoup } from './meshrepair.js';
+import { ringMesh, surfaceMesh, loftRings, sweepRings, helixRings, smoothPath, axisFrame, sub, add, scl, dot, len, unit, cross } from './solids.js';
 
 let K;
 /** Browser: pass { locateFile } pointing at the bundled wasm. Node (the MCP server): no options needed. */
@@ -359,6 +360,54 @@ function sketchPath3D(sk) {
   return { closed, pts: pts2.map(([u, v]) => [o[0] + x[0] * u + y[0] * v, o[1] + x[1] * u + y[1] * v, o[2] + x[2] * u + y[2] * v]) };
 }
 
+/** Every shape of a sketch as a 3D polyline: [{pts, closed}] (open paths and closed shapes alike). */
+function sketchCurves3D(sk) {
+  const { o, x, y } = planeFrame(sk.params);
+  const out = sk.params.shapes.map((sh) => ({ closed: !sh.open, pts: shapeToPolygon(sh).map(([u, v]) => [o[0] + x[0] * u + y[0] * v, o[1] + x[1] * u + y[1] * v, o[2] + x[2] * u + y[2] * v]) })).filter((c) => c.pts.length >= 2);
+  if (!out.length) throw new Error(`${sk.name} has no shapes (draw a path, rectangle, circle...)`);
+  return out;
+}
+/** Merge several indexed meshes into one. */
+function joinMeshes(list) {
+  const verts = [], tris = [];
+  for (const m of list) { const base = verts.length / 3; verts.push(...m.verts.flat ? m.verts.flat() : m.verts); for (const i of m.tris) tris.push(i + base); }
+  return { verts: new Float32Array(verts), tris: new Uint32Array(tris) };
+}
+/** Weld surface meshes together and, if they enclose a volume, turn them into a solid. */
+function stitchSurfaces(list, t) {
+  const j = joinMeshes(list), soup = new Float32Array(j.tris.length * 3);
+  for (let i = 0; i < j.tris.length; i++) for (let k = 0; k < 3; k++) soup[i * 3 + k] = j.verts[j.tris[i] * 3 + k];
+  const r = repairSoup(soup, { fillHoles: false });
+  let solid = null;
+  if (r.report.openEdges === 0) { try { solid = manifoldFromIndexed(r.verts, Array.from(r.tris), t); if (solid.isEmpty()) solid = null; } catch { solid = null; } }
+  return { surface: { verts: r.verts, tris: r.tris }, openEdges: r.report.openEdges, solid };
+}
+/** Give an open surface thickness by offsetting along smoothed vertex normals; the open boundary is closed with side walls. */
+function thickenSurface(surf, thickness, both, t) {
+  const soup = new Float32Array(surf.tris.length * 3);
+  for (let i = 0; i < surf.tris.length; i++) for (let k = 0; k < 3; k++) soup[i * 3 + k] = surf.verts[surf.tris[i] * 3 + k];
+  const r = repairSoup(soup, { fillHoles: false });
+  const V = r.verts, T = r.tris, nv = V.length / 3, N = new Float64Array(nv * 3);
+  for (let i = 0; i < T.length; i += 3) {
+    const a = T[i], b = T[i + 1], c = T[i + 2];
+    const e1 = [V[b * 3] - V[a * 3], V[b * 3 + 1] - V[a * 3 + 1], V[b * 3 + 2] - V[a * 3 + 2]], e2 = [V[c * 3] - V[a * 3], V[c * 3 + 1] - V[a * 3 + 1], V[c * 3 + 2] - V[a * 3 + 2]];
+    const n = cross(e1, e2); // area weighted
+    for (const v of [a, b, c]) { N[v * 3] += n[0]; N[v * 3 + 1] += n[1]; N[v * 3 + 2] += n[2]; }
+  }
+  for (let v = 0; v < nv; v++) { const l = Math.hypot(N[v * 3], N[v * 3 + 1], N[v * 3 + 2]) || 1; N[v * 3] /= l; N[v * 3 + 1] /= l; N[v * 3 + 2] /= l; }
+  const lo = both ? -thickness / 2 : 0, hi = both ? thickness / 2 : thickness;
+  const P = new Float32Array(nv * 6); // first nv: bottom, next nv: top
+  for (let v = 0; v < nv; v++) for (let k = 0; k < 3; k++) { P[v * 3 + k] = V[v * 3 + k] + N[v * 3 + k] * lo; P[(nv + v) * 3 + k] = V[v * 3 + k] + N[v * 3 + k] * hi; }
+  const tri = [];
+  for (let i = 0; i < T.length; i += 3) { tri.push(nv + T[i], nv + T[i + 1], nv + T[i + 2]); tri.push(T[i], T[i + 2], T[i + 1]); } // top as built, bottom reversed
+  const half = new Set(); for (let i = 0; i < T.length; i += 3) for (let k = 0; k < 3; k++) half.add(`${T[i + k]}>${T[i + (k + 1) % 3]}`);
+  for (const h of half) { const [a, b] = h.split('>').map(Number); if (!half.has(`${b}>${a}`)) tri.push(a, b, nv + b, a, nv + b, nv + a); } // boundary walls
+  let m;
+  try { m = manifoldFromIndexed(P, tri, t); } catch { throw new Error('Could not thicken this surface (it folds over itself at this thickness)'); }
+  if (m.isEmpty()) throw new Error('Could not thicken this surface (it folds over itself at this thickness)');
+  return m;
+}
+
 /** Helical groove tool for threads, built about +Z from z=0 to z=length. */
 function threadGroove(p, t) {
   const { radius: Rs, pitch, length, depth, internal, left } = p;
@@ -438,7 +487,33 @@ export function bboxOf(m) {
  * Replay features[0..count). Returns { bodies, errors, snaps, sketchUsed }.
  * bodies: [{id,name,verts,tris,volume,area,bbox}]; snaps[i] = bodies alive before feature i.
  */
+/**
+ * Construction planes: a 'plane' feature offsets a base plane (XY/XZ/YZ or an earlier plane feature). Sketches that name one
+ * through params.planeRef are re-pointed at its current geometry. Returns copies; the input is not modified.
+ * Plane features get origin/normal/xdir filled in so the UI can draw them.
+ */
+export function resolvePlanes(features) {
+  const frames = {};
+  const same = (a, b) => a && b && a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+  return features.map((f) => {
+    if (f.type === 'plane') {
+      const base = frames[f.params.base] ? { plane: 'custom', ...frames[f.params.base], offset: 0 } : { plane: f.params.base || 'XY', offset: 0 };
+      const fr = planeFrame(base), d = +f.params.offset || 0;
+      const geo = { origin: fr.o.map((c, k) => c + fr.n[k] * d), normal: fr.n, xdir: fr.x };
+      frames[f.id] = geo;
+      return { ...f, params: { ...f.params, ...geo } };
+    }
+    if (f.type === 'sketch' && f.params.planeRef && frames[f.params.planeRef]) {
+      const g = frames[f.params.planeRef];
+      if (f.params.plane === 'custom' && same(f.params.origin, g.origin) && same(f.params.normal, g.normal) && same(f.params.xdir, g.xdir)) return f;
+      return { ...f, params: { ...f.params, plane: 'custom', ...g } };
+    }
+    return f;
+  });
+}
+
 export function rebuild(features, count, opts = {}) {
+  features = resolvePlanes(features);
   const garbage = [];
   const t = (o) => { garbage.push(o); return o; };
   const live = new Map(); // id -> {id,name,m}
@@ -457,6 +532,11 @@ export function rebuild(features, count, opts = {}) {
     return b;
   };
   const sketches = {};
+  const surfaces = new Map(); // id -> {id, name, verts, tris}: open surface bodies (not solids)
+  const surfSnaps = [];
+  let surfCount = 0;
+  const addSurface = (id, mesh, name) => surfaces.set(id, { id, name: name || `Surface${++surfCount}`, verts: Float32Array.from(mesh.verts), tris: Uint32Array.from(mesh.tris) });
+  const getSurface = (id) => { const sf = surfaces.get(id); if (!sf) throw new Error('A surface you picked no longer exists'); return sf; };
   const solidFromSketch = (f, forRevolve) => {
     const sk = sketches[f.params.sketch];
     if (!sk) throw new Error('Sketch not found');
@@ -496,9 +576,15 @@ export function rebuild(features, count, opts = {}) {
   };
 
   for (let i = 0; i < Math.min(count, features.length); i++) {
-    const f = features[i];
+    const f0 = features[i];
+    // Emboss is an extrude in disguise: raise = join outward along the sketch normal, engrave = cut into the part
+    const eng = f0.type === 'emboss' && f0.params.mode === 'engrave';
+    const f = f0.type === 'emboss'
+      ? { ...f0, type: 'extrude', params: { sketch: f0.params.sketch, profiles: f0.params.profiles, extent: 'distance', distance: (eng ? -1 : 1) * Math.abs(f0.params.depth || 0), flip: false, symmetric: false, op: eng ? 'cut' : 'join', target: f0.params.target || '', toBody: '', taper: 0, twist: 0, scaleTop: 1 } }
+      : f0;
     curF = f;
     snaps.push(snap());
+    surfSnaps.push([...surfaces.values()].map((q) => ({ id: q.id, name: q.name })));
     if (opts.capture === i) captured = [...live.values()].map((b) => { const me = b.m.getMesh(); return { id: b.id, name: b.name, verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts) }; });
     if (f.suppressed) continue;
     try {
@@ -506,6 +592,7 @@ export function rebuild(features, count, opts = {}) {
       switch (f.type) {
         case 'primitive': addBody(f.id, makePrimitive(p, t), f.name); break;
         case 'sketch': sketches[f.id] = f; break;
+        case 'plane': break; // construction geometry only (see resolvePlanes)
         case 'extrude': {
           const { cs, sk } = solidFromSketch(f);
           const fr = planeFrame(sk.params);
@@ -673,6 +760,93 @@ export function rebuild(features, count, opts = {}) {
           applyOp(f, solidFromRings(rings, false, t), p.op, p.target);
           break;
         }
+        case 'sextrude': {
+          const sk = sketches[p.sketch];
+          if (!sk) throw new Error('Choose a sketch');
+          sketchUsed.add(sk.id);
+          const { n } = planeFrame(sk.params), d = p.distance || 0;
+          if (!d) throw new Error('Enter a distance');
+          const parts = sketchCurves3D(sk).map((c) => {
+            const off = p.symmetric ? -d / 2 : 0;
+            const r0 = c.pts.map((q) => add(q, scl(n, off))), r1 = r0.map((q) => add(q, scl(n, d)));
+            return surfaceMesh([r0, r1], c.closed, false);
+          });
+          addSurface(f.id, joinMeshes(parts), f.name);
+          break;
+        }
+        case 'srevolve': {
+          const sk = sketches[p.sketch];
+          if (!sk) throw new Error('Choose a sketch');
+          sketchUsed.add(sk.id);
+          const fr = planeFrame(sk.params), ang = Math.min(360, Math.max(1, p.angle ?? 360)), full = ang >= 360;
+          const SEGS = Math.max(8, Math.ceil(ang / 7.5)), R = full ? SEGS : SEGS + 1;
+          const parts = sk.params.shapes.map((sh) => ({ closed: !sh.open, uv: shapeToPolygon(sh) })).filter((c) => c.uv.length >= 2).map((c) => {
+            const rings = [];
+            for (let k = 0; k < R; k++) {
+              const th = (k / SEGS) * ang * Math.PI / 180, cs = Math.cos(th), sn = Math.sin(th);
+              rings.push(c.uv.map(([u, v]) => add(add(fr.o, scl(fr.x, u * cs)), add(scl(fr.n, u * sn), scl(fr.y, v)))));
+            }
+            return surfaceMesh(rings, c.closed, full);
+          });
+          if (!parts.length) throw new Error('The sketch has no shapes to revolve');
+          addSurface(f.id, joinMeshes(parts), f.name);
+          break;
+        }
+        case 'ssweep': {
+          const prof = sketches[p.profile], path = sketches[p.path];
+          if (!prof || !path) throw new Error('Choose a profile sketch and a path sketch');
+          sketchUsed.add(prof.id); sketchUsed.add(path.id);
+          let { pts, closed } = sketchPath3D(path);
+          if (p.smooth && !closed) pts = smoothPath(pts, 3);
+          if (pts.length < 2) throw new Error('Path needs at least two points');
+          const parts = sketchCurves3D(prof).map((c) => surfaceMesh(sweepRings(c.pts, pts, closed), c.closed, closed));
+          addSurface(f.id, joinMeshes(parts), f.name);
+          break;
+        }
+        case 'sloft': {
+          const sks = (p.sketches || []).map((id) => sketches[id]).filter(Boolean);
+          if (sks.length < 2) throw new Error('Choose at least two profile sketches');
+          sks.forEach((k) => sketchUsed.add(k.id));
+          addSurface(f.id, surfaceMesh(loftRings(sks.map((k) => sketchOutline3D(k, t))), true, false), f.name);
+          break;
+        }
+        case 'pipe': {
+          const path = sketches[p.path];
+          if (!path) throw new Error('Choose a path sketch');
+          sketchUsed.add(path.id);
+          if (!(p.diameter > 0)) throw new Error('Diameter must be positive');
+          let { pts, closed } = sketchPath3D(path);
+          if (p.smooth && !closed) pts = smoothPath(pts, 3);
+          if (pts.length < 2) throw new Error('Path needs at least two points');
+          const t0 = unit(sub(pts[1], pts[0])), ref = Math.abs(t0[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+          const ux = unit(cross(ref, t0)), uy = cross(t0, ux);
+          const circle = (r) => Array.from({ length: 32 }, (_, i) => { const a = (i / 32) * 2 * Math.PI; return add(pts[0], add(scl(ux, r * Math.cos(a)), scl(uy, r * Math.sin(a)))); });
+          let m = solidFromRings(sweepRings(circle(p.diameter / 2), pts, closed), closed, t);
+          if (p.wall > 0) {
+            if (p.wall * 2 >= p.diameter) throw new Error('Wall thickness is too large for this diameter');
+            m = t(m.subtract(solidFromRings(sweepRings(circle(p.diameter / 2 - p.wall), pts, closed), closed, t)));
+          }
+          applyOp(f, m, p.op || 'new', p.target);
+          break;
+        }
+        case 'sstitch': {
+          const ids = (p.surfaces || []).filter((id) => surfaces.has(id));
+          if (ids.length < 1) throw new Error('Pick at least one surface');
+          const res = stitchSurfaces(ids.map((id) => surfaces.get(id)), t);
+          for (const id of ids) surfaces.delete(id);
+          if (res.solid) addBody(f.id, res.solid, f.name);
+          else if (p.requireSolid) { throw new Error(`The surfaces are not a closed shell yet (${res.openEdges} open edge segments)`); }
+          else addSurface(f.id, res.surface, f.name);
+          break;
+        }
+        case 'sthicken': {
+          const sf = getSurface(p.surface);
+          if (!(p.thickness > 0)) throw new Error('Thickness must be positive');
+          const m = thickenSurface(sf, p.thickness, p.both, t);
+          surfaces.delete(sf.id);
+          addBody(f.id, m, f.name);
+          break;
+        }
         case 'coil': {
           const R = p.diameter / 2, h = p.size / 2;
           if (!(R > h) || !(h > 0) || !(p.pitch > 0) || !(p.turns > 0)) throw new Error('Check diameter, section size, pitch and turns');
@@ -739,6 +913,67 @@ export function rebuild(features, count, opts = {}) {
             cavity = t(cavity.add(t(prism.transform(M))));
           }
           b.m = t(outer.subtract(cavity));
+          break;
+        }
+        case 'draft': {
+          // Tilt planar faces by an angle about the neutral plane (the start or end of the body along the pull direction).
+          // Vertices of each picked face slide along the face normal in proportion to their height above the neutral plane,
+          // so the face stays flat and tilts; neighbouring faces follow.
+          const b = getBody(p.body);
+          if (!p.faces?.length) throw new Error('Pick the faces to draft');
+          const ang = ((p.angle || 0) * Math.PI) / 180;
+          if (Math.abs(ang) < 1e-9) throw new Error('Enter a draft angle');
+          if (Math.abs(ang) >= Math.PI / 4) throw new Error('Draft angle must be under 45 degrees');
+          const u = ({ '+X': [1, 0, 0], '-X': [-1, 0, 0], '+Y': [0, 1, 0], '-Y': [0, -1, 0], '+Z': [0, 0, 1], '-Z': [0, 0, -1] })[p.dir || '+Z'];
+          const me = b.m.getMesh(), np = me.numProp, V = new Float32Array(me.vertProperties.length / np * 3), T = me.triVerts;
+          for (let i = 0; i < V.length / 3; i++) { V[i * 3] = me.vertProperties[i * np]; V[i * 3 + 1] = me.vertProperties[i * np + 1]; V[i * 3 + 2] = me.vertProperties[i * np + 2]; }
+          let lo = Infinity, hi = -Infinity;
+          for (let i = 0; i < V.length / 3; i++) { const h = V[i * 3] * u[0] + V[i * 3 + 1] * u[1] + V[i * 3 + 2] * u[2]; lo = Math.min(lo, h); hi = Math.max(hi, h); }
+          const h0 = p.neutral === 'end' ? hi : lo;
+          const key = (x, y, z) => `${Math.round(x * 1e3)},${Math.round(y * 1e3)},${Math.round(z * 1e3)}`;
+          const shift = new Map();
+          for (const fc of p.faces) {
+            const tri = findFaceTri(V, T, fc.point, fc.normal);
+            const pf = tri < 0 ? null : planarFace(V, T, tri);
+            if (!pf) throw new Error('One of the picked faces is not a flat face of this body any more');
+            if (Math.abs(dot(pf.normal, u)) > 0.9) throw new Error('A picked face is parallel to the neutral plane; pick the side faces');
+            const seen = new Set();
+            for (const ti of pf.tris) for (let k = 0; k < 3; k++) {
+              const vi = T[ti * 3 + k];
+              if (seen.has(vi)) continue;
+              seen.add(vi);
+              const x = V[vi * 3], y = V[vi * 3 + 1], z = V[vi * 3 + 2];
+              const h = (x * u[0] + y * u[1] + z * u[2] - h0) * (p.neutral === 'end' ? -1 : 1); // height away from the neutral plane
+              const k2 = key(x, y, z), cur = shift.get(k2) || [0, 0, 0], m = -Math.tan(ang) * h; // positive angle leans the face inward
+              shift.set(k2, [cur[0] + pf.normal[0] * m, cur[1] + pf.normal[1] * m, cur[2] + pf.normal[2] * m]);
+            }
+          }
+          b.m = t(b.m.warp((v) => { const sft = shift.get(key(v[0], v[1], v[2])); if (sft) { v[0] += sft[0]; v[1] += sft[1]; v[2] += sft[2]; } }));
+          break;
+        }
+        case 'mreduce': {
+          // Fewer triangles: simplify within a deviation limit, searching for the smallest tolerance that reaches the target
+          const b = getBody(p.body);
+          const orig = b.m.numTri(), target = Math.max(8, Math.round((orig * (p.keep ?? 50)) / 100));
+          const maxDev = Math.max(0.001, p.tolerance ?? 0.2);
+          let best = t(b.m.simplify(maxDev));
+          if (best.numTri() <= target) {
+            let lo = 0, hi = maxDev;
+            for (let i = 0; i < 8; i++) {
+              const mid = (lo + hi) / 2, r = t(b.m.simplify(mid));
+              if (r.numTri() <= target) { hi = mid; best = r; } else lo = mid;
+            }
+          }
+          if (best.isEmpty()) throw new Error('Reducing removed the whole body; lower the deviation');
+          b.m = best;
+          break;
+        }
+        case 'mseparate': {
+          const b = getBody(p.body);
+          const parts = b.m.decompose().map((x) => t(x)).sort((a, c) => c.volume() - a.volume());
+          if (parts.length < 2) throw new Error('This body is one connected piece, so there is nothing to separate');
+          b.m = parts[0];
+          parts.slice(1).forEach((pm, k) => addBody(`${f.id}~${k + 2}`, pm, `${b.name} ${k + 2}`));
           break;
         }
         case 'split': {
@@ -847,5 +1082,6 @@ export function rebuild(features, count, opts = {}) {
     };
   });
   garbage.forEach((o) => { try { o.delete(); } catch { /* shared handle */ } });
-  return { bodies, errors, snaps, sketchUsed, captured, preview };
+  const surfList = [...surfaces.values()].map((q) => { let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity; for (let i = 0; i < q.verts.length; i += 3) { x0 = Math.min(x0, q.verts[i]); x1 = Math.max(x1, q.verts[i]); y0 = Math.min(y0, q.verts[i + 1]); y1 = Math.max(y1, q.verts[i + 1]); z0 = Math.min(z0, q.verts[i + 2]); z1 = Math.max(z1, q.verts[i + 2]); } return { ...q, surface: true, bbox: { min: [x0, y0, z0], max: [x1, y1, z1] } }; });
+  return { bodies, surfaces: surfList, surfSnaps, errors, snaps, sketchUsed, captured, preview };
 }

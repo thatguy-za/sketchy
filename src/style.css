@@ -805,3 +805,16 @@ b, strong { font-weight: 600; }
 #props-wrap #i-close::before { content: "\00d7"; font-size: 20px; line-height: 22px; }
 #props-wrap #i-close:hover { background: var(--ov-08); }
 #props-wrap .foot:has(#i-close) { display: none; }
+
+/* ---- configurations table */
+.cfg-wrap { overflow: auto; max-height: 50vh; margin-top: 8px; }
+table.cfg { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }
+table.cfg th, table.cfg td { border: 1px solid var(--line-soft); padding: 4px 6px; text-align: left; white-space: nowrap; }
+table.cfg th { background: var(--c-f6f6f7); }
+table.cfg input { height: 26px; width: 120px; border: 1px solid var(--c-767c84); border-radius: 4px; padding: 0 6px; font: inherit; }
+table.cfg .cfg-name { font-weight: 600; width: 104px; }
+.cfg-del { border: 0; background: none; font-size: 18px; color: var(--muted); cursor: pointer; margin-left: 2px; }
+.cfg-del:hover { color: var(--c-c62828); }
+.modal-body .two { display: flex; gap: 8px; }
+.modal-body .two input { flex: 1; min-width: 0; }
+.modal-body label output { font-weight: 400; color: var(--muted); }

@@ -11,7 +11,7 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
  * @param {Float32Array} soup  9 floats per triangle
  * @returns {{verts: Float32Array, tris: Uint32Array, soup: Float32Array, report: object}}
  */
-export function repairSoup(soup) {
+export function repairSoup(soup, { fillHoles = true } = {}) {
   const report = { triangles: soup.length / 9, welded: 0, degenerate: 0, duplicates: 0, nonManifold: 0, flipped: 0, holes: 0, holeTriangles: 0, skippedHoles: 0 };
   // ---- bounds + tolerance
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -82,6 +82,8 @@ export function repairSoup(soup) {
   report.flipped += vol.reduce((n, v, c) => n + (v < 0 ? comp.filter((x) => x === c).length : 0), 0);
 
   // ---- fill holes: boundary half-edges (those without an opposite) form loops
+  const openEdges = (() => { const hs = new Set(tris.flatMap((t) => [0, 1, 2].map((k) => `${t[k]}>${t[(k + 1) % 3]}`))); let n = 0; for (const h of hs) { const [a, b] = h.split('>'); if (!hs.has(`${b}>${a}`)) n++; } return n; })();
+  report.openEdges = openEdges;
   const half = new Set(tris.flatMap((t) => [0, 1, 2].map((k) => `${t[k]}>${t[(k + 1) % 3]}`)));
   const outgoing = new Map();
   for (const t of tris) for (let k = 0; k < 3; k++) {
@@ -89,7 +91,7 @@ export function repairSoup(soup) {
     if (!half.has(`${b}>${a}`)) (outgoing.get(a) || outgoing.set(a, []).get(a)).push(b);
   }
   const used = new Set();
-  for (const [start, nexts] of outgoing) {
+  if (fillHoles) for (const [start, nexts] of outgoing) {
     for (const first of [...nexts]) {
       if (used.has(`${start}>${first}`)) continue;
       const loop = [start];

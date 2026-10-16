@@ -4,7 +4,7 @@
 // Zero dependencies; the modelling kernel (src/headless.js) is loaded lazily on first use.
 
 const VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER = { name: 'sketchy', version: '0.0.3' };
+const SERVER = { name: 'sketchy', version: '0.0.4' };
 
 const INSTRUCTIONS = `Sketchy is a parametric 3D CAD tool. You build a design as an ordered timeline of features (sketch, extrude, hole, fillet...), like other parametric CAD tools. Everything is in millimetres.
 
@@ -18,7 +18,7 @@ Coordinates: planes are XY (floor, Z up), XZ (front) and YZ (right). A sketch li
 - {"t":"ellipse","cx":0,"cy":0,"rx":10,"ry":5,"rot":0}
 - {"t":"ngon","cx":0,"cy":0,"r":10,"n":6,"rot":0}
 - {"t":"path","pts":[[0,0],[10,0],[10,10]]}  closed polygon; pts may be [x,y,bulge] for arcs (bulge = tan(sweep/4)); add "open":true for an open path (used by sweep/rib/pattern)
-Closed shapes nested inside another become holes. An extrude takes the sketch id (e.g. "f1") and a distance; op is new / join / cut / intersect / auto. Body ids look like "f3" (the feature that created them). Features that need picking edges or faces in the 3D view (fillet, chamfer, presspull...) cannot be placed from here yet; prefer primitives, sketches + extrude/revolve/sweep/loft, holes, patterns, mirror and boolean combine.
+Closed shapes nested inside another become holes. An extrude takes the sketch id (e.g. "f1") and a distance; op is new / join / cut / intersect / auto. Body ids look like "f3" (the feature that created them). Surface kinds (sextrude, srevolve, ssweep, sloft) make open surface bodies listed under surfaces in the results; join them with sstitch (a closed shell becomes a solid) or give them thickness with sthicken. The pipe kind makes a solid or hollow tube along an open path sketch. Features that need picking edges or faces in the 3D view (fillet, chamfer, presspull...) cannot be placed from here yet; prefer primitives, sketches + extrude/revolve/sweep/loft, holes, patterns, mirror and boolean combine.
 
 Parameters (set_parameters) are named values usable in expressions, e.g. width=40 mm then "width/2 + 3" in any numeric field via the feature's expressions.`;
 

@@ -7,6 +7,7 @@ import { shapeToPolygon, offsetPolygon } from './kernel.js';
 import { setDim, getDim } from './sketchdims.js';
 import { keyPoints, segOf, conAnchor, CON_GLYPH, CON_LABEL } from './sketchcons.js';
 import { filletVertex } from './sketchgeo.js';
+import { mirrorShape, trimAt, fitSpline, primitivesOf, ptAt, primPoints, nearestPrim } from './sketchedit.js';
 import { arcOf, bulgeFrom3, bulgeFromTangent, endTangent, bulgeFromRadius, segmentLength, pathPolygon } from './sketchgeo.js';
 
 import { UNIT_TABLE, getUnits, lenF, dispStr } from './units.js';
@@ -202,6 +203,7 @@ export function createSketchUI(app) {
     const s = S();
     if (!s || s.picking) return;
     const cur = s.cursor;
+    drawEditPreview(s, cur);
     if (s.pts?.length && cur) {
       const typed = s.dim?.typed || {};
       if (s.tool === 'line' || s.tool === 'path') {
@@ -642,6 +644,96 @@ export function createSketchUI(app) {
     }
   }
 
+  // ------------------------------------------------------------ mirror / trim / spline / project
+  const DARK = () => (vp.dark ? 0xe6e8eb : 0x2d3138);
+  /** Nearest straight segment (of any shape, rectangles included) under the cursor, as a mirror line. */
+  function linePrimAt(px) {
+    let best = null, bd = 9;
+    shapes().forEach((sh, si) => primitivesOf(sh).prims.forEach((p) => {
+      if (p.k !== 'L') return;
+      const d = segDist(px, scr(p.a), scr(p.b));
+      if (d < bd) { bd = d; best = { si, a: p.a, b: p.b }; }
+    }));
+    return best;
+  }
+  const mirrorCopies = (idxs, a, b) => idxs.map((i) => mirrorShape(shapes()[i], a, b));
+  function drawEditPreview(s, cur) {
+    if (s.tool === 'mirror' && s.mir) {
+      for (const i of s.mir.sel) { const sh = shapes()[i]; if (sh) vp.overlay.add(line3(shapeToPolygon(sh), 0xf08c00, !sh.open)); }
+      if (s.mir.phase === 'line' && s.mir.line) {
+        vp.overlay.add(line3([s.mir.line.a, s.mir.line.b], 0x1d63b8));
+        for (const m of mirrorCopies(s.mir.sel, s.mir.line.a, s.mir.line.b)) vp.overlay.add(line3(shapeToPolygon(m), 0xf08c00, !m.open, true));
+      }
+    } else if (s.tool === 'trim' && s.trimPrev) {
+      for (const pl of s.trimPrev) if (pl.length > 1) vp.overlay.add(line3(pl, 0xe0453a));
+    } else if (s.tool === 'spline' && s.pts?.length && cur) {
+      vp.overlay.add(line3(fitSpline([...s.pts, cur], false), DARK()));
+      for (const q of s.pts) { const z = 4 / ppmAt(q); vp.overlay.add(line3([[q[0] - z, q[1] - z], [q[0] + z, q[1] - z], [q[0] + z, q[1] + z], [q[0] - z, q[1] + z]], 0x1d63b8, true)); }
+    }
+  }
+  function finishSpline(closed = false) {
+    const s = S();
+    const pts = (s.pts || []).slice();
+    s.pts = null; s.dim = { typed: {} };
+    if (pts.length < 2) { redraw(); return; }
+    addShape({ t: 'path', open: !closed, spline: true, pts: fitSpline(pts, closed) });
+    redraw();
+  }
+  function applyMirror(a, b) {
+    const s = S(), sel = s.mir.sel;
+    app.setShapes([...shapes(), ...mirrorCopies(sel, a, b)]);
+    s.mir = { sel: [], phase: 'pick' };
+    app.toast?.(`Mirrored ${sel.length} ${sel.length > 1 ? 'shapes' : 'shape'}. Pick more shapes, or press Esc.`);
+    app.renderPanel(); redraw();
+  }
+  function editPointer(ev, kind, raw, px) {
+    const s = S();
+    const sn = snapPoint(ev, raw);
+    s.cursor = sn.pt;
+    if (s.tool === 'mirror') {
+      s.mir ||= { sel: [], phase: 'pick' };
+      if (kind === 'move') {
+        if (s.mir.phase === 'line') { const h = linePrimAt(px); s.mir.line = h ? { a: h.a, b: h.b } : null; canvas.style.cursor = h ? 'pointer' : ''; }
+        else { const i = hitShape(px); canvas.style.cursor = i >= 0 ? 'pointer' : ''; }
+        redraw(); return;
+      }
+      if (kind !== 'down') return;
+      if (s.mir.phase === 'line') { const h = linePrimAt(px); if (h) applyMirror(h.a, h.b); else app.toast?.('Click a straight line to mirror across, or press X or Y for a sketch axis.'); return; }
+      const i = hitShape(px);
+      if (i < 0) return;
+      s.mir.sel = s.mir.sel.includes(i) ? s.mir.sel.filter((x) => x !== i) : [...s.mir.sel, i];
+      redraw(); return;
+    }
+    if (s.tool === 'trim') {
+      const tol = 12 / ppmAt(raw), res = trimAt(shapes(), raw, tol);
+      if (kind === 'move') { s.trimPrev = res?.removed || null; canvas.style.cursor = res ? 'pointer' : ''; redraw(); return; }
+      if (kind !== 'down' || !res) return;
+      const delta = res.shapes.length - shapes().length + 1;
+      app.setShapes(res.shapes);
+      app.remapCons?.(res.index, delta);
+      s.trimPrev = null; s.sel = -1;
+      app.renderPanel(); redraw();
+      return;
+    }
+    if (s.tool === 'spline') {
+      if (kind === 'move') { redraw(); return; }
+      if (kind !== 'down') return;
+      s.pts ||= [];
+      if (s.pts.length >= 3 && Math.hypot(scr(s.pts[0]).x - px.x, scr(s.pts[0]).y - px.y) < 10) { finishSpline(true); return; }
+      s.pts.push(sn.pt); s.dim = { typed: {} };
+      redraw(); return;
+    }
+    if (s.tool === 'project') {
+      if (kind === 'move') { const hit = app.projectHover?.(ev); canvas.style.cursor = hit ? 'pointer' : ''; return; }
+      if (kind !== 'down') return;
+      const found = app.projectPick?.(ev, ev.shiftKey) || [];
+      if (!found.length) { app.toast?.('Click a model edge to include it. Shift-click includes every edge of that body.'); return; }
+      app.setShapes([...shapes(), ...found]);
+      app.toast?.(`Included ${found.length} ${found.length > 1 ? 'curves' : 'curve'} from the model`);
+      app.renderPanel(); redraw();
+    }
+  }
+
   // ------------------------------------------------------------ pointer routing
   function status(info, pt) {
     const el = document.getElementById('statusbar');
@@ -693,6 +785,7 @@ export function createSketchUI(app) {
       return;
     }
 
+    if (['mirror', 'trim', 'spline', 'project'].includes(s.tool)) { editPointer(ev, kind, raw, px); return; }
     if (s.tool?.startsWith('con_')) {
       if (kind === 'down') conPick(px);
       else if (kind === 'move') { const type = CON[s.tool]; conStatus(type); }
@@ -750,12 +843,18 @@ export function createSketchUI(app) {
     if (!s.pts) { s.pts = [sn.pt]; s.dim = { typed: {} }; openDimbox(); redraw(); return; }
     commit(sn.pt);
   }
-  function dblclick() { const s = S(); if (s && (s.tool === 'line' || s.tool === 'path') && s.pts) { s.pts.pop(); finishPath(); } }
+  function dblclick() { const s = S(); if (s && (s.tool === 'line' || s.tool === 'path') && s.pts) { s.pts.pop(); finishPath(); } else if (s?.tool === 'spline' && s.pts) { s.pts.pop(); finishSpline(false); } }
 
   // ------------------------------------------------------------ keyboard
   function key(e) {
     const s = S();
     if (!s || s.picking) return false;
+    if (s.tool === 'mirror' && s.mir) { // mirror: Enter = go to the mirror-line step, X / Y = mirror across a sketch axis
+      if (e.key === 'Escape' && (s.mir.sel.length || s.mir.phase === 'line')) { s.mir = { sel: [], phase: 'pick' }; redraw(); return true; }
+      if (e.key === 'Enter' && s.mir.sel.length && s.mir.phase === 'pick') { s.mir.phase = 'line'; app.toast?.('Now click the line to mirror across (or press X or Y).'); redraw(); return true; }
+      if (s.mir.sel.length && /^[xyXY]$/.test(e.key) && !e.metaKey && !e.ctrlKey) { applyMirror(...(/x/i.test(e.key) ? [[0, 0], [1, 0]] : [[0, 0], [0, 1]])); return true; }
+    }
+    if (s.tool === 'spline' && e.key === 'Enter' && s.pts?.length) { finishSpline(false); return true; }
     if (e.key === 'Escape') {
       if (s.pts?.length) { cancelShape(); return true; }
       if (s.tool !== 'select') { app.setTool('select'); return true; }

@@ -25,6 +25,17 @@ Detailed notes on how things work. New here? Start with the [README](../README.m
 | **Joint** | Rigid, revolute, slider, cylindrical, planar and ball joints positioning one body relative to another |
 | **Parameters** | Name dimensions (`width = 40 mm`) and use expressions in any numeric field (`width/2 + 3 mm`, `sin(30)*r`). Changing a parameter rebuilds the whole timeline |
 | **Section Analysis** (Inspect tab) | Clip the model with an XY/XZ/YZ plane (slider or typed offset, flip side); the cut face is capped. View-only, not stored in the timeline |
+| **Surface tab** | **Extrude**, **Revolve**, **Sweep** and **Loft** make open surface bodies (listed under *Surfaces* in the Browser, shown in light blue; closed or open sketch shapes both work). **Stitch** joins surfaces, and a closed shell becomes a solid; **Thicken** turns a surface into a solid by offsetting it along its normals. **Pipe** makes a solid or hollow tube along a path sketch |
+| **Mesh tab** | **Insert Mesh** imports an STL (repaired automatically). **Shell** and **Combine** work on any body, imported or modelled. **Reduce** lowers a body's triangle count to a target percentage within a maximum deviation. **Separate** splits a body made of disconnected pieces into separate bodies |
+| **Sketch: Mirror · Trim · Fit Point Spline · Project / Include** | **Mirror** copies shapes across a picked line or a sketch axis (rectangles stay rectangles for horizontal and vertical lines). **Trim** removes the part of a line, arc, circle or rectangle edge between its nearest intersections (previewed in red). **Fit Point Spline** draws a smooth curve through clicked points; click the first point to close it. **Include** copies a model edge, or with Shift every edge of that body, onto the sketch plane as a static copy |
+| **Offset Plane** (Construct) | A construction plane offset from XY/XZ/YZ or from another plane. Sketches can sit on it and follow it when you change the distance |
+| **Emboss** | Raise or engrave a sketch (text, SVG, shapes) on a face, to a depth |
+| **Draft** | Tilt picked flat faces by an angle about a neutral plane at the start or end of the body, along a pull direction. Neighbouring faces bend to follow |
+| **Offset Face** | Moves a flat face along its normal (the same tool as Press/Pull) |
+| **New Component** | Group bodies into a named component in the Browser (hide, show, select and delete as a group). Organisation only; geometry is unchanged |
+| **Configure Design / Configure Settings** | Define named configurations (sets of parameter values) in a table, then switch the active one. Blank cells use the default |
+| **Insert Derive / Insert Configured Design** | Copy another design's bodies (from an open tab or your saved designs, optionally in one of its configurations) into this one as meshes. A snapshot: later changes to the source are not carried over |
+| **Canvas** (Insert) | Place a reference image on a plane to trace over, with width, position and opacity controls |
 | **Measure** (Inspect tab) | Distance (vertex snap), angle, edge length (detects circles), angle/distance between faces |
 
 **Tabs:** every open design is a tab. **+** opens a blank design in a new tab, designs opened from the sidebar get their own tab (an already-open design is just focused), and each tab keeps its own undo history, view and hidden bodies. Closing the last tab leaves a fresh blank design.
@@ -84,7 +95,7 @@ The interface chrome (menus, dialogs, sidebar, sign-up / login) targets **WCAG 2
 
 ## Known limits
 
-The modelling kernel is mesh-based ([manifold-3d](https://github.com/elalish/manifold)), not a boundary-representation (B-rep) kernel, so a few common CAD operations are approximated or absent: face-level operations act on flat faces only; *Draft* is an extrude taper on single-outline profiles (not a draft of existing faces); *To object* extents use the object's bounding box; fillets are constant-radius (no variable radius, setbacks or tangent-chain option); there is no Thicken, Replace Face, Boundary Fill, per-face shell thickness, IGES or exact STEP; components are not implemented (use bodies and joints); there is no *Split Face*; booleans are body-to-body.
+The modelling kernel is mesh-based ([manifold-3d](https://github.com/elalish/manifold)), not a boundary-representation (B-rep) kernel, so a few common CAD operations are approximated or absent: face-level operations act on flat faces only; *Draft* is an extrude taper on single-outline profiles (not a draft of existing faces); *To object* extents use the object's bounding box; fillets are constant-radius (no variable radius, setbacks or tangent-chain option); there is no Thicken, Replace Face, Boundary Fill, per-face shell thickness, IGES or exact STEP; components are not implemented (use bodies and joints); there is no *Split Face* (it needs boundary-representation faces; sketch on the face and extrude or emboss instead); surfaces are meshes, so there is no surface fillet, trim or extend; booleans are body-to-body.
 
 ## Roadmap
 

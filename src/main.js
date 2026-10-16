@@ -1,10 +1,11 @@
 import './style.css';
 import * as THREE from 'three';
 import { icon } from './icons.js';
-import { initKernel, rebuild, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
+import { initKernel, rebuild, resolvePlanes, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { parseSTL, writeSTL } from './stl.js';
 import wasmUrl from 'manifold-3d/manifold.wasm?url';
+import { evaluate as evaluateDoc } from './headless.js';
 import { initA11y } from './a11y.js';
 import { initTheme, getTheme, setTheme, onTheme } from './theme.js';
 initTheme();
@@ -15,7 +16,7 @@ import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
 import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, planarFace, norm as vnorm } from './edges.js';
 import { acct, call, refreshAccount, ensureSignedIn, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showChangePassword, showAccount, openUserMenu, showAdmin } from './account.js';
-import { evalExpr, resolveParams, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
+import { evalExpr, resolveParams, applyConfig, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
 import { UNIT_TABLE, UNIT_NAMES, setUnits, getUnits, lenF, dispStr, fmtLen, fmtArea, fmtVolume, niceStep } from './units.js';
 import { findEdgeChains as chainsOf } from './edges.js';
 import { ficon, uicon } from './ficons.js';
@@ -32,7 +33,7 @@ const PRINTERS = {
 };
 
 // ------------------------------------------------------------------ state
-const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: 'mm' });
+const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: 'mm', components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
 let doc = blankDoc();
 let undoStack = [], redoStack = [];
 let result = { bodies: [], errors: {}, snaps: [], sketchUsed: new Set() };
@@ -48,6 +49,8 @@ let SU = null;
 let profileHover = null;
 const profileCache = new WeakMap();
 let originVis = false;
+const canvasHidden = new Set();
+const planeHidden = new Set(); // construction planes hidden in the viewport
 let dataOpen = false;
 let lastCmd = null;
 let selPriority = 'body';
@@ -65,8 +68,8 @@ const collapsed = { views: true, origin: true };
 let bedName = localStorage.getItem('sketchy.bed') || Object.keys(PRINTERS)[0];
 
 let vp;
-const snapshot = () => ({ features: [...doc.features], marker: doc.marker, nextId: doc.nextId, params: [...(doc.params || [])], appearance: { ...(doc.appearance || {}) } });
-const restore = (s) => { doc.features = [...s.features]; doc.marker = s.marker; doc.nextId = s.nextId; doc.params = [...(s.params || [])]; doc.appearance = { ...(s.appearance || {}) }; };
+const snapshot = () => ({ features: [...doc.features], marker: doc.marker, nextId: doc.nextId, params: [...(doc.params || [])], appearance: { ...(doc.appearance || {}) }, components: (doc.components || []).map((c) => ({ ...c })), bodyComp: { ...(doc.bodyComp || {}) }, configs: JSON.parse(JSON.stringify(doc.configs || [])), activeConfig: doc.activeConfig || null, canvases: (doc.canvases || []).map((c) => ({ ...c })) });
+const restore = (s) => { doc.features = [...s.features]; doc.marker = s.marker; doc.nextId = s.nextId; doc.params = [...(s.params || [])]; doc.appearance = { ...(s.appearance || {}) }; doc.components = (s.components || []).map((c) => ({ ...c })); doc.bodyComp = { ...(s.bodyComp || {}) }; doc.configs = JSON.parse(JSON.stringify(s.configs || [])); doc.activeConfig = s.activeConfig || null; doc.canvases = (s.canvases || []).map((c) => ({ ...c })); };
 function pushUndo(s) { undoStack.push(s); if (undoStack.length > 100) undoStack.shift(); redoStack = []; markDirty(); }
 function markDirty() { dirty = true; $('#doc-dirty').classList.add('on'); scheduleAutosave(); }
 function toast(msg, err = false) {
@@ -89,9 +92,9 @@ let pending = false;
 function refresh() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; refreshNow(); }); } }
 function refreshNow() {
   const pickF = dialog && defOf(doc.features[dialog.index])?.pickEdges;
-  paramState = resolveParams(doc.params || []);
+  paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
   const evalErr = {};
-  const feats = doc.features.map((f) => {
+  let feats = doc.features.map((f) => {
     const r = resolveFeature(f, (n) => paramState.values[n], (ff, path) => (fieldKind(ff, path.split('.')[0]) === 'len' ? 'len' : 'num'));
     if (r.error) evalErr[f.id] = r.error;
     let ff = r.params === f.params ? f : { ...f, params: r.params };
@@ -102,12 +105,21 @@ function refreshNow() {
     }
     return ff;
   });
+  feats = resolvePlanes(feats);
+  feats.forEach((f, i) => { // keep sketches that sit on a construction plane in step with it (no undo entry)
+    const orig = doc.features[i];
+    if (f.type === 'sketch' && f.params.planeRef && orig && orig.params.planeRef && (orig.params.plane !== 'custom' || ['origin', 'normal', 'xdir'].some((k) => !orig.params[k] || orig.params[k].some((v, j) => Math.abs(v - f.params[k][j]) > 1e-9)))) {
+      doc.features[i] = { ...orig, params: { ...orig.params, plane: 'custom', origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir } };
+    }
+  });
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
+  vp.setCanvases((doc.canvases || []).map((c) => ({ ...c, hidden: canvasHidden.has(c.id) })));
+  vp.setConstructionPlanes(feats.filter((f, i) => f.type === 'plane' && !f.suppressed && i < limit()).map((f) => ({ id: f.id, name: f.name, origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir, hidden: planeHidden.has(f.id) })));
   try { result = rebuild(feats, limit(), { capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null }); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   vp.bodyColors = doc.appearance || {};
-  vp.setBodies(result.bodies.filter((b) => !hiddenBodies.has(b.id)));
+  vp.setBodies([...result.bodies, ...(result.surfaces || [])].filter((b) => !hiddenBodies.has(b.id)));
   for (const id of [...vp.selected]) if (!result.bodies.some((b) => b.id === id)) vp.selected.delete(id);
   vp.refreshMaterials();
   drawSketches();
@@ -341,6 +353,10 @@ CMD.cancelpick = { label: 'Cancel', icon: 'remove' };
 const MEASURE_MODE = { measure: 'dist', angle: 'angle', edgelen: 'edge', faces: 'faces' };
 const CUSTOM = {
   parameters: () => openParameters(),
+  newcomp: () => newComponent(),
+  derive: () => showInsertDesign(false), cfg2: () => showInsertDesign(true),
+  canvas: () => pickCanvasImage(),
+  cfg1: () => showConfigurations(), cfg3: (ev) => showConfigMenu(ev?.currentTarget),
   importstl: () => $('#file-stl').click(),
   measure: () => startMeasure('dist'), angle: () => startMeasure('angle'), edgelen: () => startMeasure('edge'), faces: () => startMeasure('faces'),
   properties: () => showInfo(),
@@ -357,7 +373,7 @@ const CUSTOM = {
 function runCommand(id, ev) {
   const c = CMD[id];
   if (!c) return;
-  if (c.off) return toast(`${c.label} isn't available in Sketchy yet.`);
+  if (c.off) return toast(c.why || `${c.label} isn't available in Sketchy yet.`);
   if (c.sk) { if (sketch && !sketch.picking) setSketchTool(c.sk); return; }
   if (c.skAction === 'delete') return sketchDeleteSelected();
   if (sketch && !['select', 'finishsketch', 'cancelpick', 'svg', 'dxf', 'sk_text'].includes(id)) return toast('Finish the sketch first.');
@@ -461,12 +477,24 @@ function renderTree() {
       for (const n of ['X', 'Y', 'Z']) R(2, n, { kind: 'axis', dim: true });
       R(2, 'Origin', { kind: 'point', dim: true });
     });
-    if ((doc.params || []).length) folder(1, 'params', 'Parameters', 'gear', {}, () => doc.params.forEach((p) => R(2, p.name, { kind: 'file', val: paramState.errors[p.name] ? '⚠' : `= ${paramShow(p, paramState.values[p.name])}`, click: openParameters })));
-    if (result.bodies.length) {
-      const anyVis = visBodies > 0;
-      folder(1, 'bodies', 'Bodies', 'folder', { eye: anyVis, onEye: () => { result.bodies.forEach((b) => (anyVis ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } }, () => result.bodies.forEach((b) => {
-        R(2, b.name, { kind: 'body', ctx: { kind: 'body', id: b.id }, eye: !hiddenBodies.has(b.id), sel: vp.selected.has(b.id), onEye: () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); refresh(); }, click: (ev) => selectBody(b.id, ev.shiftKey) });
-      }));
+    const planes = doc.features.map((f, i) => [f, i]).filter(([f, i]) => f.type === 'plane' && i < limit());
+    if (planes.length) folder(1, 'construction', 'Construction', 'folder', {}, () => planes.forEach(([f]) => R(2, f.name, { kind: 'plane', eye: !planeHidden.has(f.id), sel: selSet.has(f.id), onEye: () => { planeHidden.has(f.id) ? planeHidden.delete(f.id) : planeHidden.add(f.id); refresh(); }, click: (ev) => selectFeature(f.id, ev), dbl: () => editFeature(featureIndex(f.id)) })));
+    if ((doc.canvases || []).length) folder(1, 'canvases', 'Canvases', 'folder', {}, () => doc.canvases.forEach((c) => R(2, c.name, { kind: 'camera', ctx: { kind: 'canvas', id: c.id }, eye: !canvasHidden.has(c.id), onEye: () => { canvasHidden.has(c.id) ? canvasHidden.delete(c.id) : canvasHidden.add(c.id); refresh(); }, dbl: () => showCanvasDialog(c) })));
+    if ((doc.params || []).length) folder(1, 'params', 'Parameters', 'gear', {}, () => { const ac = (doc.configs || []).find((c) => c.id === doc.activeConfig); if (ac) R(2, `Configuration: ${ac.name}`, { kind: 'file', dim: true }); doc.params.forEach((p) => R(2, p.name, { kind: 'file', val: paramState.errors[p.name] ? '⚠' : `= ${paramShow(p, paramState.values[p.name])}`, click: openParameters })); });
+    const bodyRow = (b, d) => R(d, b.name, { kind: 'body', ctx: { kind: 'body', id: b.id }, eye: !hiddenBodies.has(b.id), sel: vp.selected.has(b.id), onEye: () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); refresh(); }, click: (ev) => selectBody(b.id, ev.shiftKey) });
+    for (const comp of doc.components || []) {
+      const mine = result.bodies.filter((b) => doc.bodyComp?.[b.id] === comp.id);
+      const vis = mine.some((b) => !hiddenBodies.has(b.id));
+      folder(1, 'comp:' + comp.id, comp.name, 'comp', { ctx: { kind: 'component', id: comp.id }, eye: mine.length ? vis : true, onEye: () => { mine.forEach((b) => (vis ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); }, dbl: () => renameComponent(comp.id) }, () => { if (mine.length) mine.forEach((b) => bodyRow(b, 2)); else R(2, 'Empty', { kind: 'file', dim: true }); });
+    }
+    if ((result.surfaces || []).length) {
+      const sv = result.surfaces.some((q) => !hiddenBodies.has(q.id));
+      folder(1, 'surfaces', 'Surfaces', 'folder', { eye: sv, onEye: () => { result.surfaces.forEach((q) => (sv ? hiddenBodies.add(q.id) : hiddenBodies.delete(q.id))); refresh(); } }, () => result.surfaces.forEach((q) => R(2, q.name, { kind: 'body', ctx: { kind: 'body', id: q.id }, eye: !hiddenBodies.has(q.id), sel: vp.selected.has(q.id), onEye: () => { hiddenBodies.has(q.id) ? hiddenBodies.delete(q.id) : hiddenBodies.add(q.id); refresh(); }, click: (ev) => selectBody(q.id, ev.shiftKey) })));
+    }
+    const loose = result.bodies.filter((b) => !(doc.components || []).some((c) => c.id === doc.bodyComp?.[b.id]));
+    if (loose.length) {
+      const anyVis = loose.some((b) => !hiddenBodies.has(b.id));
+      folder(1, 'bodies', 'Bodies', 'folder', { eye: anyVis, onEye: () => { loose.forEach((b) => (anyVis ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } }, () => loose.forEach((b) => bodyRow(b, 2)));
     }
     const sk = doc.features.map((f, i) => [f, i]).filter(([f, i]) => f.type === 'sketch' && i < limit() + (sketch ? 1 : 0));
     if (sk.length) {
@@ -714,6 +742,30 @@ function featureMenu(ev, i) {
 const SWATCHES = ['#c3c7cd', '#e8b04a', '#d9534f', '#5cb85c', '#4a90d9', '#8e6bbf', '#2b2f36', '#f5f5f5'];
 function treeMenu(ev, c) {
   const bodies = result.bodies;
+  if (c.kind === 'canvas') {
+    const cv = (doc.canvases || []).find((x) => x.id === c.id);
+    if (!cv) return;
+    showMenu(ev.clientX, ev.clientY, [
+      { label: 'Edit…', run: () => showCanvasDialog(cv) },
+      { label: canvasHidden.has(cv.id) ? 'Show' : 'Hide', run: () => { canvasHidden.has(cv.id) ? canvasHidden.delete(cv.id) : canvasHidden.add(cv.id); refresh(); } },
+      { sep: true },
+      { label: 'Delete', run: () => mutate(() => { doc.canvases = doc.canvases.filter((x) => x.id !== cv.id); }) },
+    ]);
+    return;
+  }
+  if (c.kind === 'component') {
+    const comp = (doc.components || []).find((x) => x.id === c.id);
+    if (!comp) return;
+    const mine = bodies.filter((b) => doc.bodyComp?.[b.id] === comp.id);
+    showMenu(ev.clientX, ev.clientY, [
+      { label: 'Rename', run: () => renameComponent(comp.id) },
+      { label: 'Add selected bodies', disabled: !vp.selected.size, run: () => moveToComponent([...vp.selected], comp.id) },
+      { label: 'Select bodies', disabled: !mine.length, run: () => { vp.selected.clear(); mine.forEach((b) => vp.selected.add(b.id)); vp.refreshMaterials(); renderTree(); } },
+      { sep: true },
+      { label: 'Delete component (keep bodies)', run: () => mutate(() => { doc.components = doc.components.filter((x) => x.id !== comp.id); const bc = { ...doc.bodyComp }; mine.forEach((b) => delete bc[b.id]); doc.bodyComp = bc; }) },
+    ]);
+    return;
+  }
   if (c.kind === 'body') {
     const b = bodies.find((x) => x.id === c.id);
     if (!b) return;
@@ -724,6 +776,7 @@ function treeMenu(ev, c) {
       { label: 'Rename', hint: 'F2', run: () => renameBodyOrFeature(c.id) },
       { label: hidden ? 'Show' : 'Hide', uicon: hidden ? 'eye' : 'eyeOff', run: () => { hidden ? hiddenBodies.delete(c.id) : hiddenBodies.add(c.id); refresh(); } },
       { label: isolated ? 'Unisolate' : 'Isolate', run: () => { if (isolated) hiddenBodies.clear(); else bodies.forEach((x) => (x.id === c.id ? hiddenBodies.delete(x.id) : hiddenBodies.add(x.id))); refresh(); } },
+      ...((doc.components || []).length || true ? [{ sep: true }, { head: 'COMPONENT' }, ...(doc.components || []).map((cp) => ({ label: cp.name, check: doc.bodyComp?.[c.id] === cp.id, run: () => moveToComponent(vp.selected.size > 1 ? [...vp.selected] : [c.id], cp.id) })), { label: 'New component with this body', run: () => newComponent() }, ...(doc.bodyComp?.[c.id] ? [{ label: 'Remove from component', run: () => moveToComponent([c.id], null) }] : [])] : []),
       { sep: true },
       { head: 'APPEARANCE' },
       ...SWATCHES.map((hex, k) => ({ label: ['Steel', 'Gold', 'Red', 'Green', 'Blue', 'Purple', 'Black', 'White'][k], swatch: hex, run: () => mutate(() => { doc.appearance = { ...(doc.appearance || {}), [c.id]: k === 0 ? undefined : hex }; if (k === 0) delete doc.appearance[c.id]; }) })),
@@ -749,10 +802,148 @@ function treeMenu(ev, c) {
 function renameBodyOrFeature(bodyId) {
   // a body is named after the feature that created it
   const row = [...document.querySelectorAll('#tree .tree-row')].find((r) => r.textContent.includes(result.bodies.find((b) => b.id === bodyId)?.name || '\u0000'));
-  renameFeature(bodyId, row || $('#tree'));
+  renameFeature(String(bodyId).split('~')[0], row || $('#tree')); // pieces made by Separate share their feature's name
 }
 
 function mutate(fn) { pushUndo(snapshot()); fn(); refresh(); }
+
+// ---- canvas: a reference image placed on a plane, for tracing
+function pickCanvasImage() {
+  if (dialog || sketch) return;
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = async () => {
+    const file = inp.files[0]; if (!file) return;
+    try {
+      const url = URL.createObjectURL(file), img = new Image();
+      await new Promise((ok, no) => { img.onload = ok; img.onerror = () => no(new Error('That file is not an image the browser can read')); img.src = url; });
+      const k = Math.min(1, 1280 / Math.max(img.width, img.height)), cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url);
+      const png = /png|gif|webp|svg/i.test(file.type);
+      const image = cv.toDataURL(png ? 'image/png' : 'image/jpeg', 0.85);
+      if (image.length > 3e6) return toast('That image is too large even after shrinking. Try a smaller one.', true);
+      showCanvasDialog({ id: null, name: file.name.replace(/\.[^.]+$/, '').slice(0, 40) || 'Canvas', plane: 'XY', offset: 0, x: 0, y: 0, width: 100, opacity: 0.5, image, aspect: cv.height / cv.width });
+    } catch (e) { toast(e.message, true); }
+  };
+  inp.click();
+}
+function showCanvasDialog(c) {
+  const isNew = !c.id;
+  const m = modal(`<div class="modal-title">${isNew ? 'Insert Canvas' : 'Edit Canvas'}</div><div class="modal-body">
+    <label>Name<input id="cv-name" value="${esc(c.name)}"></label>
+    <label>Plane<select id="cv-plane">${['XY', 'XZ', 'YZ'].map((p) => `<option ${p === c.plane ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
+    <label>Width (${getUnits()})<input id="cv-w" type="number" min="1" step="any" value="${dispStr(c.width)}"></label>
+    <label>Offset from plane (${getUnits()})<input id="cv-off" type="number" step="any" value="${dispStr(c.offset)}"></label>
+    <label>Position X / Y (${getUnits()})<span class="two"><input id="cv-x" type="number" step="any" value="${dispStr(c.x)}"><input id="cv-y" type="number" step="any" value="${dispStr(c.y)}"></span></label>
+    <label>Opacity <output id="cv-op-o">${Math.round(c.opacity * 100)}%</output><input id="cv-op" type="range" min="5" max="100" value="${Math.round(c.opacity * 100)}"></label>
+    <div class="modal-foot"><button class="btn" id="cv-cancel" type="button">Cancel</button><button class="btn primary" id="cv-ok" type="button">${isNew ? 'Insert' : 'Apply'}</button></div></div>`);
+  const $m = (s) => m.el.querySelector(s);
+  $m('#cv-op').oninput = (e) => { $m('#cv-op-o').textContent = e.target.value + '%'; };
+  $m('#cv-cancel').onclick = m.close;
+  $m('#cv-ok').onclick = () => {
+    const next = { ...c, name: $m('#cv-name').value.trim() || 'Canvas', plane: $m('#cv-plane').value, width: Math.max(1, +$m('#cv-w').value * lenF()), offset: +$m('#cv-off').value * lenF(), x: +$m('#cv-x').value * lenF(), y: +$m('#cv-y').value * lenF(), opacity: +$m('#cv-op').value / 100 };
+    mutate(() => { next.id ||= 'v' + doc.nextId++; doc.canvases = isNew ? [...(doc.canvases || []), next] : doc.canvases.map((x) => (x.id === next.id ? next : x)); });
+    m.close(); vp.fitted = vp.fitted && !isNew;
+    toast(isNew ? 'Canvas inserted. Hide or delete it from the Browser.' : 'Canvas updated');
+  };
+}
+
+// ---- configurations: named sets of parameter values; the active one overrides the defaults
+function showConfigMenu(anchor) {
+  const r = anchor?.getBoundingClientRect?.() || { left: 200, bottom: 100 };
+  const cfgs = doc.configs || [];
+  showMenu(r.left, r.bottom + 2, [
+    { head: 'ACTIVE CONFIGURATION' },
+    { label: 'Default values', check: !doc.activeConfig, run: () => mutate(() => { doc.activeConfig = null; }) },
+    ...cfgs.map((c) => ({ label: c.name, check: doc.activeConfig === c.id, run: () => mutate(() => { doc.activeConfig = c.id; }) })),
+    { sep: true },
+    { label: 'Edit configurations…', run: showConfigurations },
+  ]);
+}
+function showConfigurations() {
+  if (dialog || sketch) return;
+  if (!(doc.params || []).length) return toast('Add parameters first (MANAGE → Change Parameters), then configure their values.', true);
+  const pre = snapshot();
+  let changed = false;
+  const m = modal(`<div class="modal-title">Configure Design</div><div class="modal-body"><div class="hint">Each column is a configuration: a set of parameter values for a variant of this design (for example <b>Small</b>, <b>Large</b>). Leave a cell blank to use the default. Pick the active configuration in <b>Configure Settings</b>.</div><div class="cfg-wrap" id="cfg-table"></div><div class="modal-foot"><button class="btn" id="cfg-add" type="button">Add configuration</button></div></div>`, () => { if (changed) { pushUndo(pre); refresh(); } });
+  m.el.classList.add('wide');
+  const host = m.el.querySelector('#cfg-table');
+  const commit = () => { changed = true; refresh(); };
+  const draw = () => {
+    const cfgs = doc.configs || [];
+    host.innerHTML = '';
+    const tbl = document.createElement('table'); tbl.className = 'cfg';
+    tbl.innerHTML = `<thead><tr><th>Parameter</th><th>Default</th>${cfgs.map((c) => `<th><input class="cfg-name" data-c="${esc(c.id)}" value="${esc(c.name)}" aria-label="Configuration name"><button type="button" class="cfg-del" data-c="${esc(c.id)}" title="Delete configuration" aria-label="Delete ${esc(c.name)}">×</button></th>`).join('')}</tr></thead><tbody>${doc.params.map((p) => `<tr><td><b>${esc(p.name)}</b></td><td>${esc(p.expr)}</td>${cfgs.map((c) => `<td><input class="cfg-val" data-c="${esc(c.id)}" data-p="${esc(p.name)}" value="${esc(c.values?.[p.name] ?? '')}" placeholder="${esc(p.expr)}" aria-label="${esc(p.name)} in ${esc(c.name)}"></td>`).join('')}</tr>`).join('')}</tbody>`;
+    host.appendChild(tbl);
+    tbl.querySelectorAll('.cfg-name').forEach((i) => (i.onchange = () => { doc.configs = doc.configs.map((c) => (c.id === i.dataset.c ? { ...c, name: i.value.trim() || c.name } : c)); commit(); }));
+    tbl.querySelectorAll('.cfg-val').forEach((i) => (i.onchange = () => { doc.configs = doc.configs.map((c) => (c.id === i.dataset.c ? { ...c, values: { ...c.values, [i.dataset.p]: i.value.trim() } } : c)); commit(); }));
+    tbl.querySelectorAll('.cfg-del').forEach((b) => (b.onclick = () => { doc.configs = doc.configs.filter((c) => c.id !== b.dataset.c); if (doc.activeConfig === b.dataset.c) doc.activeConfig = null; commit(); draw(); }));
+  };
+  m.el.querySelector('#cfg-add').onclick = () => { doc.configs = [...(doc.configs || []), { id: 'k' + doc.nextId++, name: `Configuration${(doc.configs || []).length + 1}`, values: {} }]; commit(); draw(); };
+  draw();
+}
+
+// ---- insert another design: its bodies are copied in as meshes (a snapshot at this moment), optionally in one of its configurations
+async function showInsertDesign(withConfig) {
+  if (dialog || sketch) return;
+  const here = tabs.find((t) => t.id === activeTab);
+  const sources = [];
+  for (const t of tabs) if (t.id !== activeTab && t.state.doc.features.length) sources.push({ label: `${t.state.doc.name} (open tab)`, get: async () => t.state.doc });
+  if (acct.server && acct.user) {
+    const r = await call('GET', '/projects');
+    if (r.ok) for (const pr of r.data) if (!(doc.rev && pr.name === doc.name)) sources.push({ label: pr.name, get: async () => { const d = await call('GET', '/projects/' + encodeURIComponent(pr.name)); const o = typeof d.data === 'string' ? JSON.parse(d.data) : d.data; return { name: o.name || pr.name, features: o.features || [], params: o.params || [], configs: o.configs || [], activeConfig: o.activeConfig || null, units: o.units || 'mm' }; } });
+  }
+  void here;
+  if (!sources.length) return toast(acct.server ? 'There are no other designs to insert yet. Save or open another design first.' : 'Open another design in a tab first, then insert it from here.', true);
+  const m = modal(`<div class="modal-title">${withConfig ? 'Insert Configured Design' : 'Insert Derive'}</div><div class="modal-body"><label>Design<select id="ins-src">${sources.map((x, i) => `<option value="${i}">${esc(x.label)}</option>`).join('')}</select></label>${withConfig ? '<label>Configuration<select id="ins-cfg"></select></label>' : ''}<div class="hint">Copies the design's bodies into this one as meshes. It is a snapshot: later changes to the other design are not carried over.</div><div class="form-err" id="ins-err"></div><div class="modal-foot"><button class="btn primary" id="ins-ok" type="button">Insert</button></div></div>`);
+  const sel = m.el.querySelector('#ins-src'), cfgSel = m.el.querySelector('#ins-cfg'), err = m.el.querySelector('#ins-err');
+  let cur = null;
+  const load = async () => {
+    cur = await sources[+sel.value].get();
+    if (cfgSel) cfgSel.innerHTML = `<option value="">Default values</option>` + (cur.configs || []).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  };
+  sel.onchange = load; await load();
+  m.el.querySelector('#ins-ok').onclick = () => {
+    try {
+      const d2 = { ...cur, features: cur.features.map((f) => ({ ...f })), activeConfig: cfgSel ? cfgSel.value || null : cur.activeConfig };
+      const { result } = evaluateDoc(d2);
+      if (!result.bodies.length) { err.textContent = 'That design has no bodies to insert.'; return; }
+      const pre = snapshot();
+      let n = 0;
+      for (const b of result.bodies) {
+        const soup = new Float32Array(b.tris.length * 3);
+        for (let i = 0; i < b.tris.length; i++) for (let k = 0; k < 3; k++) soup[i * 3 + k] = b.verts[b.tris[i] * 3 + k];
+        const f = { id: 'f' + doc.nextId++, type: 'import', name: `${cur.name} · ${b.name}`.slice(0, 60), params: { data: encodeFloats(soup), tris: soup.length / 9 } };
+        doc.features.splice(doc.marker, 0, f); doc.marker++; n++;
+      }
+      pushUndo(pre); m.close(); vp.fitted = false; refresh();
+      toast(`Inserted ${n} ${n > 1 ? 'bodies' : 'body'} from ${cur.name}`);
+    } catch (e) { err.textContent = 'Could not insert: ' + e.message; }
+  };
+}
+
+// ---- components: named groups of bodies in the Browser (visibility and organisation; the geometry is unchanged)
+function newComponent() {
+  const sel = [...vp.selected];
+  mutate(() => {
+    const n = (doc.components || []).length + 1;
+    const c = { id: 'c' + doc.nextId++, name: `Component${n}` };
+    doc.components = [...(doc.components || []), c];
+    doc.bodyComp = { ...(doc.bodyComp || {}) };
+    sel.forEach((id) => (doc.bodyComp[id] = c.id));
+  });
+  toast(sel.length ? `Created a component with ${sel.length} ${sel.length > 1 ? 'bodies' : 'body'}` : 'Created an empty component. Right-click a body to move it in.');
+}
+function renameComponent(id) {
+  const c = (doc.components || []).find((x) => x.id === id);
+  const n = c && prompt('Component name', c.name);
+  if (n && n.trim()) mutate(() => { doc.components = doc.components.map((x) => (x.id === id ? { ...x, name: n.trim().slice(0, 60) } : x)); });
+}
+function moveToComponent(bodyIds, compId) {
+  mutate(() => { doc.bodyComp = { ...(doc.bodyComp || {}) }; bodyIds.forEach((b) => (compId ? (doc.bodyComp[b] = compId) : delete doc.bodyComp[b])); });
+}
 
 // ------------------------------------------------------------------ menus
 function showMenu(x, y, items) {
@@ -837,6 +1028,8 @@ const ctx = () => {
   const ctr = (b) => (b ? b.bbox.min.map((v, k) => +((v + b.bbox.max[k]) / 2).toFixed(3)) : [0, 0, 0]);
   return {
     lastSketch: sks.length ? sks[sks.length - 1].id : '',
+    surfaces: (result.surfaces || []).map((q) => q.id),
+    lastPlane: doc.features.slice(0, doc.marker).filter((f) => f.type === 'plane').at(-1)?.id || 'XY',
     selSketch: profSel.size ? [...profSel][0].split('|')[0] : '',
     selProfiles: profSel.size ? [...profSel].filter((k) => k.startsWith([...profSel][0].split('|')[0] + '|')).map((k) => k.split('|')[1]) : null,
     sketches: sks.map((k) => k.id),
@@ -857,13 +1050,14 @@ function startFeature(key) {
   const def = FEATURES[key];
   if (key === 'sketch') return startSketchPlanePick();
   const c = ctx();
-  if (['extrude', 'revolve', 'rib'].includes(key) && !c.lastSketch) return toast('Create a sketch first.', true);
-  if (['sweep', 'loft'].includes(key) && c.sketches.length < 2) return toast(`${def.label} needs two sketches (a profile and ${key === 'sweep' ? 'a path' : 'a second profile'}).`, true);
+  if (['extrude', 'revolve', 'rib', 'emboss', 'sextrude', 'srevolve', 'pipe'].includes(key) && !c.lastSketch) return toast('Create a sketch first.', true);
+  if (['sweep', 'loft', 'ssweep', 'sloft'].includes(key) && c.sketches.length < 2) return toast(`${def.label} needs two sketches (a profile and ${key.endsWith('sweep') ? 'a path' : 'a second profile'}).`, true);
+  if (['sstitch', 'sthicken'].includes(key) && !(result.surfaces || []).length) return toast('There are no surfaces yet. Create one with Extrude, Revolve, Sweep or Loft on the Surface tab.', true);
   if (['move', 'combine', 'mirror', 'pattern', 'remove', 'fillet', 'chamfer'].includes(key) || def.needsBody) { if (!result.bodies.length) return toast('There are no bodies yet — create one first.', true); }
   if (def.needsBodies && result.bodies.length < def.needsBodies) return toast(`${def.label} needs at least ${def.needsBodies} bodies.`, true);
   const pre = snapshot();
   const params = def.make(c);
-  if (['extrude', 'revolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
+  if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
   if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
     params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
@@ -875,6 +1069,7 @@ function startFeature(key) {
     if (key === 'presspull') { params.face = fc; params.body = selFace.id; }
     else if (key === 'hole') { params.pos = [...selFace.point]; params.dir = [...selFace.normal]; }
     else if (key === 'shell') { params.body = selFace.id; params.open = [fc]; }
+    else if (key === 'draft') { params.body = selFace.id; params.faces = [fc]; }
     selFace = null; vp.showFaces([], null);
   }
   const type = def.type;
@@ -1074,12 +1269,16 @@ function renderDialog() {
       const chosen = sk ? effectiveProfiles(f, sk).size : 0;
       ctl.innerHTML = `<div class="profrow"><div class="selbtn on"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 3l12 11.5-5.2.7 3 5.6-2.6 1.4-3-5.7-4.2 3.2z" fill="#fff" stroke="#333" stroke-width="1.4" stroke-linejoin="round"/></svg><span>${items.length ? `${chosen} selected` : 'No closed profiles'}</span></div><button type="button" class="xclear" title="Reset to the default selection">×</button></div>`;
       ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
+    } else if (fld.type === 'surfaces') {
+      const avail = result.surfSnaps?.[idx] || result.surfaces.map((q) => ({ id: q.id, name: q.name }));
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk" style="font-weight:400"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click surfaces in the viewport.</div>' : '<div class="note">No surfaces yet.</div>';
+      ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'face' || fld.type === 'faces') {
       const list = fld.type === 'face' ? (val ? [val] : []) : val || [];
       ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm" style="margin-left:6px">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : 'Click flat faces to open (optional). Click again to deselect.'}</div>`;
       ctl.querySelector('button').onclick = () => { patchParams(idx, { [fld.key]: fld.type === 'face' ? null : [] }); renderDialog(); };
     } else if (fld.type === 'bool') {
-      const c = document.createElement('input'); c.type = 'checkbox'; c.checked = !!val; c.onchange = () => { set(c.checked); if (['thread', 'through', 'internal'].includes(fld.key)) rerender(); }; ctl.appendChild(c);
+      const c = document.createElement('input'); c.type = 'checkbox'; c.setAttribute('aria-label', fld.label); c.checked = !!val; c.onchange = () => { set(c.checked); if (['thread', 'through', 'internal'].includes(fld.key)) rerender(); }; ctl.appendChild(c);
     } else if (fld.type === 'sketchlist') {
       const opts = sketchesBefore(idx);
       const list = [...(val || [])];
@@ -1095,9 +1294,11 @@ function renderDialog() {
       });
       const add = document.createElement('button'); add.className = 'btn sm'; add.textContent = '+ Add profile'; add.onclick = () => commit([...list, '']); ctl.appendChild(add);
     } else {
-      const s = document.createElement('select');
+      const s = document.createElement('select'); s.setAttribute('aria-label', fld.label);
       let opts;
       if (fld.type === 'select') opts = fld.options;
+      else if (fld.type === 'planeref') opts = [['XY', 'XY (Top)'], ['XZ', 'XZ (Front)'], ['YZ', 'YZ (Right)'], ...doc.features.slice(0, idx).filter((q) => q.type === 'plane').map((q) => [q.id, q.name])];
+      else if (fld.type === 'surface') opts = [['', 'Select surface…'], ...(result.surfSnaps?.[idx] || result.surfaces).map((q) => [q.id, q.name])];
       else if (fld.type === 'body') opts = [['', fld.optional || 'Select body…'], ...bodiesBefore(idx).map((b) => [b.id, b.name])];
       else opts = [['', 'Select sketch…'], ...sketchesBefore(idx).map((k) => [k.id, k.name])];
       s.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
@@ -1176,9 +1377,16 @@ function dialogPick(e) {
 /** Viewport click on a body while a dialog with body fields is open: fills the focused / first empty one. */
 function bodyFieldPick(e) {
   const f = doc.features[dialog.index];
+  const h = vp.pickBody(e);
+  const sflds = defOf(f).fields.filter((x) => x.type === 'surface' || x.type === 'surfaces');
+  if (sflds.length && h && (result.surfaces || []).some((q) => q.id === h.id)) {
+    const sf = sflds[0];
+    if (sf.type === 'surface') updateParam(dialog.index, sf.key, h.id);
+    else { const cur = f.params[sf.key] || []; updateParam(dialog.index, sf.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); }
+    renderDialog(); return;
+  }
   const flds = defOf(f).fields.filter((x) => x.type === 'body' && (!x.show || x.show(f.params)));
   if (!flds.length) return;
-  const h = vp.pickBody(e);
   if (!h) return;
   const key = (flds.find((x) => x.key === dialog.focusKey) || flds.find((x) => !f.params[x.key]) || flds[0]).key;
   updateParam(dialog.index, key, h.id);
@@ -1284,9 +1492,10 @@ function buildSketchGrid(step = SU?.stepNow() ?? 1) {
   vp.scene.add(g);
 }
 function setSketchTool(t) {
-  sketch.tool = t; sketch.pts = null; sketch.sel = t === 'select' ? sketch.sel : -1; sketch.hover = -1;
+  if (sketch.tool === 'project' && t !== 'project') { edgeHover = null; updateEdgeView(); }
+  sketch.tool = t; sketch.mir = null; sketch.trimPrev = null; sketch.pts = null; sketch.sel = t === 'select' ? sketch.sel : -1; sketch.hover = -1;
   SU.activate();
-  const hints = { offset: 'Offset: click a closed shape, type a distance (negative = inward), press Enter', sfillet: 'Fillet: click a corner of a rectangle or path, type a radius, press Enter', dim: 'Click a shape, then type a value or an expression like width/2', con_coin: 'Coincident: click the point to move, then the point to meet', con_h: 'Horizontal: click a line segment', con_v: 'Vertical: click a line segment', con_conc: 'Concentric: click two shapes', con_equal: 'Equal: click two segments or two circles', con_par: 'Parallel: click the segment to adjust, then the reference', con_perp: 'Perpendicular: click the segment to adjust, then the reference', select: 'Click a shape to select it · drag to move · drag handles to resize · click a dimension to type a value', arc: 'Click the start point, the end point, then a point on the arc · type a radius', rect: 'Click the first corner, then the opposite corner · type a width/height and press Tab / Enter', crect: 'Click the centre, then a corner · type a width/height', rrect: 'Click two corners · type W, H and a corner radius R', slot: 'Click the first centre, then the second · type a length and width', ellipse: 'Click the centre, then drag the radii · type A and B', circle: 'Click the centre, then drag out the radius · type a diameter and press Enter', ngon: 'Click the centre, then a vertex · type a radius and press Enter', path: 'Click points of an open path · press A for a tangent arc · Enter or double-click to finish', line: 'Click points · press A for a tangent arc · type a length and angle · click the first point, press Enter or double-click to close' };
+  const hints = { mirror: 'Mirror: click the shapes to copy (click again to unselect), press Enter, then click a line to mirror across, or press X / Y for a sketch axis', trim: 'Trim: hover a curve to see the part that will be removed (red), then click it', spline: 'Spline: click points the curve passes through · click the first point to close · Enter or double-click to finish', project: 'Include: click a model edge to copy it onto this sketch · Shift-click copies every edge of that body', offset: 'Offset: click a closed shape, type a distance (negative = inward), press Enter', sfillet: 'Fillet: click a corner of a rectangle or path, type a radius, press Enter', dim: 'Click a shape, then type a value or an expression like width/2', con_coin: 'Coincident: click the point to move, then the point to meet', con_h: 'Horizontal: click a line segment', con_v: 'Vertical: click a line segment', con_conc: 'Concentric: click two shapes', con_equal: 'Equal: click two segments or two circles', con_par: 'Parallel: click the segment to adjust, then the reference', con_perp: 'Perpendicular: click the segment to adjust, then the reference', select: 'Click a shape to select it · drag to move · drag handles to resize · click a dimension to type a value', arc: 'Click the start point, the end point, then a point on the arc · type a radius', rect: 'Click the first corner, then the opposite corner · type a width/height and press Tab / Enter', crect: 'Click the centre, then a corner · type a width/height', rrect: 'Click two corners · type W, H and a corner radius R', slot: 'Click the first centre, then the second · type a length and width', ellipse: 'Click the centre, then drag the radii · type A and B', circle: 'Click the centre, then drag out the radius · type a diameter and press Enter', ngon: 'Click the centre, then a vertex · type a radius and press Enter', path: 'Click points of an open path · press A for a tangent arc · Enter or double-click to finish', line: 'Click points · press A for a tangent arc · type a length and angle · click the first point, press Enter or double-click to close' };
   $('#hud').innerHTML = `<b>Sketch · ${curSketch().name}</b> — ${hints[t]} · Esc to ${t === 'select' ? 'deselect' : 'stop drawing'}`;
   drawSketches();
   renderRibbon(); renderSketchPanel();
@@ -1299,7 +1508,7 @@ function renderSketchPanel() {
   const fieldsFor = (s) => ({ rect: ['x', 'y', 'w', 'h'], circle: ['cx', 'cy', 'r'], ngon: ['cx', 'cy', 'r', 'n', 'rot'], rrect: ['x', 'y', 'w', 'h', 'r'], slot: ['x1', 'y1', 'x2', 'y2', 'w'], ellipse: ['cx', 'cy', 'rx', 'ry'], path: [] }[s.t]);
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('sketch', 20)}SKETCH PALETTE</div><div class="body">
     <div class="mh" style="font-weight:700;margin:0 0 4px">Options</div>
-    <div class="row"><label>Sketch plane</label><select id="sp-plane">${[...['XY', 'XZ', 'YZ'], ...(p.plane === 'custom' ? ['custom'] : [])].map((k) => `<option ${k === p.plane ? 'selected' : ''}>${k}</option>`).join('')}</select></div>
+    <div class="row"><label>Sketch plane</label><select id="sp-plane">${[...['XY', 'XZ', 'YZ'].map((k) => [k, k]), ...doc.features.filter((q, qi) => q.type === 'plane' && qi < sketch.index).map((q) => ['ref:' + q.id, q.name]), ...(p.plane === 'custom' && !p.planeRef ? [['custom', 'custom']] : [])].map(([k, l]) => `<option value="${esc(k)}" ${(k === p.plane && !p.planeRef) || k === 'ref:' + p.planeRef ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
     <div class="row"><label>Plane offset</label><input id="sp-off" type="text" inputmode="decimal" value="${dispStr(p.offset)}"></div>
     <div class="row"><label>Snap (${getUnits()})</label><select id="sp-snap">${['auto', ...UNIT_TABLE[getUnits()].steps.slice(2, 9)].map((v) => { const mmv = v === 'auto' ? 'auto' : v * lenF(); const sel = v === 'auto' ? sketch.snap === 'auto' : typeof sketch.snap === 'number' && Math.abs(sketch.snap - mmv) < 1e-9; return `<option value="${mmv}" ${sel ? 'selected' : ''}>${v}</option>`; }).join('')}</select></div>
     <div class="row"><label>Polygon sides</label><input id="sp-sides" type="number" min="3" max="64" value="${sketch.sides}"></div>
@@ -1340,8 +1549,11 @@ function renderSketchPanel() {
     }
   });
   $('#sp-plane').onchange = (e) => {
-    if (e.target.value === 'custom') return;
-    setSketchParam({ plane: e.target.value, origin: undefined, normal: undefined, xdir: undefined }); vp.lookAtPlane(curSketch().params); renderSketchPanel();
+    const v = e.target.value;
+    if (v === 'custom') return;
+    if (v.startsWith('ref:')) { const g = resolvedMap[v.slice(4)]; if (!g) return; setSketchParam({ planeRef: v.slice(4), plane: 'custom', origin: g.origin, normal: g.normal, xdir: g.xdir }); }
+    else setSketchParam({ plane: v, planeRef: undefined, origin: undefined, normal: undefined, xdir: undefined });
+    vp.lookAtPlane(curSketch().params); renderSketchPanel();
   };
   $('#sp-off').oninput = (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setSketchParam({ offset: v * lenF() }); };
   $('#sp-snap').onchange = (e) => { sketch.snap = e.target.value === 'auto' ? 'auto' : +e.target.value; sketch.gridStep = null; };
@@ -1357,6 +1569,38 @@ function setSketchParam(patch) {
   const f = curSketch();
   doc.features[sketch.index] = { ...f, params: { ...f.params, ...patch } };
   buildSketchGrid(); refresh();
+}
+/** After a shape was replaced by `delta + 1` shapes (trim), drop its constraints and shift the later shape indices. */
+function remapSketchCons(si, delta) {
+  const cons = (curSketch().params.cons || []).filter((c) => c.a?.s !== si && c.b?.s !== si).map((c) => {
+    const sh = (r) => (r && r.s > si ? { ...r, s: r.s + delta } : r);
+    return { ...c, a: sh(c.a), ...(c.b ? { b: sh(c.b) } : {}) };
+  });
+  if (cons.length !== (curSketch().params.cons || []).length || delta) setSketchCons(cons);
+}
+// ---- project / include: copy model edges onto the sketch plane
+function projectHover(e) {
+  const en = vp.pickEdge(e, edgeEntries());
+  if ((en?.chain || null) !== (edgeHover?.chain || null)) { edgeHover = en; updateEdgeView(); }
+  return !!en;
+}
+function projectPick(e, all) {
+  const en = vp.pickEdge(e, edgeEntries());
+  if (!en) return [];
+  const fr = planeFrame(resolvedMap[curSketch().id] || curSketch().params);
+  const chains = all ? edgeEntries().filter((x) => x.body === en.body).map((x) => x.chain) : [en.chain];
+  const out = [], seen = new Set();
+  const keyOf = (pts) => pts.map((p) => `${p[0].toFixed(3)},${p[1].toFixed(3)}`).join(';');
+  for (const sh of curSketch().params.shapes) if (sh.t === 'path') { seen.add(keyOf(sh.pts)); seen.add(keyOf([...sh.pts].reverse())); } // already included
+  for (const ch of chains) {
+    const pts = ch.pts.map((q) => { const d = [q[0] - fr.o[0], q[1] - fr.o[1], q[2] - fr.o[2]]; return [+(d[0] * fr.x[0] + d[1] * fr.x[1] + d[2] * fr.x[2]).toFixed(4), +(d[0] * fr.y[0] + d[1] * fr.y[1] + d[2] * fr.y[2]).toFixed(4)]; });
+    const dedup = pts.filter((p, i) => i === 0 || Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 1e-6);
+    if (dedup.length < 2) continue;
+    const key = keyOf(dedup);
+    if (seen.has(key)) continue; seen.add(key); seen.add(keyOf([...dedup].reverse()));
+    out.push({ t: 'path', open: !ch.closed, pts: dedup });
+  }
+  return out;
 }
 function sketchDeleteSelected() { if (sketch.sel >= 0) { setSketchShapes(curSketch().params.shapes.filter((_, i) => i !== sketch.sel)); sketch.sel = -1; renderSketchPanel(); } }
 function leaveSketch() {
@@ -1745,7 +1989,7 @@ const projectJSON = (name = doc.name, withThumb = false) => { const { rev, ...re
 function loadProject(txt, rev = 0) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, units: UNIT_TABLE[d.units] ? d.units : 'mm', rev };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev };
   setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
@@ -1971,7 +2215,8 @@ function bindViewport() {
     down = null;
     if (sketch?.picking) {
       const tg = vp.pickSketchTarget(e);
-      if (tg?.plane) enterSketch(sketch.index, true, tg.plane);
+      if (tg?.ref) enterSketch(sketch.index, true, { planeRef: tg.ref, plane: 'custom', origin: tg.geo.origin, normal: tg.geo.normal, xdir: tg.geo.xdir });
+      else if (tg?.plane) enterSketch(sketch.index, true, tg.plane);
       else if (tg?.face) { vp.highlightFace(null); enterSketch(sketch.index, true, tg.face); }
       else if (tg?.curved) toast('Pick a flat (planar) face.', true);
       return;
@@ -2471,7 +2716,7 @@ async function boot() {
   $('#loading')?.remove();
   SU = createSketchUI({
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
-    setShapes: (sh) => setSketchShapes(sh), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
+    setShapes: (sh) => setSketchShapes(sh), remapCons: (si, delta) => remapSketchCons(si, delta), projectHover: (e) => projectHover(e), projectPick: (e, all) => projectPick(e, all), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
     cons: () => curSketch().params.cons || [], setCons: (c) => setSketchCons(c),
     toast: (m) => toast(m), evalExpr: (t, kind = 'len') => evalExpr(t, (n) => paramState.values[n], kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });

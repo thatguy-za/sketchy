@@ -18,6 +18,12 @@ function fix(root) {
     el.setAttribute('role', 'button'); el.tabIndex = 0;
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); } });
   }
+  // "label + control" rows whose <label> is not wired to the control (panels, dialogs): name the control after the label
+  for (const row of root.querySelectorAll('.row')) {
+    const l = row.querySelector(':scope > label'), c = row.querySelector('select, input:not([type=checkbox])');
+    if (l && c && !c.getAttribute('aria-label') && !c.labels?.length) c.setAttribute('aria-label', l.textContent.trim());
+  }
+  for (const c of root.querySelectorAll('label.chk > input:not([aria-label])')) { const t = c.parentElement.textContent.trim(); if (t) c.setAttribute('aria-label', t); }
   for (const i of root.querySelectorAll('input:not([aria-label]):not([id])')) {
     if (!i.closest('label') && i.placeholder) i.setAttribute('aria-label', i.placeholder);
   }

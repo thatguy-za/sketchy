@@ -91,6 +91,13 @@ export function evalExpr(src, scope = () => undefined, kind = 'len') {
 }
 
 /** @returns {{values: Record<string, number>, errors: Record<string, string>}} for a list of {name, expr}. */
+/** Parameters as seen through a configuration: its expressions replace the defaults (blank = inherit). */
+export function applyConfig(params, configs, activeId) {
+  const cfg = (configs || []).find((c) => c.id === activeId);
+  if (!cfg) return params || [];
+  return (params || []).map((p) => (cfg.values?.[p.name]?.toString().trim() ? { ...p, expr: String(cfg.values[p.name]) } : p));
+}
+
 export function resolveParams(list) {
   const defs = new Map(list.map((p) => [p.name, p]));
   const values = {}, errors = {}, state = {};

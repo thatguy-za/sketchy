@@ -31,6 +31,25 @@ export const FEATURES = {
     label: 'Sketch', icon: 'sketch', type: 'sketch', make: () => ({ plane: 'XY', offset: 0, shapes: [] }),
     fields: [{ key: 'plane', label: 'Plane', type: 'select', options: PLANE_OPTS }, { key: 'offset', label: 'Offset', type: 'num' }],
   },
+  plane: {
+    label: 'Offset Plane', icon: 'offsetplane', type: 'plane',
+    make: (ctx) => ({ base: ctx.lastPlane || 'XY', offset: 20 }),
+    fields: [
+      { key: 'base', label: 'Base plane', type: 'planeref' },
+      { key: 'offset', label: 'Distance', type: 'num', step: 1 },
+    ],
+  },
+  emboss: {
+    label: 'Emboss', icon: 'extrude', type: 'emboss', manip: { key: 'depth', sketch: 'sketch' },
+    make: (ctx) => ({ sketch: ctx.selSketch || ctx.lastSketch, profiles: null, depth: 1, mode: 'raise', target: '' }),
+    fields: [
+      { key: 'sketch', label: 'Sketch (text or shapes)', type: 'sketch' },
+      { key: 'profiles', label: 'Profiles', type: 'profiles' },
+      { key: 'mode', label: 'Style', type: 'select', options: [['raise', 'Raise (stand proud of the face)'], ['engrave', 'Engrave (cut into the face)']] },
+      { key: 'depth', label: 'Depth', type: 'num', min: 0.01, step: 0.1 },
+      { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all' },
+    ],
+  },
   extrude: {
     label: 'Extrude', icon: 'extrude', type: 'extrude', manip: { key: 'distance', sketch: 'sketch', show: (p) => p.extent === 'distance' },
     make: (ctx) => ({ sketch: ctx.lastSketch, profiles: null, extent: 'distance', distance: LAST.extrude ?? 10, flip: false, symmetric: false, op: ctx.lastSketchOnFace ? 'auto' : ctx.hasBodies ? 'join' : 'new', target: '', toBody: '', taper: 0, twist: 0, scaleTop: 1 }),
@@ -122,6 +141,67 @@ export const FEATURES = {
       { key: 'distance', label: 'Distance', type: 'num', min: 0.01, step: 0.5 },
     ],
   },
+  // ---- surfaces: open surface bodies (not solids)
+  sextrude: {
+    label: 'Extrude Surface', icon: 'extrude', type: 'sextrude', manip: { key: 'distance', sketch: 'sketch' },
+    make: (ctx) => ({ sketch: ctx.selSketch || ctx.lastSketch, distance: 10, symmetric: false }),
+    fields: [
+      { key: 'sketch', label: 'Sketch', type: 'sketch' },
+      { key: 'distance', label: 'Distance', type: 'num', step: 1 },
+      { key: 'symmetric', label: 'Symmetric', type: 'bool' },
+    ],
+  },
+  srevolve: {
+    label: 'Revolve Surface', icon: 'revolve', type: 'srevolve',
+    make: (ctx) => ({ sketch: ctx.selSketch || ctx.lastSketch, angle: 360 }),
+    fields: [
+      { key: 'sketch', label: 'Sketch', type: 'sketch' },
+      { key: 'angle', label: 'Angle', type: 'num', unit: 'deg', min: 1, max: 360 },
+    ],
+  },
+  ssweep: {
+    label: 'Sweep Surface', icon: 'sweep', type: 'ssweep',
+    make: (ctx) => ({ profile: ctx.sketches.filter((k) => k !== ctx.pathSketch).at(-1) || ctx.sketches.at(-2) || '', path: ctx.pathSketch || ctx.sketches.at(-1) || '', smooth: true }),
+    fields: [
+      { key: 'profile', label: 'Profile (sketch)', type: 'sketch' },
+      { key: 'path', label: 'Path (sketch)', type: 'sketch' },
+      { key: 'smooth', label: 'Smooth path', type: 'bool' },
+    ],
+  },
+  sloft: {
+    label: 'Loft Surface', icon: 'loft', type: 'sloft',
+    make: (ctx) => ({ sketches: ctx.sketches.slice(-2) }),
+    fields: [{ key: 'sketches', label: 'Profiles (in order)', type: 'sketchlist' }],
+  },
+  pipe: {
+    label: 'Pipe', icon: 'sweep', type: 'pipe',
+    make: (ctx) => ({ path: ctx.pathSketch || ctx.lastSketch, diameter: 10, wall: 0, smooth: true, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
+    fields: [
+      { key: 'path', label: 'Path (sketch)', type: 'sketch' },
+      { key: 'diameter', label: 'Outer diameter', type: 'num', min: 0.05, step: 1 },
+      { key: 'wall', label: 'Wall thickness (0 = solid)', type: 'num', min: 0, step: 0.5 },
+      { key: 'smooth', label: 'Smooth path', type: 'bool' },
+      { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
+      { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
+    ],
+  },
+  sstitch: {
+    label: 'Stitch', icon: 'combine', type: 'sstitch',
+    make: (ctx) => ({ surfaces: ctx.surfaces || [], requireSolid: false }),
+    fields: [
+      { key: 'surfaces', label: 'Surfaces', type: 'surfaces' },
+      { key: 'requireSolid', label: 'Must form a solid', type: 'bool' },
+    ],
+  },
+  sthicken: {
+    label: 'Thicken', icon: 'shell', type: 'sthicken',
+    make: (ctx) => ({ surface: (ctx.surfaces || []).at(-1) || '', thickness: 2, both: false }),
+    fields: [
+      { key: 'surface', label: 'Surface', type: 'surface' },
+      { key: 'thickness', label: 'Thickness', type: 'num', min: 0.01, step: 0.5 },
+      { key: 'both', label: 'Both sides', type: 'bool' },
+    ],
+  },
   sweep: {
     label: 'Sweep', icon: 'sweep', type: 'sweep',
     make: (ctx) => ({ profile: ctx.sketches.filter((k) => k !== ctx.pathSketch).at(-1) || ctx.sketches.at(-2) || '', path: ctx.pathSketch || ctx.sketches.at(-1) || '', smooth: true, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
@@ -204,6 +284,31 @@ export const FEATURES = {
       { key: 'threadLength', label: 'Thread length', type: 'num', min: 0.1, show: (p) => p.thread },
       { key: 'target', label: 'Target body', type: 'body', optional: 'All bodies' },
     ],
+  },
+  draft: {
+    label: 'Draft', icon: 'chamfer', type: 'draft', needsBody: true,
+    make: (ctx) => ({ body: ctx.selected || '', faces: [], angle: 5, dir: '+Z', neutral: 'start' }),
+    fields: [
+      { key: 'body', label: 'Body', type: 'body' },
+      { key: 'faces', label: 'Faces to draft', type: 'faces' },
+      { key: 'dir', label: 'Pull direction', type: 'select', options: [['+Z', '+Z (up)'], ['-Z', '-Z (down)'], ['+X', '+X'], ['-X', '-X'], ['+Y', '+Y'], ['-Y', '-Y']] },
+      { key: 'neutral', label: 'Neutral plane at', type: 'select', options: [['start', 'Start of the body (base)'], ['end', 'End of the body (top)']] },
+      { key: 'angle', label: 'Draft angle', type: 'num', unit: 'deg', step: 0.5 },
+    ],
+  },
+  mreduce: {
+    label: 'Reduce', icon: 'scale', type: 'mreduce', needsBody: true,
+    make: (ctx) => ({ body: ctx.selected || '', keep: 50, tolerance: 0.2 }),
+    fields: [
+      { key: 'body', label: 'Body', type: 'body' },
+      { key: 'keep', label: 'Keep (% of triangles)', type: 'num', min: 1, max: 100, step: 5 },
+      { key: 'tolerance', label: 'Max deviation', type: 'num', min: 0.001, step: 0.05 },
+    ],
+  },
+  mseparate: {
+    label: 'Separate', icon: 'split', type: 'mseparate', needsBody: true,
+    make: (ctx) => ({ body: ctx.selected || '' }),
+    fields: [{ key: 'body', label: 'Body', type: 'body' }],
   },
   shell: {
     label: 'Shell', icon: 'shell', type: 'shell', needsBody: true,
@@ -288,7 +393,7 @@ export function fieldKind(f, key) {
     if (key === 'value') return ['revolute', 'cylindrical'].includes(p.jtype) ? 'deg' : 'len';
     if (key === 'value3' || key === 'rot') return 'deg';
   }
-  if (['scaleTop', 'factor', 's', 'count', 'turns', 'dir', 'countU', 'countV'].includes(key)) return 'num';
+  if (['scaleTop', 'factor', 'keep', 's', 'count', 'turns', 'dir', 'countU', 'countV'].includes(key)) return 'num';
   if (['taper', 'twist', 'angle', 'cskAngle'].includes(key)) return 'deg';
   return 'len';
 }

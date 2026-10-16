@@ -55,6 +55,7 @@ export class Viewport {
     this.hover = null;
     this.opts = { edges: true, wire: false, grid: true, bed: false, ortho: false, bedSize: [256, 256, 256] };
     this.mats = {
+      surface: new THREE.MeshStandardMaterial({ color: 0x74b3de, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
       body: new THREE.MeshStandardMaterial({ color: 0xc3c7cd, metalness: 0.12, roughness: 0.5, side: THREE.DoubleSide }),
       sel: new THREE.MeshStandardMaterial({ color: 0x86bdf0, metalness: 0.1, roughness: 0.5, side: THREE.DoubleSide }),
       hover: new THREE.MeshStandardMaterial({ color: 0xd3dae3, metalness: 0.1, roughness: 0.5, side: THREE.DoubleSide }),
@@ -140,6 +141,39 @@ export class Viewport {
     this.updateOrtho();
   }
 
+  /** Reference images ("canvases") on a plane. items: [{id, plane, offset, x, y, width, opacity, image, aspect, hidden}] */
+  setCanvases(items) {
+    if (!this.canvasGroup) { this.canvasGroup = new THREE.Group(); this.scene.add(this.canvasGroup); this.texCache = new Map(); }
+    for (const c of [...this.canvasGroup.children]) { c.geometry.dispose(); c.material.dispose(); this.canvasGroup.remove(c); }
+    for (const it of items) {
+      if (it.hidden || !it.image) continue;
+      const key = it.image.length + ':' + it.image.slice(-48);
+      let tex = this.texCache.get(key);
+      if (!tex) { tex = new THREE.TextureLoader().load(it.image, () => { this.dirtyCanvas = true; }); tex.colorSpace = THREE.SRGBColorSpace; this.texCache.set(key, tex); }
+      const w = it.width || 100, h = w * (it.aspect || 1);
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: it.opacity ?? 0.5, side: THREE.DoubleSide, depthWrite: false }));
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.copy(this.planeMatrix({ plane: it.plane, offset: it.offset || 0 })).multiply(new THREE.Matrix4().makeTranslation(it.x || 0, it.y || 0, 0));
+      mesh.renderOrder = -3; mesh.raycast = () => {};
+      this.canvasGroup.add(mesh);
+    }
+  }
+  /** Offset-plane features drawn as translucent squares; clickable while picking a sketch plane. items: [{id,name,origin,normal,xdir,hidden}] */
+  setConstructionPlanes(items) {
+    if (!this.constructionGroup) { this.constructionGroup = new THREE.Group(); this.scene.add(this.constructionGroup); }
+    for (const c of [...this.constructionGroup.children]) { c.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); }); this.constructionGroup.remove(c); }
+    for (const it of items) {
+      const n = new THREE.Vector3(...it.normal).normalize(), x = new THREE.Vector3(...it.xdir).normalize(), y = new THREE.Vector3().crossVectors(n, x);
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(50, 50), new THREE.MeshBasicMaterial({ color: 0x2fa0c8, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
+      m.matrixAutoUpdate = false;
+      m.matrix.makeBasis(x, y, n).setPosition(new THREE.Vector3(...it.origin).addScaledVector(x, 25).addScaledVector(y, 25));
+      const e = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(50, 50)), new THREE.LineBasicMaterial({ color: 0x1b7f9e }));
+      m.add(e);
+      m.userData.ref = it.id; m.userData.geo = { origin: it.origin, normal: it.normal, xdir: it.xdir };
+      m.visible = !it.hidden;
+      this.constructionGroup.add(m);
+    }
+  }
   buildPlaneHandles() {
     this.planeHandles = new THREE.Group();
     const cols = { XY: 0x3b78e0, XZ: 0x3aa655, YZ: 0xe0453a };
@@ -178,7 +212,7 @@ export class Viewport {
       geo.setIndex(new THREE.BufferAttribute(b.tris, 1));
       geo = toCreasedNormals(geo, (35 * Math.PI) / 180);
       const mesh = new THREE.Mesh(geo, this.mats.body);
-      mesh.userData.id = b.id;
+      mesh.userData.id = b.id; mesh.userData.surface = !!b.surface;
       mesh.userData.src = { verts: b.verts, tris: b.tris };
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30), this.mats.edge);
       edges.raycast = () => {};
@@ -232,13 +266,13 @@ export class Viewport {
   refreshMaterials() {
     for (const m of this.bodyGroup.children) {
       const sel = this.selected.has(m.userData.id);
-      m.material = sel ? this.mats.sel : m.userData.id === this.hover ? this.mats.hover : this.bodyMat(m.userData.id);
+      m.material = sel ? this.mats.sel : m.userData.id === this.hover ? this.mats.hover : m.userData.surface ? this.mats.surface : this.bodyMat(m.userData.id);
       const e = m.children[0];
       e.visible = this.opts.edges;
       e.material = sel ? this.mats.edgeSel : this.mats.edge;
     }
     const clip = this.section ? [this.section.plane] : null;
-    for (const mm of [this.mats.body, this.mats.sel, this.mats.hover, this.mats.edge, this.mats.edgeSel, ...Object.values(this.colorMats || {})]) {
+    for (const mm of [this.mats.surface, this.mats.body, this.mats.sel, this.mats.hover, this.mats.edge, this.mats.edgeSel, ...Object.values(this.colorMats || {})]) {
       if ((mm.clippingPlanes === null) !== (clip === null)) mm.needsUpdate = true;
       mm.clippingPlanes = clip;
     }
@@ -471,9 +505,10 @@ export class Viewport {
   // Nearest of: body face or plane handle. Returns {plane} | {face:{origin,normal,xdir,tris,mesh}} | null
   pickSketchTarget(ev) {
     this.setRay(ev);
-    const objs = [...this.bodyGroup.children, ...(this.planeHandles.visible ? this.planeHandles.children : [])];
+    const objs = [...this.bodyGroup.children, ...(this.planeHandles.visible ? [...this.planeHandles.children, ...(this.constructionGroup?.children.filter((c) => c.visible) || [])] : [])];
     const hit = this.ray.intersectObjects(objs, false)[0];
     if (!hit) return null;
+    if (hit.object.userData.ref) return { ref: hit.object.userData.ref, geo: hit.object.userData.geo };
     if (hit.object.userData.plane) return { plane: hit.object.userData.plane };
     const src = hit.object.userData.src;
     const face = planarFace(src.verts, src.tris, hit.faceIndex);

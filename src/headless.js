@@ -2,7 +2,7 @@
 // without the UI: resolve parameters, run the kernel, summarise bodies and errors, build new features from the catalogue.
 import { initKernel, rebuild } from './kernel.js';
 import { FEATURES, defOf, fieldKind } from './features.js';
-import { resolveParams, resolveFeature } from './params.js';
+import { resolveParams, resolveFeature, applyConfig } from './params.js';
 import { resolveSketch } from './sketchdims.js';
 import { writeSTL } from './stl.js';
 
@@ -13,7 +13,7 @@ const round = (v, n = 3) => +Number(v).toFixed(n);
 
 /** Replay the whole timeline (or up to doc.marker) exactly like the UI does. */
 export function evaluate(doc) {
-  const ps = resolveParams(doc.params || []);
+  const ps = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
   const evalErr = {};
   const feats = doc.features.map((f) => {
     const r = resolveFeature(f, (n) => ps.values[n], (ff, path) => (fieldKind(ff, path.split('.')[0]) === 'len' ? 'len' : 'num'));
@@ -40,6 +40,7 @@ export function summarize(doc, result) {
       bbox_min: b.bbox.min.map((v) => round(v)), bbox_max: b.bbox.max.map((v) => round(v)),
       size: b.bbox.max.map((v, k) => round(v - b.bbox.min[k])), triangles: b.tris.length / 3,
     })),
+    surfaces: (result.surfaces || []).map((q) => ({ id: q.id, name: q.name, triangles: q.tris.length / 3, bbox_min: q.bbox.min.map((v) => round(v)), bbox_max: q.bbox.max.map((v) => round(v)) })),
     errors: Object.entries(result.errors).map(([id, message]) => ({ feature: id, name: names[id] || id, message })),
   };
 }
@@ -59,6 +60,8 @@ const fieldDoc = (fld) => ({
   ...(fld.min !== undefined ? { min: fld.min } : {}), ...(fld.max !== undefined ? { max: fld.max } : {}),
   ...(fld.type === 'body' ? { note: 'a body id from inspect_design' } : {}),
   ...(fld.type === 'sketch' ? { note: 'a sketch feature id' } : {}),
+  ...(fld.type === 'surface' || fld.type === 'surfaces' ? { note: 'surface ids from inspect_design (open surface bodies)' } : {}),
+  ...(fld.type === 'planeref' ? { note: 'XY, XZ, YZ or the id of an earlier plane feature' } : {}),
   ...(PICKS.has(fld.type) ? { note: 'a viewport pick in the UI; pass explicit geometry only if you know the format' } : {}),
 });
 
@@ -90,7 +93,7 @@ export function makeFeature(doc, result, key, overrides = {}, name) {
     lastSketch: sketches.at(-1)?.id || '', sketches: sketches.map((k) => k.id),
     pathSketch: [...sketches].reverse().find((k) => (k.params.shapes || []).some((s) => s.open))?.id || '',
     lastSketchOnFace: sketches.at(-1)?.params.plane === 'custom', hasBodies: bodies.length > 0,
-    selected: sel?.id || '', other: other?.id || '',
+    selected: sel?.id || '', other: other?.id || '', surfaces: (result.surfaces || []).map((q) => q.id),
     topCenter: sel ? [ctr(sel)[0], ctr(sel)[1], sel.bbox.max[2]] : [0, 0, 0], selectedCenterZ: sel ? ctr(sel)[2] : 0,
     centerA: ctr(sel), centerB: ctr(other),
   };

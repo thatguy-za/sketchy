@@ -170,3 +170,22 @@ export function ringMesh(ringsIn, closed = false) {
   }
   return { verts, tris };
 }
+
+/**
+ * Open surface through a list of rings (each a polyline of 3D points, all the same length), without end caps.
+ * ringClosed: each ring wraps around (a closed profile); loopClosed: the last ring joins the first (a closed sweep / full revolve).
+ * Winding is left as built; surfaces are drawn double-sided and re-oriented when stitched.
+ */
+export function surfaceMesh(rings, ringClosed = true, loopClosed = false) {
+  const R = rings.length, m = rings[0].length;
+  const verts = rings.flat(2), tris = [];
+  const segs = loopClosed ? R : R - 1, around = ringClosed ? m : m - 1;
+  for (let k = 0; k < segs; k++) {
+    const a = k * m, b = ((k + 1) % R) * m;
+    for (let i = 0; i < around; i++) {
+      const j = (i + 1) % m;
+      tris.push(a + i, a + j, b + j, a + i, b + j, b + i);
+    }
+  }
+  return { verts, tris };
+}
