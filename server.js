@@ -29,7 +29,9 @@ const writeJSON = async (f, v) => { const t = f + '.tmp'; await fs.writeFile(t, 
 let users = await readJSON(usersFile, {});       // username -> {id, salt, hash, created, lastLogin, admin}
 let sessions = await readJSON(sessionsFile, {}); // sha256(token) -> {user, exp}
 let settings = await readJSON(settingsFile, {});
-if (settings.allowRegistration === undefined) settings.allowRegistration = process.env.ALLOW_REGISTRATION !== 'false';
+// Open sign-up is a Server settings option (admins change it in the app). Until an admin has set it, sign-up is closed; an
+// ALLOW_REGISTRATION environment variable from an older setup is honoured once, as the starting value.
+if (settings.allowRegistration === undefined) { settings.allowRegistration = process.env.ALLOW_REGISTRATION === 'true'; await writeJSON(settingsFile, settings); }
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const scrypt = (pw, salt) => new Promise((res, rej) => crypto.scrypt(pw, salt, 64, (e, k) => (e ? rej(e) : res(k.toString('hex')))));
 const saveUsers = () => writeJSON(usersFile, users);
@@ -77,6 +79,32 @@ const readJSONBody = async (req, max = 8192) => { try { return JSON.parse((await
 const parseCookies = (h = '') => Object.fromEntries(h.split(';').map((c) => c.trim().split('=')).filter((p) => p[0]));
 
 // naive per-IP throttle for login/register/password
+// Failed sign-ins are counted per address and per username. After maxFailedLogins failures within failWindowMinutes the address
+// (or username) is locked out for lockoutMinutes. The numbers are Server settings; 0 failures switches the lock-out off.
+const LOGIN_DEFAULTS = { maxFailedLogins: 5, failWindowMinutes: 15, lockoutMinutes: 15 };
+const loginCfg = () => ({ ...LOGIN_DEFAULTS, ...Object.fromEntries(Object.entries(settings).filter(([k]) => k in LOGIN_DEFAULTS)) });
+const failures = new Map(); // key ('ip:1.2.3.4' / 'user:name') -> { times: [], until }
+const lockedFor = (...keys) => { const now = Date.now(); let ms = 0; for (const k of keys) { const f = failures.get(k); if (f?.until > now) ms = Math.max(ms, f.until - now); } return ms; };
+function noteFailure(...keys) {
+  const c = loginCfg(), now = Date.now();
+  if (!c.maxFailedLogins) return;
+  for (const k of keys) {
+    const f = failures.get(k) || { times: [], until: 0 };
+    f.times = f.times.filter((t) => now - t < c.failWindowMinutes * 60e3); f.times.push(now);
+    if (f.times.length >= c.maxFailedLogins) { f.until = now + c.lockoutMinutes * 60e3; f.times = []; }
+    failures.set(k, f);
+  }
+}
+const clearFailures = (...keys) => keys.forEach((k) => failures.delete(k));
+// Behind a reverse proxy (Caddy, Cloudflare Tunnel) every request arrives from the proxy's own private address, so the real
+// client address is read from the forwarding header, but only when the request really came from a private or loopback address.
+const privateAddr = (a) => /^(::ffff:)?(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(a) || a === '::1' || /^f[cd][0-9a-f]{2}:/i.test(a);
+function clientIp(req) {
+  const peer = req.socket.remoteAddress || '';
+  if (!privateAddr(peer)) return peer;
+  const fwd = String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return fwd || peer;
+}
 const attempts = new Map();
 const throttled = (ip) => {
   const now = Date.now(), a = (attempts.get(ip) || []).filter((t) => now - t < 15 * 60e3);
@@ -213,7 +241,7 @@ async function mcpEndpoint(req, res, url) {
 
 // ---------------------------------------------------------------- API
 async function api(req, res, url) {
-  const ip = req.socket.remoteAddress || '';
+  const ip = clientIp(req);
   // CSRF: state-changing requests must carry a custom header (cannot be sent cross-site without CORS preflight)
   if (req.method !== 'GET' && req.headers['x-sketchy'] !== '1') return send(res, 403, { error: 'forbidden' });
   const p = url.pathname;
@@ -246,9 +274,12 @@ async function api(req, res, url) {
       setSession(req, res, username);
       return send(res, 200, { user: username, admin: first });
     }
+    const ipKey = 'ip:' + ip, userKey = 'user:' + username, wait = lockedFor(ipKey, userKey);
+    if (wait) return send(res, 429, { error: `Too many failed sign-ins. Try again in ${Math.ceil(wait / 60e3)} minute${wait > 60e3 ? 's' : ''}.` });
     const u = users[username];
     const hash = await scrypt(password, u?.salt || '0'.repeat(32));
-    if (!u || !crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(u.hash))) return send(res, 401, { error: 'Wrong username or password.' });
+    if (!u || !crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(u.hash))) { noteFailure(ipKey, userKey); return send(res, 401, { error: 'Wrong username or password.' }); }
+    clearFailures(ipKey, userKey);
     u.lastLogin = Date.now(); await saveUsers();
     setSession(req, res, username);
     return send(res, 200, { user: username, admin: !!u.admin });
@@ -308,8 +339,34 @@ async function api(req, res, url) {
     if (!users[user].admin) return send(res, 403, { error: 'Admins only.' });
     const parts = p.slice('/api/admin/'.length).split('/').map(decodeURIComponent);
     if (parts[0] === 'settings') {
-      if (req.method === 'GET') return send(res, 200, settings);
-      if (req.method === 'PUT') { const b = await readJSONBody(req, 1024); if (typeof b?.allowRegistration === 'boolean') settings.allowRegistration = b.allowRegistration; if (typeof b?.allowMcp === 'boolean') settings.allowMcp = b.allowMcp; await saveSettings(); return send(res, 200, settings); }
+      if (req.method === 'GET') return send(res, 200, { ...settings, ...loginCfg() });
+      if (req.method === 'PUT') {
+        const b = await readJSONBody(req, 1024);
+        if (typeof b?.allowRegistration === 'boolean') settings.allowRegistration = b.allowRegistration;
+        if (typeof b?.allowMcp === 'boolean') settings.allowMcp = b.allowMcp;
+        const lim = { maxFailedLogins: [0, 1000], failWindowMinutes: [1, 10080], lockoutMinutes: [1, 10080] };
+        for (const [k, [lo, hi]] of Object.entries(lim)) if (b && k in b) {
+          const n = Number(b[k]);
+          if (!Number.isInteger(n) || n < lo || n > hi) return send(res, 400, { error: `${k === 'maxFailedLogins' ? 'Failed sign-ins' : 'Minutes'} must be a whole number from ${lo} to ${hi}.` });
+          settings[k] = n;
+        }
+        await saveSettings(); return send(res, 200, { ...settings, ...loginCfg() });
+      }
+    }
+    if (parts[0] === 'lockouts') { // who is locked out right now, and a way to let them back in
+      if (req.method === 'GET') { const now = Date.now(); return send(res, 200, [...failures].filter(([, f]) => f.until > now).map(([key, f]) => ({ key, kind: key.startsWith('ip:') ? 'address' : 'username', name: key.slice(key.indexOf(':') + 1), minutes: Math.ceil((f.until - now) / 60e3) }))); }
+      if (req.method === 'DELETE') { const k = url.searchParams.get('key'); if (k) failures.delete(k); else failures.clear(); return send(res, 200, {}); }
+    }
+    if (parts[0] === 'users' && !parts[1] && req.method === 'POST') { // an admin adds a person; with no password a temporary one is generated
+      const b = await readJSONBody(req, 4096);
+      const username = String(b?.username || '').trim().toLowerCase();
+      if (!userRe.test(username)) return send(res, 400, { error: 'Username: 3–32 chars, a–z, 0–9, _ or -.' });
+      if (users[username]) return send(res, 409, { error: 'That username is taken.' });
+      const generated = !b?.password, pw = generated ? crypto.randomBytes(9).toString('base64url') : String(b.password);
+      if (!pwOk(pw)) return send(res, 400, { error: 'Password must be at least 8 characters.' });
+      users[username] = { id: crypto.randomUUID(), ...(await newHash(pw)), created: Date.now(), lastLogin: 0, admin: !!b?.admin };
+      await saveUsers();
+      return send(res, 200, { user: username, admin: !!b?.admin, ...(generated ? { password: pw } : {}) });
     }
     if (parts[0] === 'users' && !parts[1] && req.method === 'GET') {
       const list = await Promise.all(Object.entries(users).map(async ([name, u]) => {

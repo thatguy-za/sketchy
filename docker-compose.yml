@@ -5,13 +5,11 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      # set to "false" once your users have signed up
-      ALLOW_REGISTRATION: "true"
-      # the user and group the server runs as (and that own the saved designs). Defaults to 1000:1000; set them to the
-      # output of `id -u` and `id -g` if you store the data in a folder on your computer
-      # PUID: "1000"
-      # PGID: "1000"
+    # environment:
+    #   # the user and group the server runs as (and that own the saved designs). Defaults to 1000:1000; set them to the
+    #   # output of `id -u` and `id -g` if you store the data in a folder on your computer
+    #   PUID: "1000"
+    #   PGID: "1000"
     volumes:
       - sketchy-data:/data
 

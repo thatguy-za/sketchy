@@ -77,7 +77,7 @@ const LOGO = '<svg viewBox="0 0 64 64" width="34" height="34"><rect x="4" y="4" 
 export function showAuth(startRegister) {
   return new Promise((resolve) => {
     if (document.querySelector('.auth-page')) return;
-    let register = startRegister ?? (acct.setup || (!knownVisitor() && acct.registration));
+    let register = startRegister ?? acct.setup; // sign in by default; the first account on a new server is the only time it starts on sign-up
     if (register && !acct.registration && !acct.setup) register = false;
     const page = document.createElement('div');
     page.className = 'auth-page';
@@ -317,7 +317,13 @@ export function showChangePassword() {
 const fmtBytes = (n) => (n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : (n / 1e3).toFixed(0) + ' KB');
 const fmtDate = (t) => (t ? new Date(t).toLocaleDateString() : '—');
 export async function showAdmin() {
-  const m = modal(`<div class="modal-title">Server settings</div><div class="modal-body"><h3 class="mh3">Registration</h3><label class="chk" style="font-weight:400"><input type="checkbox" id="ad-reg"> Allow new people to register</label><label class="chk" style="font-weight:400"><input type="checkbox" id="ad-mcp"> Allow AI assistants (MCP) to connect with user tokens</label><h3 class="mh3">Users</h3><div id="ad-msg" class="hint"></div><div class="ad-table" id="ad-table">Loading…</div></div>`);
+  const m = modal(`<div class="modal-title">Server settings</div><div class="modal-body"><h3 class="mh3">Registration</h3><label class="chk" style="font-weight:400"><input type="checkbox" id="ad-reg"> Allow new people to register</label><label class="chk" style="font-weight:400"><input type="checkbox" id="ad-mcp"> Allow AI assistants (MCP) to connect with user tokens</label><h3 class="mh3">Sign-in protection</h3>
+    <div class="ad-lock"><label>Lock out after<input type="number" id="ad-max" min="0" max="1000" step="1" inputmode="numeric"></label><span>failed sign-ins within</span><label><span class="sr-only">Minutes counted</span><input type="number" id="ad-win" min="1" max="10080" step="1" inputmode="numeric" aria-label="Minutes in which failed sign-ins are counted"></label><span>minutes, for</span><label><span class="sr-only">Lock-out minutes</span><input type="number" id="ad-lockmin" min="1" max="10080" step="1" inputmode="numeric" aria-label="Minutes a lock-out lasts"></label><span>minutes.</span></div>
+    <div class="hint">Counted per address and per username. Use 0 failed sign-ins to turn lock-outs off. Behind a reverse proxy the real address is read from its forwarding header.</div>
+    <div id="ad-locks" class="ad-locks" role="status"></div>
+    <h3 class="mh3">Users</h3>
+    <form class="ad-add" id="ad-add" autocomplete="off"><input name="username" placeholder="Username" aria-label="New username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32"><input name="password" type="text" placeholder="Password (blank = generate one)" aria-label="New password" autocomplete="new-password" minlength="8"><label class="chk" style="font-weight:400"><input type="checkbox" name="admin"> Admin</label><button class="btn primary" type="submit">Add user</button></form>
+    <div id="ad-msg" class="hint" role="status"></div><div class="ad-table" id="ad-table">Loading…</div></div>`);
   m.el.classList.add('wide');
   const msg = m.el.querySelector('#ad-msg'), host = m.el.querySelector('#ad-table'), reg = m.el.querySelector('#ad-reg');
   const st = await call('GET', '/admin/settings');
@@ -325,6 +331,38 @@ export async function showAdmin() {
   reg.onchange = async () => { await call('PUT', '/admin/settings', { allowRegistration: reg.checked }); await refreshAccount(); };
   const mcp = m.el.querySelector('#ad-mcp'); mcp.checked = st.data?.allowMcp !== false;
   mcp.onchange = async () => { await call('PUT', '/admin/settings', { allowMcp: mcp.checked }); };
+  const lim = { max: m.el.querySelector('#ad-max'), win: m.el.querySelector('#ad-win'), lock: m.el.querySelector('#ad-lockmin') };
+  lim.max.value = st.data?.maxFailedLogins ?? 5; lim.win.value = st.data?.failWindowMinutes ?? 15; lim.lock.value = st.data?.lockoutMinutes ?? 15;
+  const saveLimits = async () => {
+    const r = await call('PUT', '/admin/settings', { maxFailedLogins: +lim.max.value, failWindowMinutes: +lim.win.value, lockoutMinutes: +lim.lock.value });
+    if (!r.ok) { msg.textContent = r.data?.error || 'Could not save.'; return; }
+    msg.textContent = 'Sign-in protection saved.';
+  };
+  Object.values(lim).forEach((el) => (el.onchange = saveLimits));
+  const locks = m.el.querySelector('#ad-locks');
+  const loadLocks = async () => {
+    const r = await call('GET', '/admin/lockouts');
+    locks.innerHTML = '';
+    if (!r.ok || !r.data.length) return;
+    for (const l of r.data) {
+      const row = document.createElement('div');
+      row.className = 'ad-lockrow';
+      row.innerHTML = `<span>Locked: <b>${esc(l.name)}</b> (${l.kind}), ${l.minutes} min left</span><button class="btn sm" type="button">Unlock</button>`;
+      row.querySelector('button').onclick = async () => { await call('DELETE', '/admin/lockouts?key=' + encodeURIComponent(l.key)); loadLocks(); };
+      locks.appendChild(row);
+    }
+  };
+  loadLocks();
+  const add = m.el.querySelector('#ad-add');
+  add.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(add), btn = add.querySelector('[type=submit]'); btn.disabled = true;
+    const r = await call('POST', '/admin/users', { username: fd.get('username'), password: fd.get('password') || undefined, admin: fd.get('admin') === 'on' });
+    btn.disabled = false;
+    if (!r.ok) { msg.textContent = r.data?.error || 'Could not add the user.'; return; }
+    msg.innerHTML = r.data.password ? `Added <b>${esc(r.data.user)}</b>. Temporary password: <code>${esc(r.data.password)}</code> — shown once; ask them to change it after signing in.` : `Added <b>${esc(r.data.user)}</b>.`;
+    add.reset(); add.username.focus(); await load();
+  };
   const load = async () => {
     const r = await call('GET', '/admin/users');
     if (!r.ok) { host.textContent = r.data?.error || 'Could not load users.'; return; }

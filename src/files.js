@@ -75,7 +75,7 @@ export function confirmBox({ title, message, ok = 'OK', danger = false }) {
   return new Promise((resolve) => {
     let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
     const m = modal(`<div class="modal-title">${esc(title)}</div><div class="modal-body"><p style="margin:0;line-height:1.5">${esc(message)}</p></div>
-      <div class="modal-foot"><button class="btn" id="cb-c">Cancel</button><button class="btn primary${danger ? ' danger' : ''}" id="cb-ok">${esc(ok)}</button></div>`, () => finish(false));
+      <div class="modal-foot"><button class="btn" id="cb-c">Cancel</button><button class="btn primary${danger ? ' destructive' : ''}" id="cb-ok">${esc(ok)}</button></div>`, () => finish(false));
     m.el.querySelector('#cb-c').onclick = () => m.close();
     m.el.querySelector('#cb-ok').onclick = () => { finish(true); m.close(); };
     setTimeout(() => m.el.querySelector('#cb-ok').focus(), 0);

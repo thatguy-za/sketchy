@@ -14,7 +14,7 @@ Sketchy itself only speaks plain HTTP, so you put a small proxy in front of it. 
 | You need | A domain name, and ports 80 and 443 forwarded to the machine | A free Cloudflare account with a domain on it |
 | Certificates | Free, automatic (Let's Encrypt) | Handled by Cloudflare |
 
-Before you start, close sign-ups once your users exist (`ALLOW_REGISTRATION: "false"`), use strong passwords, and treat MCP tokens like passwords. Your Sketchy will be public.
+Before you start, keep sign-ups closed (the default; **Allow new people to register** in Server settings) and add people yourself from the same page, use strong passwords, and treat MCP tokens like passwords. Your Sketchy will be public.
 
 ## Option 1: Caddy
 
@@ -35,8 +35,6 @@ Before you start, close sign-ups once your users exist (`ALLOW_REGISTRATION: "fa
        image: ghcr.io/thatguy-za/sketchy:latest
        container_name: sketchy
        restart: unless-stopped
-       environment:
-         ALLOW_REGISTRATION: "true"   # set to "false" once your users have signed up
        volumes:
          - sketchy-data:/data
 
@@ -83,8 +81,6 @@ Your MCP address is now `https://sketchy.example.com/mcp`.
        restart: unless-stopped
        ports:
          - "8080:8080"
-       environment:
-         ALLOW_REGISTRATION: "true"   # set to "false" once your users have signed up
        volumes:
          - sketchy-data:/data
 

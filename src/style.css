@@ -830,7 +830,7 @@ table.cfg .cfg-name { font-weight: 600; width: 104px; }
 .ft-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ft-row small { color: var(--muted); }
 .sv-here { color: var(--muted); font-size: var(--fs-sm); min-height: 1.3em; }
-.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.destructive { background: var(--danger); border-color: var(--danger); color: #fff; }
 .dp-folder { display: flex; align-items: center; gap: 2px; border-radius: 3px; }
 .dp-folder.dropping, .dp-card.dropping { background: var(--accent-soft); outline: 2px dashed var(--accent); }
 .dp-ftoggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 6px 4px; font: inherit; font-weight: 600; text-align: left; color: inherit; cursor: pointer; border-radius: 3px; min-height: 30px; }
@@ -876,3 +876,19 @@ table.cfg .cfg-name { font-weight: 600; width: 104px; }
 .qs-head { padding: 6px 12px 2px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .04em; color: var(--muted); }
 .qs-list .mi small { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qs-list svg.ui { flex: none; margin: 0 1px; color: var(--c-555555); }
+
+/* ---- Server settings: add a user */
+.ad-add { display: grid; grid-template-columns: 1fr 1.3fr auto auto; gap: 8px; align-items: center; }
+.ad-add input[type=text], .ad-add input:not([type]) { padding: 7px 9px; border: 1px solid var(--c-767c84); border-radius: 4px; font: inherit; min-width: 0; }
+.ad-add input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+@media (max-width: 640px) { .ad-add { grid-template-columns: 1fr 1fr; } }
+
+/* ---- Server settings: sign-in protection */
+.ad-lock { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.ad-lock label { display: inline-flex; align-items: center; gap: 8px; font-weight: 400; }
+.ad-lock input[type=number] { width: 4.5em; padding: 6px 8px; border: 1px solid var(--c-767c84); border-radius: 4px; font: inherit; }
+.ad-lock input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.ad-locks { display: flex; flex-direction: column; gap: 4px; }
+.ad-lockrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; background: var(--bg-warning, #fff4e5); border-radius: 4px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+:root[data-theme="dark"] .btn.danger, :root[data-theme="dark"] .btn.sm.danger { color: #ff9a92; }
