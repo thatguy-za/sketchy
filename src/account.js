@@ -2,25 +2,35 @@
 import { icon } from './icons.js';
 import { uicon } from './ficons.js';
 
-export const acct = { server: false, user: null, registration: true };
+export const acct = { server: false, user: null, admin: false, registration: true };
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-export async function call(method, path, body) {
+export const deviceLabel = () => {
+  const ua = navigator.userAgent;
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  const os = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : '';
+  return `${browser}${os ? ' on ' + os : ''}`;
+};
+export async function call(method, path, body, headers = {}) {
   try {
-    const r = await fetch('/api' + path, { method, headers: { 'x-sketchy': '1' }, body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body) });
+    const r = await fetch('/api' + path, { method, headers: { 'x-sketchy': '1', 'x-device-label': deviceLabel(), ...headers }, body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body) });
     const text = await r.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
-    return { ok: r.ok, status: r.status, data };
+    return { ok: r.ok, status: r.status, data, rev: +r.headers.get('x-rev') || 0 };
   } catch { return { ok: false, status: 0, data: { error: 'Cannot reach the server.' } }; }
 }
 
+let onAccountChange = null;
+export function setAccountChangeHandler(fn) { onAccountChange = fn; }
 export async function refreshAccount() {
   const r = await call('GET', '/me');
   acct.server = r.ok && typeof r.data === 'object' && 'user' in r.data;
   acct.user = acct.server ? r.data.user : null;
+  acct.admin = !!(acct.server && r.data.admin);
   acct.registration = acct.server ? r.data.registration !== false : false;
   renderAccountButton();
+  onAccountChange?.();
 }
 
 function renderAccountButton() {
@@ -118,6 +128,69 @@ export async function showDesigns({ onOpen, current }) {
         await call('DELETE', '/projects/' + encodeURIComponent(p.name));
         load();
       };
+      host.appendChild(row);
+    }
+  };
+  load();
+}
+
+// ---------------------------------------------------------------- change password
+export function showChangePassword() {
+  const m = modal(`<div class="modal-title">Change password</div>
+    <form class="modal-body" autocomplete="off">
+      <label>Current password<input name="current" type="password" autocomplete="current-password" required></label>
+      <label>New password<input name="next" type="password" autocomplete="new-password" required minlength="8"></label>
+      <label>Repeat new password<input name="again" type="password" autocomplete="new-password" required minlength="8"></label>
+      <div class="hint">At least 8 characters. Signing in on your other devices will be required again.</div>
+      <div class="form-err" role="alert"></div>
+      <div class="modal-foot"><button type="button" class="btn" data-x>Cancel</button><button class="btn primary" type="submit">Change password</button></div>
+    </form>`);
+  const form = m.el.querySelector('form');
+  form.querySelector('[data-x]').onclick = m.close;
+  form.current.focus();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const err = form.querySelector('.form-err');
+    if (form.next.value !== form.again.value) { err.textContent = "The new passwords don't match."; return; }
+    const r = await call('POST', '/password', { current: form.current.value, next: form.next.value });
+    if (!r.ok) { err.textContent = r.data?.error || 'Could not change the password.'; return; }
+    m.close();
+    alert('Password changed.');
+  };
+}
+
+// ---------------------------------------------------------------- admin: users
+const fmtBytes = (n) => (n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : (n / 1e3).toFixed(0) + ' KB');
+const fmtDate = (t) => (t ? new Date(t).toLocaleDateString() : '—');
+export async function showAdmin() {
+  const m = modal(`<div class="modal-title">Users</div><div class="modal-body"><label class="chk" style="font-weight:400"><input type="checkbox" id="ad-reg"> Allow new people to register</label><div id="ad-msg" class="hint"></div><div class="ad-table" id="ad-table">Loading…</div></div><div class="modal-foot"><button class="btn primary" data-x>Close</button></div>`);
+  m.el.classList.add('wide');
+  m.el.querySelector('[data-x]').onclick = m.close;
+  const msg = m.el.querySelector('#ad-msg'), host = m.el.querySelector('#ad-table'), reg = m.el.querySelector('#ad-reg');
+  const st = await call('GET', '/admin/settings');
+  reg.checked = !!st.data?.allowRegistration;
+  reg.onchange = async () => { await call('PUT', '/admin/settings', { allowRegistration: reg.checked }); await refreshAccount(); };
+  const load = async () => {
+    const r = await call('GET', '/admin/users');
+    if (!r.ok) { host.textContent = r.data?.error || 'Could not load users.'; return; }
+    host.innerHTML = `<div class="ad-row ad-head"><span>User</span><span>Designs</span><span>Storage</span><span>Last sign-in</span><span></span></div>`;
+    for (const u of r.data) {
+      const row = document.createElement('div');
+      row.className = 'ad-row';
+      row.innerHTML = `<span><b>${esc(u.name)}</b>${u.admin ? ' <em class="adm">admin</em>' : ''}${u.name === acct.user ? ' <em>(you)</em>' : ''}</span><span>${u.designs}</span><span>${fmtBytes(u.bytes)}</span><span>${fmtDate(u.lastLogin)}</span>
+        <span class="ad-act"><button class="btn sm" data-a="pw">Reset password</button><button class="btn sm" data-a="adm">${u.admin ? 'Remove admin' : 'Make admin'}</button>${u.name === acct.user ? '' : '<button class="btn sm danger" data-a="del">Delete</button>'}</span>`;
+      row.querySelector('[data-a=pw]').onclick = async () => {
+        if (!confirm(`Reset the password for ${u.name}? They will be signed out everywhere.`)) return;
+        const pw = await call('POST', `/admin/users/${encodeURIComponent(u.name)}/password`, {});
+        msg.innerHTML = pw.ok ? `Temporary password for <b>${esc(u.name)}</b>: <code>${esc(pw.data.password)}</code> — shown once; ask them to change it after signing in.` : esc(pw.data?.error || 'Failed');
+      };
+      row.querySelector('[data-a=adm]').onclick = async () => { const a = await call('POST', `/admin/users/${encodeURIComponent(u.name)}/admin`, { admin: !u.admin }); if (!a.ok) msg.textContent = a.data?.error || 'Failed'; await load(); await refreshAccount(); };
+      row.querySelector('[data-a=del]')?.addEventListener('click', async () => {
+        if (!confirm(`Delete ${u.name} and all of their saved designs? This cannot be undone.`)) return;
+        const d = await call('DELETE', `/admin/users/${encodeURIComponent(u.name)}`);
+        msg.textContent = d.ok ? `Deleted ${u.name}.` : d.data?.error || 'Failed';
+        await load();
+      });
       host.appendChild(row);
     }
   };

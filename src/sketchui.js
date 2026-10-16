@@ -3,9 +3,13 @@
 //
 // `app` provides: vp, THREE, sketch() (state, may be null), params() (current sketch params),
 // setShapes(shapes), renderPanel(), redrawSketch(), evalExpr(text) -> number | throws.
-import { shapeToPolygon } from './kernel.js';
+import { shapeToPolygon, offsetPolygon } from './kernel.js';
+import { setDim, getDim } from './sketchdims.js';
+import { keyPoints, segOf, conAnchor, CON_GLYPH, CON_LABEL } from './sketchcons.js';
+import { filletVertex } from './sketchgeo.js';
+import { arcOf, bulgeFrom3, bulgeFromTangent, endTangent, bulgeFromRadius, segmentLength, pathPolygon } from './sketchgeo.js';
 
-const STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500];
+import { UNIT_TABLE, getUnits, lenF, dispStr } from './units.js';
 const fmt = (v) => (Math.abs(v) < 1e-9 ? '0' : String(+v.toFixed(3)));
 const D2R = Math.PI / 180;
 
@@ -17,7 +21,9 @@ export function createSketchUI(app) {
   const P = () => app.params();
   const shapes = () => P().shapes;
 
-  let dimbox = null, labels = [], drag = null, lastInfer = null;
+  let dimbox = null, labels = [], drag = null, lastInfer = null, badges = [];
+  const CON = { con_h: 'horizontal', con_v: 'vertical', con_coin: 'coincident', con_conc: 'concentric', con_equal: 'equal', con_par: 'parallel', con_perp: 'perpendicular' };
+  const CON_HINT = { horizontal: ['a line segment'], vertical: ['a line segment'], parallel: ['the segment to adjust', 'the reference segment'], perpendicular: ['the segment to adjust', 'the reference segment'], coincident: ['the point to move', 'the point to meet'], concentric: ['the shape to move', 'the reference shape'], equal: ['the first segment or circle', 'the second (same kind)'] };
 
   // ------------------------------------------------------------ coordinates
   const evPx = (ev) => { const r = canvas.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; };
@@ -29,7 +35,8 @@ export function createSketchUI(app) {
     const s = S();
     if (s && typeof s.snap === 'number') return s.snap;
     const ppm = ppmAt(s?.cursor || [0, 0]);
-    return STEPS.find((st) => st * ppm >= 14) || STEPS[STEPS.length - 1];
+    const steps = UNIT_TABLE[getUnits()].steps.map((x) => x * lenF());
+    return steps.find((st) => st * ppm >= 14) || steps[steps.length - 1];
   }
 
   // ------------------------------------------------------------ snapping + inference
@@ -88,10 +95,17 @@ export function createSketchUI(app) {
     rrect: [{ k: 'w', l: 'W' }, { k: 'h', l: 'H' }, { k: 'r', l: 'R' }],
     slot: [{ k: 'len', l: 'L' }, { k: 'w', l: 'W' }],
     ellipse: [{ k: 'a', l: 'A' }, { k: 'b', l: 'B' }],
+    arc: [{ k: 'len', l: 'L' }, { k: 'ang', l: '∠' }],
+    offset: [{ k: 'd', l: 'D' }],
+    sfillet: [{ k: 'r', l: 'R' }],
     line: [{ k: 'len', l: 'L' }, { k: 'ang', l: '∠' }],
     path: [{ k: 'len', l: 'L' }, { k: 'ang', l: '∠' }],
   };
+  const fieldsFor = (s) => (s.tool === 'arc' && s.pts?.length === 2 ? [{ k: 'r', l: 'R' }] : FIELDS[s.tool]);
   function live(tool, pts, cur) {
+    if (tool === 'offset') return { d: S().offD ?? 2 };
+    if (tool === 'sfillet') return { r: S().filR ?? 2 };
+    if (tool === 'arc' && pts.length === 2) { const b = bulgeFrom3(pts[0], cur, pts[1]); return { r: b ? arcOf(pts[0], pts[1], b).r : 0 }; }
     const a = pts[pts.length - 1];
     const dx = cur[0] - a[0], dy = cur[1] - a[1];
     const sess = S();
@@ -129,6 +143,50 @@ export function createSketchUI(app) {
     return [a[0] + len * Math.cos(ang), a[1] + len * Math.sin(ang)];
   }
 
+  // path with the in-progress segment appended (tangent arc when arc mode is on)
+  function previewPathPts(s, cur, typed) {
+    const end = segEnd(s.pts, cur, typed);
+    const pts = s.pts.map((p) => [...p]);
+    const n = pts.length;
+    if (s.arcMode && n >= 2) { const t = endTangent(pts[n - 2], pts[n - 1], pts[n - 2][2] || 0); pts[n - 1][2] = bulgeFromTangent(pts[n - 1], t, end); }
+    pts.push(end);
+    return pts;
+  }
+  function arcPreviewPts(s, cur, typed) {
+    if (s.pts.length === 1) return [s.pts[0], segEnd(s.pts, cur, typed)];
+    const [p0, p1] = s.pts;
+    let b = bulgeFrom3(p0, cur, p1);
+    if (typed.r != null && b) b = bulgeFromRadius(Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), typed.r, Math.sign(b));
+    return [[p0[0], p0[1], b], p1];
+  }
+
+  // exact offsets for simple shapes, polygon offset otherwise
+  function offsetShape(sh, d) {
+    if (sh.t === 'circle') return sh.r + d > 1e-3 ? { ...sh, r: sh.r + d } : null;
+    if (sh.t === 'rect') {
+      if (d >= 0) return { t: 'rrect', x: sh.x - d, y: sh.y - d, w: sh.w + 2 * d, h: sh.h + 2 * d, r: d };
+      return sh.w + 2 * d > 1e-3 && sh.h + 2 * d > 1e-3 ? { ...sh, x: sh.x - d, y: sh.y - d, w: sh.w + 2 * d, h: sh.h + 2 * d } : null;
+    }
+    if (sh.t === 'rrect') {
+      const w = sh.w + 2 * d, h = sh.h + 2 * d;
+      return w > 1e-3 && h > 1e-3 ? { ...sh, x: sh.x - d, y: sh.y - d, w, h, r: Math.max(0, Math.min(sh.r + d, w / 2, h / 2)) } : null;
+    }
+    if (sh.t === 'slot') return sh.w + 2 * d > 1e-3 ? { ...sh, w: sh.w + 2 * d } : null;
+    if (sh.t === 'path' && sh.open) return null;
+    const poly = offsetPolygon(shapeToPolygon(sh), d);
+    return poly && poly.length >= 3 ? { t: 'path', pts: poly } : null;
+  }
+  function filletedShape(sh, vi, r) {
+    if (sh.t === 'rect') {
+      const pts = [[sh.x, sh.y], [sh.x + sh.w, sh.y], [sh.x + sh.w, sh.y + sh.h], [sh.x, sh.y + sh.h]];
+      const np = filletVertex(pts, true, vi, r);
+      return np ? { t: 'path', pts: np } : null;
+    }
+    if (sh.t === 'path') { const np = filletVertex(sh.pts, !sh.open, vi, r); return np ? { ...sh, pts: np } : null; }
+    return null;
+  }
+  const vertexIndex = (k) => +String(k).replace(/^[pc]/, '');
+
   // ------------------------------------------------------------ overlay drawing
   const mat = (c, o = 1) => new THREE.LineBasicMaterial({ color: c, transparent: o < 1, opacity: o, depthTest: false });
   const line3 = (pts, color, closed = false, dashed = false) => {
@@ -147,8 +205,15 @@ export function createSketchUI(app) {
     if (s.pts?.length && cur) {
       const typed = s.dim?.typed || {};
       if (s.tool === 'line' || s.tool === 'path') {
-        const end = segEnd(s.pts, cur, typed);
-        vp.overlay.add(line3([...s.pts, end], 0xf08c00));
+        vp.overlay.add(line3(pathPolygon(previewPathPts(s, cur, typed), false), 0xf08c00));
+      } else if (s.tool === 'arc') {
+        vp.overlay.add(line3(pathPolygon(arcPreviewPts(s, cur, typed), false), 0xf08c00));
+      } else if (s.tool === 'offset' && s.off) {
+        const res = offsetShape(shapes()[s.off.idx], typed.d ?? s.offD ?? 2);
+        if (res) vp.overlay.add(line3(shapeToPolygon(res), 0xf08c00, true));
+      } else if (s.tool === 'sfillet' && s.fil) {
+        const res = filletedShape(shapes()[s.fil.s], s.fil.vi, typed.r ?? s.filR ?? 2);
+        if (res) vp.overlay.add(line3(shapeToPolygon(res), 0xf08c00, res.t !== 'path' || !res.open));
       } else {
         const sh = drawnShape(s.tool, s.pts, cur, typed);
         if (sh) vp.overlay.add(line3(shapeToPolygon(sh), 0xf08c00, true));
@@ -169,6 +234,11 @@ export function createSketchUI(app) {
       if (g?.gu) vp.overlay.add(line3([g.gu, [g.gu[0], cur[1]]], 0xf08c00, false, true));
       if (g?.gv) vp.overlay.add(line3([g.gv, [cur[0], g.gv[1]]], 0xf08c00, false, true));
     }
+    if (s.conA && shapes()[s.conA.s]) {
+      const sh = shapes()[s.conA.s];
+      const p = s.conA.k ? keyPoints(sh).find((q) => q.k === s.conA.k)?.p : s.conA.seg != null ? (() => { const sg = segOf(sh, s.conA.seg); return sg && [(sg[0][0] + sg[1][0]) / 2, (sg[0][1] + sg[1][1]) / 2]; })() : keyPoints(sh)[0]?.p;
+      if (p) { const z = 6 / ppmAt(p); vp.overlay.add(line3([[p[0] - z, p[1] - z], [p[0] + z, p[1] - z], [p[0] + z, p[1] + z], [p[0] - z, p[1] + z]], 0xf08c00, true)); }
+    }
     // selection handles
     if (s.tool === 'select' && s.sel >= 0 && shapes()[s.sel]) {
       for (const h of handlesOf(shapes()[s.sel])) {
@@ -182,7 +252,7 @@ export function createSketchUI(app) {
   function closeDimbox() { dimbox?.remove(); dimbox = null; }
   function openDimbox() {
     const s = S();
-    const fields = FIELDS[s.tool];
+    const fields = fieldsFor(s);
     if (!fields) return;
     if (!dimbox) {
       dimbox = document.createElement('div');
@@ -194,8 +264,9 @@ export function createSketchUI(app) {
         inp.onfocus = () => inp.select();
         inp.oninput = () => {
           const k = inp.dataset.k, txt = inp.value.trim();
-          if (txt === '' || txt === '-') { delete s.dim.typed[k]; inp.classList.remove('bad'); redraw(); return; }
-          try { s.dim.typed[k] = app.evalExpr(txt); inp.classList.remove('bad'); } catch { inp.classList.add('bad'); }
+          if (!s.dim.exprs) s.dim.exprs = {};
+          if (txt === '' || txt === '-') { delete s.dim.typed[k]; delete s.dim.exprs[k]; inp.classList.remove('bad'); redraw(); return; }
+          try { s.dim.typed[k] = app.evalExpr(txt, k === 'ang' ? 'num' : 'len'); inp.classList.remove('bad'); if (/^[-+]?(\d+\.?\d*|\.\d+)$/.test(txt)) delete s.dim.exprs[k]; else s.dim.exprs[k] = txt; } catch { inp.classList.add('bad'); }
           redraw();
         };
         inp.onkeydown = (e) => {
@@ -216,7 +287,7 @@ export function createSketchUI(app) {
       const k = inp.dataset.k;
       const typed = s.dim.typed[k] != null;
       inp.classList.toggle('live', !typed);
-      if (document.activeElement !== inp && !typed) inp.value = fmt(k === 'ang' ? lv.ang : lv[k]);
+      if (document.activeElement !== inp && !typed) inp.value = k === 'ang' ? fmt(lv.ang) : dispStr(lv[k]);
     }
     const sp = scr(s.cursor);
     dimbox.style.left = Math.min(sp.x + 22, view.clientWidth - 150) + 'px';
@@ -228,17 +299,52 @@ export function createSketchUI(app) {
     app.setShapes([...shapes(), sh]);
     app.renderPanel();
   }
-  function resetDraw() { const s = S(); s.pts = null; s.dim = { typed: {} }; closeDimbox(); redraw(); }
+  function resetDraw() { const s = S(); s.pts = null; s.dim = { typed: {} }; s.arcMode = false; s.off = null; s.fil = null; closeDimbox(); redraw(); }
   function cancelShape() { resetDraw(); }
   function commit(cursorOverride) {
     const s = S();
     if (!s.pts?.length) return;
     const cur = cursorOverride || s.cursor || s.pts[0];
     const typed = s.dim.typed;
+    if (s.tool === 'offset' && s.off) {
+      const d = typed.d ?? s.offD ?? 2;
+      const res = offsetShape(shapes()[s.off.idx], d);
+      if (!res) { app.toast?.('That offset is not possible for this shape.'); return; }
+      if (typed.d != null) s.offD = typed.d;
+      resetDraw(); addShape(res);
+      return;
+    }
+    if (s.tool === 'sfillet' && s.fil) {
+      const r = typed.r ?? s.filR ?? 2;
+      const res = filletedShape(shapes()[s.fil.s], s.fil.vi, r);
+      if (!res) { app.toast?.('The radius does not fit between those segments.'); return; }
+      if (typed.r != null) s.filR = typed.r;
+      const idx = s.fil.s;
+      resetDraw();
+      app.setShapes(shapes().map((o, i) => (i === idx ? res : o)));
+      app.renderPanel();
+      return;
+    }
+    if (s.tool === 'arc') {
+      if (s.pts.length === 1) {
+        const end = segEnd(s.pts, cur, typed);
+        if (Math.hypot(end[0] - s.pts[0][0], end[1] - s.pts[0][1]) < 1e-9) return;
+        s.pts.push(end); s.dim = { typed: {} };
+        closeDimbox(); openDimbox(); redraw();
+        return;
+      }
+      const ap = arcPreviewPts(s, cur, typed);
+      if (!ap[0][2]) { app.toast?.('The three points are in a line — move the third point off the chord.'); return; }
+      resetDraw();
+      addShape({ t: 'path', open: true, pts: ap });
+      return;
+    }
     if (s.tool === 'line' || s.tool === 'path') {
       const end = segEnd(s.pts, cur, typed);
       const last = s.pts[s.pts.length - 1];
       if (Math.hypot(end[0] - last[0], end[1] - last[1]) < 1e-9) return;
+      const np = s.pts.length;
+      if (s.arcMode && np >= 2) { const t = endTangent(s.pts[np - 2], last, s.pts[np - 2][2] || 0); s.pts[np - 1] = [last[0], last[1], bulgeFromTangent(last, t, end)]; }
       s.pts.push(end);
       s.dim = { typed: {} };
       // keep the dim box for the next segment
@@ -251,6 +357,10 @@ export function createSketchUI(app) {
     if (!sh) return;
     const size = sh.t === 'rect' || sh.t === 'rrect' ? Math.min(sh.w, sh.h) : sh.t === 'slot' ? Math.min(sh.w, Math.hypot(sh.x2 - sh.x1, sh.y2 - sh.y1)) : sh.t === 'ellipse' ? Math.min(sh.rx, sh.ry) : sh.r;
     if (!(size > 1e-6)) return;
+    const exMap = { rect: { w: 'w', h: 'h' }, rrect: { w: 'w', h: 'h', r: 'r' }, circle: { d: 'd' }, ngon: { r: 'r' }, slot: { len: 'len', w: 'w' }, ellipse: { a: 'a', b: 'b' } }[sh.t];
+    const ex = {};
+    for (const [k, txt] of Object.entries(s.dim.exprs || {})) if (exMap?.[k]) ex[exMap[k]] = txt;
+    if (Object.keys(ex).length) sh.ex = ex;
     if (sh.t === 'rrect' && typed.r != null) s.cornerR = typed.r;
     if (sh.t === 'slot' && typed.w != null) s.slotW = typed.w;
     resetDraw();
@@ -303,14 +413,14 @@ export function createSketchUI(app) {
     }
     if (sh.t === 'circle') { const r = Math.hypot(u - sh.cx, v - sh.cy); return r > 1e-3 ? { ...sh, r } : sh; }
     if (sh.t === 'ngon') { const r = Math.hypot(u - sh.cx, v - sh.cy); return r > 1e-3 ? { ...sh, r, rot: Math.atan2(v - sh.cy, u - sh.cx) / D2R } : sh; }
-    if (sh.t === 'path') { const i = +id.slice(1); return { ...sh, pts: sh.pts.map((p, k) => (k === i ? [u, v] : p)) }; }
+    if (sh.t === 'path') { const i = +id.slice(1); return { ...sh, pts: sh.pts.map((p, k) => (k === i ? (p[2] ? [u, v, p[2]] : [u, v]) : p)) }; }
     return sh;
   }
   const anchorOf = (sh) => (sh.t === 'rect' || sh.t === 'rrect' ? [sh.x, sh.y] : sh.t === 'slot' ? [sh.x1, sh.y1] : sh.t === 'path' ? sh.pts[0] : [sh.cx, sh.cy]);
   function translate(sh, du, dv) {
     if (sh.t === 'slot') return { ...sh, x1: sh.x1 + du, y1: sh.y1 + dv, x2: sh.x2 + du, y2: sh.y2 + dv };
     if (sh.t === 'rect' || sh.t === 'rrect') return { ...sh, x: sh.x + du, y: sh.y + dv };
-    if (sh.t === 'path') return { ...sh, pts: sh.pts.map(([a, b]) => [a + du, b + dv]) };
+    if (sh.t === 'path') return { ...sh, pts: sh.pts.map(([a, b, c]) => (c ? [a + du, b + dv, c] : [a + du, b + dv])) };
     return { ...sh, cx: sh.cx + du, cy: sh.cy + dv };
   }
   function pointInPoly(pt, poly) {
@@ -349,41 +459,19 @@ export function createSketchUI(app) {
   // ------------------------------------------------------------ dimension labels on the selected shape
   function clearLabels() { labels.forEach((l) => l.el.remove()); labels = []; }
   function labelSpecs(sh) {
-    if (sh.t === 'slot') {
-      const L = Math.hypot(sh.x2 - sh.x1, sh.y2 - sh.y1);
-      return [
-        { id: 'len', val: L, at: [(sh.x1 + sh.x2) / 2, (sh.y1 + sh.y2) / 2], off: [0, -16], set: (v) => { const k = L > 1e-9 ? v / L : 1; return { ...sh, x2: sh.x1 + (sh.x2 - sh.x1) * k, y2: sh.y1 + (sh.y2 - sh.y1) * k }; }, prefix: 'L' },
-        { id: 'w', val: sh.w, at: [(sh.x1 + sh.x2) / 2, (sh.y1 + sh.y2) / 2], off: [0, 16], set: (v) => ({ ...sh, w: v }), prefix: 'W' },
-      ];
-    }
-    if (sh.t === 'ellipse') return [
-      { id: 'a', val: sh.rx, at: [sh.cx + sh.rx / 2, sh.cy], off: [0, -14], set: (v) => ({ ...sh, rx: v }), prefix: 'A' },
-      { id: 'b', val: sh.ry, at: [sh.cx, sh.cy + sh.ry / 2], off: [30, 0], set: (v) => ({ ...sh, ry: v }), prefix: 'B' },
-    ];
-    if (sh.t === 'rrect') return [
-      { id: 'w', val: sh.w, at: [sh.x + sh.w / 2, sh.y + sh.h], off: [0, -16], set: (v) => ({ ...sh, w: v, r: Math.min(sh.r, v / 2) }) },
-      { id: 'h', val: sh.h, at: [sh.x + sh.w, sh.y + sh.h / 2], off: [30, 0], set: (v) => ({ ...sh, h: v, r: Math.min(sh.r, v / 2) }) },
-      { id: 'r', val: sh.r, at: [sh.x + sh.w - sh.r, sh.y + sh.h - sh.r], off: [-26, 16], set: (v) => ({ ...sh, r: Math.min(v, sh.w / 2, sh.h / 2) }), prefix: 'R' },
-    ];
-    if (sh.t === 'rect') {
-      return [
-        { id: 'w', val: sh.w, at: [sh.x + sh.w / 2, sh.y + sh.h], off: [0, -16], set: (v) => ({ ...sh, w: v }) },
-        { id: 'h', val: sh.h, at: [sh.x + sh.w, sh.y + sh.h / 2], off: [30, 0], set: (v) => ({ ...sh, h: v }) },
-      ];
-    }
-    if (sh.t === 'circle') return [{ id: 'd', val: sh.r * 2, at: [sh.cx + sh.r, sh.cy], off: [32, 0], set: (v) => ({ ...sh, r: v / 2 }), prefix: 'Ø' }];
-    if (sh.t === 'ngon') return [{ id: 'r', val: sh.r, at: [sh.cx + sh.r / 2 * Math.cos(sh.rot * D2R), sh.cy + sh.r / 2 * Math.sin(sh.rot * D2R)], off: [0, -14], set: (v) => ({ ...sh, r: v }), prefix: 'R' }];
+    const mk = (id, at, off, prefix) => ({ id, val: getDim(sh, id), at, off, prefix, set: (v) => setDim(sh, id, v) });
+    if (sh.t === 'rect') return [mk('w', [sh.x + sh.w / 2, sh.y + sh.h], [0, -16]), mk('h', [sh.x + sh.w, sh.y + sh.h / 2], [30, 0])];
+    if (sh.t === 'rrect') return [mk('w', [sh.x + sh.w / 2, sh.y + sh.h], [0, -16]), mk('h', [sh.x + sh.w, sh.y + sh.h / 2], [30, 0]), mk('r', [sh.x + sh.w - sh.r, sh.y + sh.h - sh.r], [-26, 16], 'R')];
+    if (sh.t === 'circle') return [mk('d', [sh.cx + sh.r, sh.cy], [32, 0], 'Ø')];
+    if (sh.t === 'ngon') return [mk('r', [sh.cx + (sh.r / 2) * Math.cos(sh.rot * D2R), sh.cy + (sh.r / 2) * Math.sin(sh.rot * D2R)], [0, -14], 'R')];
+    if (sh.t === 'slot') { const mid = [(sh.x1 + sh.x2) / 2, (sh.y1 + sh.y2) / 2]; return [mk('len', mid, [0, -16], 'L'), mk('w', mid, [0, 16], 'W')]; }
+    if (sh.t === 'ellipse') return [mk('a', [sh.cx + sh.rx / 2, sh.cy], [0, -14], 'A'), mk('b', [sh.cx, sh.cy + sh.ry / 2], [30, 0], 'B')];
     if (sh.t === 'path') {
       const out = [];
       const n = sh.open ? sh.pts.length - 1 : sh.pts.length;
       for (let i = 0; i < n; i++) {
         const a = sh.pts[i], b = sh.pts[(i + 1) % sh.pts.length];
-        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        out.push({ id: 's' + i, val: len, at: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], off: [0, -14], set: (v) => {
-          const k = len > 1e-9 ? v / len : 1;
-          const j = (i + 1) % sh.pts.length;
-          return { ...sh, pts: sh.pts.map((p, q) => (q === j ? [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k] : p)) };
-        } });
+        out.push(mk('s' + i, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], [0, -14], a[2] ? 'R' : undefined));
       }
       return out;
     }
@@ -406,13 +494,19 @@ export function createSketchUI(app) {
         inp.onfocus = () => inp.select();
         inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') inp.blur(); };
         inp.oninput = () => {
-          let v;
-          try { v = app.evalExpr(inp.value.trim()); } catch { inp.classList.add('bad'); return; }
+          const txt = inp.value.trim();
+          let v, expr = null;
+          try { v = app.evalExpr(txt, 'len'); if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(txt)) expr = txt; } catch { inp.classList.add('bad'); return; }
           if (!(v > 0)) { inp.classList.add('bad'); return; }
           inp.classList.remove('bad');
           const cur = shapes()[S().sel];
           const spec = labelSpecs(cur).find((x) => x.id === sp.id);
-          if (spec) app.setShapes(shapes().map((o, i) => (i === S().sel ? spec.set(v) : o)));
+          if (!spec) return;
+          const ex = { ...(cur.ex || {}) };
+          if (expr) ex[sp.id] = expr; else delete ex[sp.id];
+          const ns = { ...spec.set(v) };
+          if (Object.keys(ex).length) ns.ex = ex; else delete ns.ex;
+          app.setShapes(shapes().map((o, i) => (i === S().sel ? ns : o)));
         };
         return { id: sp.id, el, inp };
       });
@@ -421,17 +515,88 @@ export function createSketchUI(app) {
     for (const l of labels) {
       const spec = specs.find((x) => x.id === l.id);
       if (!spec) continue;
-      if (document.activeElement !== l.inp) l.inp.value = fmt(spec.val);
+      const curSh = shapes()[S().sel];
+      if (document.activeElement !== l.inp) { l.inp.value = curSh?.ex?.[l.id] ?? dispStr(spec.val); l.inp.title = curSh?.ex?.[l.id] ? `= ${dispStr(spec.val)} ${getUnits()}` : ''; }
+      l.inp.classList.toggle('expr', !!curSh?.ex?.[l.id]);
       const sp = scr(spec.at);
       l.el.style.left = sp.x + spec.off[0] + 'px';
       l.el.style.top = sp.y + spec.off[1] + 'px';
     }
   }
 
+  // ------------------------------------------------------------ constraint picking
+  function hitSegment(px) {
+    let best = null, bd = 8;
+    shapes().forEach((sh, i) => {
+      if (sh.t !== 'path') return;
+      const n = sh.open ? sh.pts.length - 1 : sh.pts.length;
+      for (let k = 0; k < n; k++) {
+        const [a, b] = segOf(sh, k);
+        const d = segDist(px, scr(a), scr(b));
+        if (d < bd) { bd = d; best = { s: i, seg: k }; }
+      }
+    });
+    return best;
+  }
+  function hitKeyPoint(px) {
+    let best = null, bd = 10;
+    shapes().forEach((sh, i) => { for (const kp of keyPoints(sh)) { const q = scr(kp.p); const d = Math.hypot(q.x - px.x, q.y - px.y); if (d < bd) { bd = d; best = { s: i, k: kp.k }; } } });
+    return best;
+  }
+  function conStatus(type) {
+    const s = S();
+    document.getElementById('statusbar').textContent = `${CON_LABEL[type]}: select ${CON_HINT[type][s.conA ? 1 : 0]}`;
+  }
+  function conPick(px) {
+    const s = S(), type = CON[s.tool];
+    const two = !['horizontal', 'vertical'].includes(type);
+    let hit = null;
+    if (type === 'coincident') hit = hitKeyPoint(px);
+    else if (type === 'concentric') { const i = hitShape(px); hit = i >= 0 ? { s: i } : null; }
+    else if (type === 'equal') { hit = hitSegment(px) || (() => { const i = hitShape(px); return i >= 0 && ['circle', 'ngon'].includes(shapes()[i].t) ? { s: i } : null; })(); }
+    else hit = hitSegment(px);
+    if (!hit) return;
+    if (!two) { addCon({ t: type, a: hit }); return; }
+    if (!s.conA) { s.conA = hit; conStatus(type); redraw(); return; }
+    if (hit.s === s.conA.s && hit.seg === s.conA.seg && hit.k === s.conA.k) return;
+    addCon({ t: type, a: s.conA, b: hit });
+    s.conA = null;
+  }
+  function addCon(c) {
+    app.setCons([...app.cons(), c]);
+    document.getElementById('statusbar').textContent = `${CON_LABEL[c.t]} constraint added`;
+    redraw();
+  }
+  function syncBadges() {
+    const s = S();
+    const cons = s ? app.cons() : [];
+    const sh = s ? shapes() : [];
+    const key = JSON.stringify(cons);
+    if (badges.key !== key) {
+      badges.forEach((b) => b.el.remove());
+      badges = cons.map((c, i) => {
+        const el = document.createElement('button');
+        el.className = 'conbadge'; el.textContent = CON_GLYPH[c.t]; el.title = `${CON_LABEL[c.t]} — click to delete`;
+        el.onpointerdown = (e) => { e.stopPropagation(); };
+        el.onclick = (e) => { e.stopPropagation(); app.setCons(app.cons().filter((_, k) => k !== i)); };
+        view.appendChild(el);
+        return { el, c };
+      });
+      badges.key = key;
+    }
+    for (const b of badges) {
+      const at = conAnchor(sh, b.c);
+      if (!at) { b.el.style.display = 'none'; continue; }
+      const sp = scr(at);
+      b.el.style.display = '';
+      b.el.style.left = sp.x + 12 + 'px'; b.el.style.top = sp.y - 12 + 'px';
+    }
+  }
+
   // ------------------------------------------------------------ pointer routing
   function status(info, pt) {
     const el = document.getElementById('statusbar');
-    el.textContent = `${info?.kind ? info.kind + ' · ' : ''}u ${pt[0].toFixed(2)}  v ${pt[1].toFixed(2)} mm`;
+    el.textContent = `${info?.kind ? info.kind + ' · ' : ''}u ${dispStr(pt[0], 3)}  v ${dispStr(pt[1], 3)} ${getUnits()}`;
   }
   function pointer(ev, kind) {
     const s = S();
@@ -479,6 +644,37 @@ export function createSketchUI(app) {
       return;
     }
 
+    if (s.tool?.startsWith('con_')) {
+      if (kind === 'down') conPick(px);
+      else if (kind === 'move') { const type = CON[s.tool]; conStatus(type); }
+      return;
+    }
+    if (s.tool === 'offset' || s.tool === 'sfillet') {
+      const sn0 = snapPoint(ev, raw);
+      s.cursor = sn0.pt;
+      if (kind === 'move') { if (s.pts?.length) updateDimbox(); redraw(); return; }
+      if (kind !== 'down') return;
+      if (s.tool === 'offset' ? s.off : s.fil) { commit(); return; }
+      if (s.tool === 'offset') {
+        const i = hitShape(px);
+        if (i < 0) return;
+        if (shapes()[i].t === 'path' && shapes()[i].open) { app.toast?.('Offset works on closed shapes.'); return; }
+        s.off = { idx: i };
+      } else {
+        const h = hitKeyPoint(px);
+        const sh = h && shapes()[h.s];
+        if (!sh || !['rect', 'path'].includes(sh.t) || h.k === 'ctr') { app.toast?.('Click a corner of a rectangle or path.'); return; }
+        s.fil = { s: h.s, vi: vertexIndex(h.k) };
+      }
+      s.pts = [[0, 0]]; s.dim = { typed: {} };
+      openDimbox(); redraw();
+      return;
+    }
+    if (s.tool === 'dim') {
+      if (kind === 'down') { const i = hitShape(px); if (i >= 0) { s.sel = i; app.setTool('select'); setTimeout(() => labels[0]?.inp.focus(), 40); } }
+      return;
+    }
+
     // drawing tools
     const sn = snapPoint(ev, raw);
     if (kind === 'move') {
@@ -494,7 +690,11 @@ export function createSketchUI(app) {
     if (s.tool === 'line' || s.tool === 'path') {
       if (!s.pts) { s.pts = [sn.pt]; openDimbox(); redraw(); return; }
       const first = s.pts[0];
-      if (s.tool === 'line' && s.pts.length >= 3 && Math.hypot(first[0] - sn.pt[0], first[1] - sn.pt[1]) < 1e-6) { finishPath(); return; }
+      if (s.tool === 'line' && s.pts.length >= 3 && Math.hypot(first[0] - sn.pt[0], first[1] - sn.pt[1]) < 1e-6) {
+        const np = s.pts.length, last = s.pts[np - 1];
+        if (s.arcMode) { const t = endTangent(s.pts[np - 2], last, s.pts[np - 2][2] || 0); s.pts[np - 1] = [last[0], last[1], bulgeFromTangent(last, t, first)]; }
+        finishPath(); return;
+      }
       commit(sn.pt);
       return;
     }
@@ -520,6 +720,12 @@ export function createSketchUI(app) {
       }
       return false;
     }
+    if ((s.tool === 'line' || s.tool === 'path') && s.pts?.length >= 2 && (e.key === 'a' || e.key === 'A') && !e.metaKey && !e.ctrlKey) {
+      s.arcMode = !s.arcMode;
+      document.getElementById('statusbar').textContent = s.arcMode ? 'Tangent arc — press A to go back to lines' : 'Line mode';
+      redraw();
+      return true;
+    }
     if (s.pts?.length && dimbox && /^[0-9.\-]$/.test(e.key) && !e.metaKey && !e.ctrlKey) {
       const inp = [...dimbox.querySelectorAll('input')].find((i) => s.dim.typed[i.dataset.k] == null) || dimbox.querySelector('input');
       inp.focus(); inp.value = e.key; inp.dispatchEvent(new Event('input'));
@@ -539,17 +745,18 @@ export function createSketchUI(app) {
     if (!s || s.picking) return;
     if (s.pts?.length) updateDimbox();
     syncLabels();
+    syncBadges();
     const st = stepNow();
     if (s.gridStep !== st) { s.gridStep = st; app.rebuildGrid(st); }
   }
   function activate() {
     const s = S();
-    s.pts = null; s.dim = { typed: {} }; s.hover = -1; s.cursor = null;
+    s.pts = null; s.dim = { typed: {} }; s.hover = -1; s.cursor = null; s.arcMode = false; s.conA = null; s.off = null; s.fil = null;
     drag = null; lastInfer = null;
     closeDimbox(); clearLabels(); redraw();
     canvas.style.cursor = '';
   }
-  function deactivate() { closeDimbox(); clearLabels(); drag = null; lastInfer = null; canvas.style.cursor = ''; vp.overlay.clear(); }
+  function deactivate() { badges.forEach((b) => b.el.remove()); badges = []; closeDimbox(); clearLabels(); drag = null; lastInfer = null; canvas.style.cursor = ''; vp.overlay.clear(); }
 
   return { pointer, key, dblclick, finishPath, cancelShape, activate, deactivate, frame, redraw, stepNow, refreshLabels: () => { clearLabels(); } };
 }

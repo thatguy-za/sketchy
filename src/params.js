@@ -2,6 +2,7 @@
 // stored in feature.exprs[path]; the numeric result is substituted before the kernel replays the timeline.
 // Lengths are millimetres; angles are degrees (trig functions take/return degrees).
 
+import { lenF } from './units.js';
 const UNITS = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8, deg: 1, '°': 1 };
 const FUNCS = {
   sin: (x) => Math.sin((x * Math.PI) / 180), cos: (x) => Math.cos((x * Math.PI) / 180), tan: (x) => Math.tan((x * Math.PI) / 180),
@@ -30,8 +31,13 @@ function tokenize(src) {
   return toks;
 }
 
-/** Evaluate an expression string. `scope(name)` returns a parameter's numeric value or undefined. */
-export function evalExpr(src, scope = () => undefined) {
+/**
+ * Evaluate an expression string. `scope(name)` returns a parameter's value (millimetres for lengths) or undefined.
+ * kind 'len': plain numbers mean document units (so "5" is 5 in an inch document); 'num': plain numbers are unitless.
+ * Explicit unit suffixes (mm, cm, m, in, ft) always win.
+ */
+export function evalExpr(src, scope = () => undefined, kind = 'len') {
+  let numScale = kind === 'len' ? lenF() : 1;
   const toks = tokenize(String(src));
   if (!toks.length) throw new Error('Empty expression');
   let p = 0;
@@ -54,13 +60,19 @@ export function evalExpr(src, scope = () => undefined) {
   function primary() {
     const t = toks[p++];
     if (!t) throw new Error('Unexpected end');
-    if (t.t === 'num') return t.v;
+    if (t.t === 'num') {
+      const nx = peek();
+      if (nx && nx.t === 'id' && nx.v in UNITS) { p++; return t.v * UNITS[nx.v]; }
+      return t.v * numScale;
+    }
     if (t.t === 'op' && t.v === '(') { const v = expr(); if (!eat(')')) throw new Error('Missing )'); return v; }
     if (t.t === 'id') {
       if (peek() && peek().t === 'op' && peek().v === '(' && FUNCS[t.v]) {
         p++;
         const args = [];
+        const keep = numScale; numScale = 1; // function arguments are unitless
         if (!eat(')')) { do args.push(expr()); while (eat(',')); if (!eat(')')) throw new Error('Missing )'); }
+        numScale = keep;
         const r = FUNCS[t.v](...args);
         if (!Number.isFinite(r)) throw new Error(`${t.v}() is not defined for that input`);
         return r;
@@ -89,7 +101,7 @@ export function resolveParams(list) {
     if (state[name] === 'busy') throw new Error(`Circular reference via "${name}"`);
     if (errors[name]) throw new Error(`"${name}" has an error`);
     state[name] = 'busy';
-    try { values[name] = evalExpr(d.expr, get); }
+    try { values[name] = evalExpr(d.expr, get, d.unit === 'number' || d.unit === 'angle' ? 'num' : 'len'); }
     catch (e) { errors[name] = e.message; throw e; }
     finally { state[name] = 'done'; }
     return values[name];
@@ -104,14 +116,14 @@ export const isPlainNumber = (s) => /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test
  * Substitute expressions of a feature into numeric params.
  * exprs keys: "distance" or "pos.1" (index into a vector). Returns {params, error}.
  */
-export function resolveFeature(f, scope) {
+export function resolveFeature(f, scope, kindOf) {
   if (!f.exprs || !Object.keys(f.exprs).length) return { params: f.params };
   const params = { ...f.params };
   let error = null;
   for (const [path, src] of Object.entries(f.exprs)) {
     const [key, idx] = path.split('.');
     try {
-      const v = evalExpr(src, scope);
+      const v = evalExpr(src, scope, kindOf ? kindOf(f, path) : 'len');
       if (idx === undefined) params[key] = v;
       else { if (!Array.isArray(params[key]) || params[key] === f.params[key]) params[key] = [...f.params[key]]; params[key][+idx] = v; }
     } catch (e) { error = error || `${path}: ${e.message}`; }

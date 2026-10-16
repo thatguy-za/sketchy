@@ -2,6 +2,7 @@
 import Module from 'manifold-3d';
 import wasmUrl from 'manifold-3d/manifold.wasm?url';
 import { findEdgeChains, matchChain, planarFace } from './edges.js';
+import { pathPolygon, openLoops } from './sketchgeo.js';
 import { ringMesh, loftRings, sweepRings, helixRings, smoothPath, axisFrame, sub, add, scl, dot, len, unit } from './solids.js';
 
 let K;
@@ -39,7 +40,7 @@ export function shapeToPolygon(s) {
       return [s.cx + Math.cos(a) * s.r, s.cy + Math.sin(a) * s.r];
     });
   }
-  if (s.t === 'path') return s.pts;
+  if (s.t === 'path') return pathPolygon(s.pts, !s.open);
   if (s.t === 'rrect') {
     const r = Math.max(0, Math.min(s.r || 0, s.w / 2, s.h / 2));
     if (r < 1e-6) return [[s.x, s.y], [s.x + s.w, s.y], [s.x + s.w, s.y + s.h], [s.x, s.y + s.h]];
@@ -79,6 +80,12 @@ function shapeToCS(s, t) {
 function profileCells(f, t) {
   const items = [];
   f.params.shapes.forEach((s, i) => { if (s.open) return; const cs = shapeToCS(s, t); if (cs && cs.area() > 1e-9) items.push({ i, cs, area: cs.area() }); });
+  // closed loops formed by open lines/arcs that meet end to end are profiles too
+  openLoops(f.params.shapes).forEach((poly, k) => {
+    const a = poly.reduce((acc, [x1, y1], i) => { const [x2, y2] = poly[(i + 1) % poly.length]; return acc + (x1 * y2 - x2 * y1); }, 0);
+    const cs = t(K.CrossSection.ofPolygons([a < 0 ? [...poly].reverse() : poly]));
+    if (cs.area() > 1e-9) items.push({ i: 1000 + k, cs, area: cs.area() });
+  });
   const eps = (a) => Math.max(1e-7, 1e-7 * a);
   let cells = [];
   for (const { i, cs } of items) {
@@ -121,6 +128,19 @@ export function profileSection(f, ids, t) {
   return chosen.length === 1 ? chosen[0].cs : t(K.CrossSection.union(chosen.map((c) => c.cs)));
 }
 export const sketchSection = (f, t) => profileSection(f, null, t);
+
+/** Offset a closed polygon by d (outward positive). Returns the largest resulting polygon or null. */
+export function offsetPolygon(poly, d) {
+  const garbage = [];
+  const t = (o) => { garbage.push(o); return o; };
+  try {
+    const a = poly.reduce((acc, [x1, y1], i) => { const [x2, y2] = poly[(i + 1) % poly.length]; return acc + (x1 * y2 - x2 * y1); }, 0);
+    const cs = t(K.CrossSection.ofPolygons([a < 0 ? [...poly].reverse() : poly]));
+    const polys = t(cs.offset(d, 'Miter', 2)).toPolygons();
+    const area = (pl) => Math.abs(pl.reduce((acc, [x1, y1], i) => { const [x2, y2] = pl[(i + 1) % pl.length]; return acc + (x1 * y2 - x2 * y1); }, 0));
+    return polys.length ? polys.reduce((m, q) => (area(q) > area(m) ? q : m)) : null;
+  } catch { return null; } finally { garbage.forEach((o) => { try { o.delete(); } catch { /* shared */ } }); }
+}
 
 /** Plain-data profile regions for the UI: [{id, defaultOn, area, polys: [[[x,y]..]..]}]. */
 export function profilesOf(f) {
@@ -395,6 +415,20 @@ const vcross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
 const axisVec = (a) => ({ X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] }[a] || [0, 0, 1]);
 const rotAbout = (m, o, euler, t) => t(t(t(m.translate(o.map((c) => -c))).rotate(euler)).translate(o));
 
+/** Pairwise overlap volumes (mm³) between result bodies. */
+export function interference(bodies) {
+  const ms = bodies.map((b) => { try { return new K.Manifold(new K.Mesh({ numProp: 3, vertProperties: b.verts, triVerts: b.tris })); } catch { return null; } });
+  const out = [];
+  for (let i = 0; i < ms.length; i++) for (let j = i + 1; j < ms.length; j++) {
+    if (!ms[i] || !ms[j]) continue;
+    const x = K.Manifold.intersection(ms[i], ms[j]);
+    const v = x.isEmpty() ? 0 : x.volume();
+    x.delete();
+    if (v > 1e-6) out.push({ a: bodies[i], b: bodies[j], volume: v });
+  }
+  ms.forEach((m) => m && m.delete());
+  return out;
+}
 export function bboxOf(m) {
   const b = m.boundingBox();
   return { min: b.min, max: b.max };
@@ -549,6 +583,42 @@ export function rebuild(features, count, opts = {}) {
         case 'pattern': {
           const b = getBody(p.body);
           let acc = b.m;
+          if (p.kind === 'path') {
+            const sk = sketches[p.path];
+            if (!sk) throw new Error('Choose a path sketch');
+            sketchUsed.add(sk.id);
+            const { pts, closed } = sketchPath3D(sk);
+            const P = closed ? [...pts, pts[0]] : pts;
+            const seg = [0];
+            for (let i = 1; i < P.length; i++) seg.push(seg[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1], P[i][2] - P[i - 1][2]));
+            const total = seg[seg.length - 1];
+            if (!(total > 0)) throw new Error('Path has no length');
+            const at = (d) => { let i = 1; while (i < seg.length - 1 && seg[i] < d) i++; const u = (d - seg[i - 1]) / ((seg[i] - seg[i - 1]) || 1); return P[i - 1].map((v, k) => v + (P[i][k] - v) * u); };
+            const start = at(0), n = Math.max(2, p.count | 0);
+            for (let k = 1; k < n; k++) {
+              const q = at((total * k) / (closed ? n : n - 1));
+              acc = t(acc.add(t(b.m.translate([q[0] - start[0], q[1] - start[1], q[2] - start[2]]))));
+            }
+            b.m = acc;
+            break;
+          }
+          if (p.kind === 'face') {
+            if (!p.face) throw new Error('Click a flat face to pattern across');
+            const bb = getBody(p.faceBody || p.body);
+            const me = bb.m.getMesh();
+            const verts = me.numProp === 3 ? me.vertProperties : me.vertProperties.filter((_, k) => k % me.numProp < 3);
+            const tri = findFaceTri(verts, me.triVerts, p.face.point, p.face.normal);
+            if (tri < 0) throw new Error('The picked face no longer exists — pick it again');
+            const M = axisFrame(p.face.point, p.face.normal);
+            const U = [M[0], M[1], M[2]], V = [M[4], M[5], M[6]];
+            for (let i = 0; i < Math.max(1, p.countU | 0); i++) for (let j = 0; j < Math.max(1, p.countV | 0); j++) {
+              if (!i && !j) continue;
+              const d = [0, 1, 2].map((k) => U[k] * p.spacingU * i + V[k] * p.spacingV * j);
+              acc = t(acc.add(t(b.m.translate(d))));
+            }
+            b.m = acc;
+            break;
+          }
           for (let k = 1; k < p.count; k++) {
             let m;
             if (p.kind === 'linear') m = t(b.m.translate(p.spacing.map((v) => v * k)));
@@ -654,7 +724,12 @@ export function rebuild(features, count, opts = {}) {
         case 'shell': {
           const b = getBody(p.body);
           if (!(p.thickness > 0)) throw new Error('Thickness must be positive');
-          const inner = t(b.m.minkowskiDifference(t(K.Manifold.sphere(p.thickness, 12))));
+          const side = p.side || 'inside';
+          const sph = (r) => t(K.Manifold.sphere(r, 12));
+          let inner, outer = b.m;
+          if (side === 'inside') inner = t(b.m.minkowskiDifference(sph(p.thickness)));
+          else if (side === 'outside') { inner = b.m; outer = t(b.m.minkowskiSum(sph(p.thickness))); }
+          else { inner = t(b.m.minkowskiDifference(sph(p.thickness / 2))); outer = t(b.m.minkowskiSum(sph(p.thickness / 2))); }
           if (inner.isEmpty()) throw new Error('Wall thickness is too large for this body');
           let cavity = inner;
           for (const o of p.open || []) {
@@ -663,7 +738,7 @@ export function rebuild(features, count, opts = {}) {
             const prism = t(t(cs.extrude(p.thickness + 2 + 0.2)).translate([0, 0, -p.thickness - 0.2]));
             cavity = t(cavity.add(t(prism.transform(M))));
           }
-          b.m = t(b.m.subtract(cavity));
+          b.m = t(outer.subtract(cavity));
           break;
         }
         case 'split': {

@@ -88,11 +88,17 @@ export const FEATURES = {
   },
   pattern: {
     label: 'Pattern', icon: 'pattern', type: 'pattern',
-    make: (ctx) => ({ body: ctx.selected || '', kind: 'linear', count: 3, spacing: [30, 0, 0], axis: 'Z', angle: 360 }),
+    make: (ctx) => ({ body: ctx.selected || '', kind: 'linear', count: 3, spacing: [30, 0, 0], axis: 'Z', angle: 360, path: ctx.sketches.at(-1) || '', face: null, countU: 3, countV: 2, spacingU: 20, spacingV: 20 }),
     fields: [
       { key: 'body', label: 'Body', type: 'body' },
-      { key: 'kind', label: 'Type', type: 'select', options: [['linear', 'Linear'], ['circular', 'Circular']] },
-      { key: 'count', label: 'Quantity', type: 'num', min: 2, step: 1 },
+      { key: 'kind', label: 'Type', type: 'select', options: [['linear', 'Linear'], ['circular', 'Circular'], ['path', 'Along a path'], ['face', 'On a face']] },
+      { key: 'path', label: 'Path (sketch)', type: 'sketch', show: (p) => p.kind === 'path' },
+      { key: 'face', label: 'Face', type: 'face', bodyKey: 'body', show: (p) => p.kind === 'face' },
+      { key: 'countU', label: 'Columns', type: 'num', min: 1, step: 1, show: (p) => p.kind === 'face' },
+      { key: 'spacingU', label: 'Column spacing', type: 'num', show: (p) => p.kind === 'face' },
+      { key: 'countV', label: 'Rows', type: 'num', min: 1, step: 1, show: (p) => p.kind === 'face' },
+      { key: 'spacingV', label: 'Row spacing', type: 'num', show: (p) => p.kind === 'face' },
+      { key: 'count', label: 'Quantity', type: 'num', min: 2, step: 1, show: (p) => p.kind !== 'face' },
       { key: 'spacing', label: 'Spacing', type: 'vec3', show: (p) => p.kind === 'linear' },
       { key: 'axis', label: 'Axis', type: 'select', options: [['X', 'X'], ['Y', 'Y'], ['Z', 'Z']], show: (p) => p.kind === 'circular' },
       { key: 'angle', label: 'Total angle (°)', type: 'num', show: (p) => p.kind === 'circular' },
@@ -199,9 +205,10 @@ export const FEATURES = {
   },
   shell: {
     label: 'Shell', icon: 'shell', type: 'shell', needsBody: true,
-    make: (ctx) => ({ body: ctx.selected || '', thickness: 2, open: [] }),
+    make: (ctx) => ({ body: ctx.selected || '', thickness: 2, open: [], side: 'inside' }),
     fields: [
       { key: 'body', label: 'Body', type: 'body' },
+      { key: 'side', label: 'Direction', type: 'select', options: [['inside', 'Inside'], ['outside', 'Outside'], ['both', 'Both (centred)']] },
       { key: 'thickness', label: 'Wall thickness', type: 'num', min: 0.05, step: 0.5 },
       { key: 'open', label: 'Open faces', type: 'faces' },
     ],
@@ -269,4 +276,17 @@ export const FEATURES = {
 export function defOf(f) {
   if (f.type === 'primitive') return FEATURES[f.params.shape];
   return FEATURES[f.type];
+}
+
+/** 'len' (stored in mm, shown in document units), 'deg' (degrees) or 'num' (unitless) for a feature field. */
+export function fieldKind(f, key) {
+  const t = f.type, p = f.params || {};
+  if (t === 'move' && key === 'r') return 'deg';
+  if (t === 'joint') {
+    if (key === 'value') return ['revolute', 'cylindrical'].includes(p.jtype) ? 'deg' : 'len';
+    if (key === 'value3' || key === 'rot') return 'deg';
+  }
+  if (['scaleTop', 'factor', 's', 'count', 'turns', 'dir', 'countU', 'countV'].includes(key)) return 'num';
+  if (['taper', 'twist', 'angle', 'cskAngle'].includes(key)) return 'deg';
+  return 'len';
 }

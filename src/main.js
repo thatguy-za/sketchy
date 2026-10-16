@@ -1,16 +1,22 @@
 import './style.css';
 import * as THREE from 'three';
 import { icon } from './icons.js';
-import { initKernel, rebuild, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri } from './kernel.js';
-import { FEATURES, defOf, LAST } from './features.js';
+import { initKernel, rebuild, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
+import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { parseSTL, writeSTL } from './stl.js';
+import { parseSVG, parseDXF, textShapes } from './import2d.js';
+import { repairSoup, describeRepair } from './meshrepair.js';
+import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
 import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, planarFace, norm as vnorm } from './edges.js';
-import { acct, call, refreshAccount, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, modal } from './account.js';
+import { acct, call, refreshAccount, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showChangePassword, showAdmin } from './account.js';
 import { evalExpr, resolveParams, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
+import { UNIT_TABLE, UNIT_NAMES, setUnits, getUnits, lenF, dispStr, fmtLen, fmtArea, fmtVolume, niceStep } from './units.js';
 import { findEdgeChains as chainsOf } from './edges.js';
 import { ficon, uicon } from './ficons.js';
 import { createSketchUI } from './sketchui.js';
+import { resolveSketch } from './sketchdims.js';
+import { CON_GLYPH, CON_LABEL } from './sketchcons.js';
 import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR, WORKSPACES } from './commands.js';
 
 const $ = (s) => document.querySelector(s);
@@ -21,7 +27,7 @@ const PRINTERS = {
 };
 
 // ------------------------------------------------------------------ state
-const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {} });
+const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: 'mm' });
 let doc = blankDoc();
 let undoStack = [], redoStack = [];
 let result = { bodies: [], errors: {}, snaps: [], sketchUsed: new Set() };
@@ -80,9 +86,15 @@ function refreshNow() {
   paramState = resolveParams(doc.params || []);
   const evalErr = {};
   const feats = doc.features.map((f) => {
-    const r = resolveFeature(f, (n) => paramState.values[n]);
+    const r = resolveFeature(f, (n) => paramState.values[n], (ff, path) => (fieldKind(ff, path.split('.')[0]) === 'len' ? 'len' : 'num'));
     if (r.error) evalErr[f.id] = r.error;
-    return r.params === f.params ? f : { ...f, params: r.params };
+    let ff = r.params === f.params ? f : { ...f, params: r.params };
+    if (f.type === 'sketch') {
+      const rs = resolveSketch(ff, (n) => paramState.values[n]);
+      if (rs.error) evalErr[f.id] ||= rs.error;
+      if (rs.params !== ff.params) ff = { ...ff, params: rs.params };
+    }
+    return ff;
   });
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
   try { result = rebuild(feats, limit(), { capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null }); }
@@ -108,8 +120,9 @@ function refreshNow() {
 
 // ---- sketch profile regions
 function profilesFor(sk) {
-  let r = profileCache.get(sk);
-  if (!r) { try { r = profilesOf(sk); } catch { r = []; } profileCache.set(sk, r); }
+  const params = resolvedMap[sk.id] || sk.params;
+  let r = profileCache.get(params);
+  if (!r) { try { r = profilesOf({ ...sk, params }); } catch { r = []; } profileCache.set(params, r); }
   return r;
 }
 function effectiveProfiles(df, sk) {
@@ -207,7 +220,7 @@ function updateManip() {
     vp.setManip(ch.pts[k], dir, val);
     box.hidden = false;
     const inp2 = box.querySelector('input');
-    if (document.activeElement !== inp2) inp2.value = df.exprs?.[m.key] ?? String(+val.toFixed(3));
+    if (document.activeElement !== inp2) inp2.value = df.exprs?.[m.key] ?? dispStr(val);
     return;
   }
   const sk = doc.features.find((k) => k.id === df.params[m.sketch]);
@@ -226,7 +239,7 @@ function updateManip() {
   vp.setManip(base, fr.n, rp.symmetric ? dist / 2 : dist);
   box.hidden = false;
   const inp = box.querySelector('input');
-  if (document.activeElement !== inp) inp.value = df.exprs?.[m.key] ?? String(+dist.toFixed(3));
+  if (document.activeElement !== inp) inp.value = df.exprs?.[m.key] ?? dispStr(dist);
 }
 function bindManip() {
   const box = $('#manip-label'), inp = box.querySelector('input'), cv = $('#gl');
@@ -255,7 +268,7 @@ function bindManip() {
       let d = vp.manipDistance(ev);
       if (d == null) return;
       if (!ev.shiftKey) d = Math.round(d * 2) / 2;
-      commitNumber(dialog.index, m.key, String(+(sym ? d * 2 : d).toFixed(3)), fld);
+      commitNumber(dialog.index, m.key, dispStr(sym ? d * 2 : d, 6), fld);
     };
     const up = () => { removeEventListener('pointermove', move); vp.controls.enabled = true; renderDialog(); };
     addEventListener('pointermove', move);
@@ -284,10 +297,22 @@ function toggleEdge(entry) {
   renderDialog();
 }
 
+const paramShow = (p, v) => (v === undefined ? '' : p.unit === 'number' ? String(+v.toFixed(4)) : p.unit === 'angle' ? `${+v.toFixed(4)}°` : fmtLen(v));
+function unitsMenu(anchor) {
+  const r = (anchor || $('#tree')).getBoundingClientRect();
+  showMenu(r.left, r.bottom + 2, [{ head: 'DOCUMENT UNITS' }, ...Object.keys(UNIT_TABLE).map((u) => ({ label: `${UNIT_NAMES[u]} (${u})`, check: getUnits() === u, run: () => setDocUnits(u) }))]);
+}
+function setDocUnits(u) {
+  if (u === getUnits()) return;
+  doc.units = u; setUnits(u); markDirty();
+  if (dialog) renderDialog();
+  renderTree(); renderStatus(); renderSketchPanel?.(); refresh();
+  toast(`Units: ${UNIT_NAMES[u]}. Everything is stored in millimetres, so existing geometry doesn't change.`);
+}
 function renderStatus() {
   const n = result.bodies.length;
   const tris = result.bodies.reduce((a, b) => a + b.tris.length / 3, 0);
-  $('#statusbar').textContent = `${n} ${n === 1 ? 'body' : 'bodies'} · ${tris.toLocaleString()} triangles · mm`;
+  $('#statusbar').textContent = `${n} ${n === 1 ? 'body' : 'bodies'} · ${tris.toLocaleString()} triangles · ${getUnits()}`;
 }
 
 // ------------------------------------------------------------------ toolbar (Fusion-style)
@@ -298,6 +323,10 @@ const CUSTOM = {
   importstl: () => $('#file-stl').click(),
   measure: () => startMeasure('dist'), angle: () => startMeasure('angle'), edgelen: () => startMeasure('edge'), faces: () => startMeasure('faces'),
   properties: () => showInfo(),
+  interference: () => showInterference(),
+  drivejoints: () => showDriveJoints(),
+  svg: () => pick2D('.svg,image/svg+xml'), dxf: () => pick2D('.dxf'), sk_text: () => showTextDialog(),
+  asbuilt: () => startAsBuilt(),
   print3d: () => exportSTL(false), print3dsel: () => exportSTL(true),
   printer: () => printerMenu($('#ribbon')),
   buildvol: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); },
@@ -309,7 +338,7 @@ function runCommand(id, ev) {
   if (c.off) return toast(`${c.label} isn't available in Sketchy yet.`);
   if (c.sk) { if (sketch && !sketch.picking) setSketchTool(c.sk); return; }
   if (c.skAction === 'delete') return sketchDeleteSelected();
-  if (sketch && !['select', 'finishsketch', 'cancelpick'].includes(id)) return toast('Finish the sketch first.');
+  if (sketch && !['select', 'finishsketch', 'cancelpick', 'svg', 'dxf', 'sk_text'].includes(id)) return toast('Finish the sketch first.');
   if (id === 'remove') { lastCmd = id; return deleteSelection(); }
   if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
   if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
@@ -402,14 +431,14 @@ function renderTree() {
   R(0, doc.name === 'Untitled' ? '(Unsaved)' : doc.name, { key: 'root', kind: 'comp', twist: true, root: true, eye: result.bodies.length ? visBodies > 0 : true,
     onEye: () => { const hide = visBodies > 0; result.bodies.forEach((b) => (hide ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } });
   if (open('root')) {
-    folder(1, 'docset', 'Document Settings', 'gear', {}, () => { R(2, 'Units: mm, g', { kind: 'file', dim: true }); R(2, 'Part Design', { kind: 'body', dim: true }); });
+    folder(1, 'docset', 'Document Settings', 'gear', {}, () => { R(2, `Units: ${getUnits()}, g`, { kind: 'file', click: (ev) => unitsMenu(ev.currentTarget) }); R(2, 'Part Design', { kind: 'body', dim: true }); });
     folder(1, 'views', 'Named Views', 'folder', {}, () => R(2, 'Home', { kind: 'camera', click: () => vp.home() }));
     folder(1, 'origin', 'Origin', 'folder', { eye: originVis, onEye: () => { originVis = !originVis; vp.setOriginVisible(originVis); renderTree(); } }, () => {
       for (const n of ['XY', 'XZ', 'YZ']) R(2, n, { kind: 'plane', dim: true });
       for (const n of ['X', 'Y', 'Z']) R(2, n, { kind: 'axis', dim: true });
       R(2, 'Origin', { kind: 'point', dim: true });
     });
-    if ((doc.params || []).length) folder(1, 'params', 'Parameters', 'gear', {}, () => doc.params.forEach((p) => R(2, p.name, { kind: 'file', val: paramState.errors[p.name] ? '⚠' : `= ${+paramState.values[p.name]?.toFixed(4)}`, click: openParameters })));
+    if ((doc.params || []).length) folder(1, 'params', 'Parameters', 'gear', {}, () => doc.params.forEach((p) => R(2, p.name, { kind: 'file', val: paramState.errors[p.name] ? '⚠' : `= ${paramShow(p, paramState.values[p.name])}`, click: openParameters })));
     if (result.bodies.length) {
       const anyVis = visBodies > 0;
       folder(1, 'bodies', 'Bodies', 'folder', { eye: anyVis, onEye: () => { result.bodies.forEach((b) => (anyVis ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } }, () => result.bodies.forEach((b) => {
@@ -744,9 +773,13 @@ function fileMenu() {
     { label: 'Save As…', uicon: 'save', run: () => save(true) },
     { label: 'Export project file', uicon: 'upload', run: downloadProject },
     { sep: true },
+    { label: `Document units: ${getUnits()}…`, uicon: 'gear', run: () => unitsMenu($('#btn-menu')) },
     { label: 'Insert Mesh (STL)…', ficon: 'insertmesh', run: () => $('#file-stl').click() },
     { label: 'Export STL (visible bodies)', ficon: 'threed', run: () => exportSTL(false) },
     { label: 'Export STL (selected)', ficon: 'threed', disabled: !vp.selected.size, run: () => exportSTL(true) },
+    { label: 'Export 3MF (visible, with colours)', ficon: 'threed', run: () => exportMesh('3mf') },
+    { label: 'Export OBJ (visible bodies)', ficon: 'threed', run: () => exportMesh('obj') },
+    { label: 'Export STEP (faceted mesh)', ficon: 'threed', run: () => exportMesh('step') },
   ]);
 }
 
@@ -841,23 +874,25 @@ const resolvedAt = (f, path) => { const [k, i] = path.split('.'); const v = reso
 /** Set a numeric field from text that may be a plain number or an expression over user parameters. */
 function commitNumber(i, path, text, fld) {
   const f = doc.features[i];
+  const key = path.split('.')[0];
+  const isLen = fieldKind(f, key) === 'len';
   let val, expr = null;
   if (isPlainNumber(text)) {
-    val = parseFloat(text);
+    val = parseFloat(text) * (isLen ? lenF() : 1);
     if (fld.min !== undefined) val = Math.max(fld.min, val);
     if (fld.max !== undefined) val = Math.min(fld.max, val);
   } else {
-    try { val = evalExpr(text, (n) => paramState.values[n]); expr = text.trim(); }
+    try { val = evalExpr(text, (n) => paramState.values[n], isLen ? 'len' : 'num'); expr = text.trim(); }
     catch (e) { return { ok: false, err: e.message }; }
   }
-  const [key, idx] = path.split('.');
+  const [k2, idx] = path.split('.');
   const params = { ...f.params };
-  if (idx !== undefined) { const arr = [...params[key]]; arr[+idx] = val; params[key] = arr; } else params[key] = val;
+  if (idx !== undefined) { const arr = [...params[k2]]; arr[+idx] = val; params[k2] = arr; } else params[k2] = val;
   const exprs = { ...(f.exprs || {}) };
   if (expr) exprs[path] = expr; else delete exprs[path];
   doc.features[i] = { ...f, params, exprs: Object.keys(exprs).length ? exprs : undefined };
   refresh();
-  return { ok: true, value: val, expr };
+  return { ok: true, value: val, expr, isLen };
 }
 /** Replace several params at once (viewport picking, gizmo); drops expressions for those keys. */
 function patchParams(i, patch) {
@@ -896,17 +931,19 @@ function renderDialog() {
       const n = document.createElement('input');
       n.type = 'text'; n.inputMode = 'decimal'; n.className = 'num'; n.autocomplete = 'off'; n.spellcheck = false;
       const expr = f.exprs?.[path];
-      n.value = expr ?? String(+(+v).toFixed(4));
+      const isLen = fieldKind(f, path.split('.')[0]) === 'len';
+      const show = (x) => (isLen ? `${dispStr(x)} ${getUnits()}` : String(+(+x).toFixed(4)));
+      n.value = expr ?? (isLen ? dispStr(v) : String(+(+v).toFixed(4)));
       const calc = document.createElement('small');
       calc.className = 'calc';
-      if (expr) { const rv = resolvedAt(f, path); calc.textContent = typeof rv === 'number' ? `= ${+rv.toFixed(4)}` : ''; }
+      if (expr) { const rv = resolvedAt(f, path); calc.textContent = typeof rv === 'number' ? `= ${show(rv)}` : ''; }
       n.oninput = () => {
         const txt = n.value.trim();
         if (!txt) return;
         const r = commitNumber(idx, path, txt, fld);
         n.classList.toggle('bad', !r.ok);
         n.title = r.ok ? '' : r.err;
-        calc.textContent = r.ok && r.expr ? `= ${+r.value.toFixed(4)}` : r.ok ? '' : r.err;
+        calc.textContent = r.ok && r.expr ? `= ${show(r.value)}` : r.ok ? '' : r.err;
         if (r.ok && (fld.key === 'kind' || def.gizmo)) setupGizmo();
       };
       n.onkeydown = (e) => {
@@ -914,7 +951,7 @@ function renderDialog() {
         const cur = parseFloat(n.value);
         if (isNaN(cur) || !isPlainNumber(n.value)) return;
         e.preventDefault();
-        n.value = String(+(cur + (e.key === 'ArrowUp' ? 1 : -1) * (fld.step ?? 1)).toFixed(4));
+        n.value = String(+(cur + (e.key === 'ArrowUp' ? 1 : -1) * (isLen ? niceStep(fld.step ?? 1) : fld.step ?? 1)).toFixed(6));
         n.oninput();
       };
       box.append(n, calc);
@@ -1143,9 +1180,18 @@ function enterSketch(index, isNew, plane) {
   renderSketchPanel(); setSketchTool(sketch.tool); refresh();
 }
 const curSketch = () => doc.features[sketch.index];
+function setSketchCons(cons) {
+  const f = curSketch();
+  const nf = { ...f, params: { ...f.params, cons } };
+  doc.features[sketch.index] = nf;
+  resolvedMap[nf.id] = resolveSketch(nf, (n) => paramState.values[n]).params;
+  refresh(); SU?.redraw(); renderSketchPanel(); drawSketches();
+}
 function setSketchShapes(shapes, push = true) {
   const f = curSketch();
-  doc.features[sketch.index] = { ...f, params: { ...f.params, shapes } };
+  const nf = { ...f, params: { ...f.params, shapes } };
+  doc.features[sketch.index] = nf;
+  resolvedMap[nf.id] = resolveSketch(nf, (n) => paramState.values[n]).params;
   refresh();
   SU?.redraw();
 }
@@ -1164,7 +1210,7 @@ function buildSketchGrid(step = SU?.stepNow() ?? 1) {
 function setSketchTool(t) {
   sketch.tool = t; sketch.pts = null; sketch.sel = t === 'select' ? sketch.sel : -1; sketch.hover = -1;
   SU.activate();
-  const hints = { select: 'Click a shape to select it · drag to move · drag handles to resize · click a dimension to type a value', rect: 'Click the first corner, then the opposite corner · type a width/height and press Tab / Enter', crect: 'Click the centre, then a corner · type a width/height', rrect: 'Click two corners · type W, H and a corner radius R', slot: 'Click the first centre, then the second · type a length and width', ellipse: 'Click the centre, then drag the radii · type A and B', circle: 'Click the centre, then drag out the radius · type a diameter and press Enter', ngon: 'Click the centre, then a vertex · type a radius and press Enter', path: 'Click points of an open path (sweep / rib centre-line) · Enter or double-click to finish', line: 'Click points · type a length and angle · click the first point, press Enter or double-click to close' };
+  const hints = { offset: 'Offset: click a closed shape, type a distance (negative = inward), press Enter', sfillet: 'Fillet: click a corner of a rectangle or path, type a radius, press Enter', dim: 'Click a shape, then type a value or an expression like width/2', con_coin: 'Coincident: click the point to move, then the point to meet', con_h: 'Horizontal: click a line segment', con_v: 'Vertical: click a line segment', con_conc: 'Concentric: click two shapes', con_equal: 'Equal: click two segments or two circles', con_par: 'Parallel: click the segment to adjust, then the reference', con_perp: 'Perpendicular: click the segment to adjust, then the reference', select: 'Click a shape to select it · drag to move · drag handles to resize · click a dimension to type a value', arc: 'Click the start point, the end point, then a point on the arc · type a radius', rect: 'Click the first corner, then the opposite corner · type a width/height and press Tab / Enter', crect: 'Click the centre, then a corner · type a width/height', rrect: 'Click two corners · type W, H and a corner radius R', slot: 'Click the first centre, then the second · type a length and width', ellipse: 'Click the centre, then drag the radii · type A and B', circle: 'Click the centre, then drag out the radius · type a diameter and press Enter', ngon: 'Click the centre, then a vertex · type a radius and press Enter', path: 'Click points of an open path · press A for a tangent arc · Enter or double-click to finish', line: 'Click points · press A for a tangent arc · type a length and angle · click the first point, press Enter or double-click to close' };
   $('#hud').innerHTML = `<b>Sketch · ${curSketch().name}</b> — ${hints[t]} · Esc to ${t === 'select' ? 'deselect' : 'stop drawing'}`;
   drawSketches();
   renderRibbon(); renderSketchPanel();
@@ -1178,16 +1224,24 @@ function renderSketchPanel() {
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('sketch', 20)}SKETCH PALETTE</div><div class="body">
     <div class="mh" style="font-weight:700;margin:0 0 4px">Options</div>
     <div class="row"><label>Sketch plane</label><select id="sp-plane">${[...['XY', 'XZ', 'YZ'], ...(p.plane === 'custom' ? ['custom'] : [])].map((k) => `<option ${k === p.plane ? 'selected' : ''}>${k}</option>`).join('')}</select></div>
-    <div class="row"><label>Plane offset</label><input id="sp-off" type="number" step="1" value="${p.offset}"></div>
-    <div class="row"><label>Snap (mm)</label><select id="sp-snap">${['auto', 0.1, 0.5, 1, 2, 5, 10].map((v) => `<option ${v === sketch.snap ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+    <div class="row"><label>Plane offset</label><input id="sp-off" type="text" inputmode="decimal" value="${dispStr(p.offset)}"></div>
+    <div class="row"><label>Snap (${getUnits()})</label><select id="sp-snap">${['auto', ...UNIT_TABLE[getUnits()].steps.slice(2, 9)].map((v) => { const mmv = v === 'auto' ? 'auto' : v * lenF(); const sel = v === 'auto' ? sketch.snap === 'auto' : typeof sketch.snap === 'number' && Math.abs(sketch.snap - mmv) < 1e-9; return `<option value="${mmv}" ${sel ? 'selected' : ''}>${v}</option>`; }).join('')}</select></div>
     <div class="row"><label>Polygon sides</label><input id="sp-sides" type="number" min="3" max="64" value="${sketch.sides}"></div>
     <label class="chk"><input type="checkbox" id="sp-grid" ${sketch.grid?.visible === false ? '' : 'checked'}> Sketch Grid</label>
     <label class="chk"><input type="checkbox" id="sp-showprof" ${sketch.showProfile === false ? '' : 'checked'}> Show Profile</label>
     <label class="chk"><input type="checkbox" id="sp-snapon" ${sketch.snapOn === false ? '' : 'checked'}> Snap</label>
     <div style="margin:6px 0"><button class="btn" id="sp-lookat">Look At</button></div>
-    <div class="sep"></div><div class="mh" style="font-weight:700;margin-bottom:4px">Shapes (${sh.length})</div><div id="sp-list"></div>
+    <div class="sep"></div>${(p.cons || []).length ? `<div class="mh" style="font-weight:700;margin-bottom:4px">Constraints (${p.cons.length})</div><div id="sp-cons"></div><div class="sep"></div>` : ''}<div class="mh" style="font-weight:700;margin-bottom:4px">Shapes (${sh.length})</div><div id="sp-list"></div>
     <div class="note">Nested shapes become holes. To sketch on a body, start a new sketch and click one of its flat faces.</div></div>
     <div class="foot"><button class="btn" id="sp-cancel">Cancel</button><button class="btn primary" id="sp-ok">Finish Sketch</button></div></div>`;
+  const consHost = $('#sp-cons');
+  if (consHost) (p.cons || []).forEach((c, i) => {
+    const row = document.createElement('div');
+    row.className = 'shape-item';
+    row.innerHTML = `<b style="width:18px;text-align:center;color:#d84a3a">${CON_GLYPH[c.t]}</b><span>${CON_LABEL[c.t]}</span><button class="x" title="Delete">✕</button>`;
+    row.querySelector('.x').onclick = () => setSketchCons(p.cons.filter((_, k) => k !== i));
+    consHost.appendChild(row);
+  });
   const list = $('#sp-list');
   sh.forEach((s, i) => {
     const item = document.createElement('div');
@@ -1201,8 +1255,9 @@ function renderSketchPanel() {
       g.className = 'shape-fields';
       for (const k of fieldsFor(s)) {
         const l = document.createElement('label');
-        l.innerHTML = `${k}<input type="number" step="${k === 'n' ? 1 : 0.5}" value="${+s[k].toFixed(3)}">`;
-        l.querySelector('input').oninput = (e) => { const v = parseFloat(e.target.value); if (isNaN(v)) return; setSketchShapes(sh.map((o, j) => (j === i ? { ...o, [k]: v } : o))); };
+        const lenKey = !['n', 'rot'].includes(k);
+        l.innerHTML = `${k}<input type="text" inputmode="decimal" value="${lenKey ? dispStr(s[k]) : +s[k].toFixed(3)}">`;
+        l.querySelector('input').oninput = (e) => { const v = parseFloat(e.target.value); if (isNaN(v)) return; setSketchShapes(sh.map((o, j) => (j === i ? { ...o, [k]: lenKey ? v * lenF() : v } : o))); };
         g.appendChild(l);
       }
       list.appendChild(g);
@@ -1212,7 +1267,7 @@ function renderSketchPanel() {
     if (e.target.value === 'custom') return;
     setSketchParam({ plane: e.target.value, origin: undefined, normal: undefined, xdir: undefined }); vp.lookAtPlane(curSketch().params); renderSketchPanel();
   };
-  $('#sp-off').oninput = (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setSketchParam({ offset: v }); };
+  $('#sp-off').oninput = (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setSketchParam({ offset: v * lenF() }); };
   $('#sp-snap').onchange = (e) => { sketch.snap = e.target.value === 'auto' ? 'auto' : +e.target.value; sketch.gridStep = null; };
   $('#sp-sides').oninput = (e) => { sketch.sides = Math.max(3, Math.min(64, Math.round(+e.target.value) || 6)); };
   $('#sp-grid').onchange = (e) => { sketch.gridVisible = e.target.checked; if (sketch.grid) sketch.grid.visible = e.target.checked; };
@@ -1270,10 +1325,11 @@ function drawSketches() {
     if (f.type !== 'sketch' || f.suppressed) return;
     const active = sketch && sketch.index === i;
     if (!active && (i >= limit() || !(sketchVis[f.id] ?? !result.sketchUsed.has(f.id)))) return;
-    f.params.shapes.forEach((s, k) => {
+    const rp = resolvedMap[f.id] || f.params;
+    rp.shapes.forEach((s, k) => {
       const poly = shapeToPolygon(s);
       if (poly.length < 2) return;
-      const pts = poly.map((q) => vp.planeTo3D(f.params, q));
+      const pts = poly.map((q) => vp.planeTo3D(rp, q));
       const m = active ? (k === sketch.sel ? sketchMatSel : k === sketch.hover ? sketchMatHover : sketchMatActive) : sketchMat;
       vp.sketchGroup.add(new (s.open ? THREE.Line : THREE.LineLoop)(new THREE.BufferGeometry().setFromPoints(pts), m));
     });
@@ -1287,7 +1343,7 @@ function openParameters() {
   const pre = snapshot();
   let changed = false;
   const m = modal(`<div class="modal-title">Parameters</div><div class="modal-body">
-    <div class="hint">Name a dimension once, then type the name (or any expression such as <b>width/2 + 3 mm</b>) into feature fields. Lengths are mm; <code>sin cos tan sqrt min max pi</code> and units <code>mm cm m in</code> work.</div>
+    <div class="hint">Name a dimension once, then type the name (or any expression such as <b>width/2 + 3 mm</b>) into feature fields. Plain numbers use the document units (${getUnits()}); <code>sin cos tan sqrt min max pi</code> and the unit suffixes <code>mm cm m in ft</code> work. Choose <b>Number</b> or <b>Angle</b> for values that aren't lengths.</div>
     <div class="ptable" id="pt"></div><div><button class="btn" id="p-add">+ Add parameter</button></div></div>
     <div class="modal-foot"><button class="btn primary" data-x>Done</button></div>`, () => { if (changed) { pushUndo(pre); refresh(); } });
   m.el.classList.add('wide');
@@ -1295,11 +1351,15 @@ function openParameters() {
   const host = m.el.querySelector('#pt');
   const apply = (list) => { doc.params = list; changed = true; markDirty(); refresh(); };
   const draw = () => {
-    host.innerHTML = '<div class="h">Name</div><div class="h">Expression</div><div class="h">Value</div><div class="h">Comment</div><div></div>';
+    host.innerHTML = '<div class="h">Name</div><div class="h">Expression</div><div class="h">Type</div><div class="h">Value</div><div class="h">Comment</div><div></div>';
     const list = doc.params || [];
     list.forEach((p, i) => {
       const name = document.createElement('input'); name.value = p.name; name.spellcheck = false;
       const ex = document.createElement('input'); ex.value = p.expr; ex.spellcheck = false;
+      const ut = document.createElement('select');
+      ut.innerHTML = '<option value="length">Length</option><option value="number">Number</option><option value="angle">Angle</option>';
+      ut.value = p.unit || 'length';
+      ut.onchange = () => { apply(doc.params.map((q, j) => (j === i ? { ...q, unit: ut.value } : q))); showVal(); };
       const val = document.createElement('div'); val.className = 'val';
       const cm = document.createElement('input'); cm.value = p.comment || ''; cm.placeholder = 'optional';
       const del = document.createElement('button'); del.className = 'icon-btn danger'; del.innerHTML = icon('remove', 16); del.title = 'Delete';
@@ -1307,7 +1367,7 @@ function openParameters() {
         const r = resolveParams(doc.params || []);
         const err = r.errors[(doc.params[i] || {}).name];
         val.className = 'val' + (err ? ' err' : '');
-        val.textContent = err ? err : r.values[doc.params[i].name] !== undefined ? +r.values[doc.params[i].name].toFixed(4) : '';
+        val.textContent = err ? err : paramShow(doc.params[i], r.values[doc.params[i].name]);
       };
       name.oninput = () => {
         const v = name.value.trim();
@@ -1320,7 +1380,7 @@ function openParameters() {
       ex.oninput = () => { apply(doc.params.map((q, j) => (j === i ? { ...q, expr: ex.value } : q))); ex.classList.toggle('bad', !!paramState.errors[doc.params[i].name]); showVal(); };
       cm.oninput = () => apply(doc.params.map((q, j) => (j === i ? { ...q, comment: cm.value } : q)));
       del.onclick = () => { apply(doc.params.filter((_, j) => j !== i)); draw(); };
-      host.append(name, ex, val, cm, del);
+      host.append(name, ex, ut, val, cm, del);
       showVal();
     });
     if (!list.length) host.insertAdjacentHTML('beforeend', '<div class="hint" style="grid-column:1/-1">No parameters yet.</div>');
@@ -1328,7 +1388,7 @@ function openParameters() {
   m.el.querySelector('#p-add').onclick = () => {
     let n = 1; const used = new Set((doc.params || []).map((q) => q.name));
     while (used.has('d' + n)) n++;
-    apply([...(doc.params || []), { name: 'd' + n, expr: '10', comment: '' }]);
+    apply([...(doc.params || []), { name: 'd' + n, expr: '10', unit: 'length', comment: '' }]);
     draw();
     host.querySelector('input')?.focus();
   };
@@ -1377,7 +1437,8 @@ function measureHover(e) {
 }
 function measureClick(e) {
   const M = measure;
-  const fmt = (v) => v.toFixed(3);
+  const fmt = (v) => dispStr(v);
+  const un = getUnits();
   if (M.mode === 'dist' || M.mode === 'angle') {
     const sn = vp.pickSnap(e);
     if (!sn) return;
@@ -1389,14 +1450,14 @@ function measureClick(e) {
     if (M.pts.length === need) {
       if (M.mode === 'dist') {
         const [a, b] = M.pts;
-        logMeasure('Distance', `${fmt(dist3(a, b))} mm`, `ΔX ${fmt(b[0] - a[0])}  ΔY ${fmt(b[1] - a[1])}  ΔZ ${fmt(b[2] - a[2])}`);
+        logMeasure('Distance', `${fmt(dist3(a, b))} ${un}`, `ΔX ${fmt(b[0] - a[0])}  ΔY ${fmt(b[1] - a[1])}  ΔZ ${fmt(b[2] - a[2])}`);
       } else {
         const [a, v, c] = M.pts;
         const u = [a[0] - v[0], a[1] - v[1], a[2] - v[2]], w = [c[0] - v[0], c[1] - v[1], c[2] - v[2]];
         const lu = Math.hypot(...u), lw = Math.hypot(...w);
         if (!lu || !lw) return toast('The points must be distinct.', true);
         const ang = (Math.acos(Math.max(-1, Math.min(1, (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) / (lu * lw)))) * 180) / Math.PI;
-        logMeasure('Angle', `${ang.toFixed(2)}°`, `Supplement ${(180 - ang).toFixed(2)}°  ·  legs ${fmt(lu)} / ${fmt(lw)} mm`);
+        logMeasure('Angle', `${ang.toFixed(2)}°`, `Supplement ${(180 - ang).toFixed(2)}°  ·  legs ${fmt(lu)} / ${fmt(lw)} ${un}`);
       }
     }
   } else if (M.mode === 'edge') {
@@ -1409,8 +1470,8 @@ function measureClick(e) {
     let detail = closed ? 'Closed loop' : `${pts.length - 1} segment${pts.length > 2 ? 's' : ''}`;
     const c = pts.reduce((a, p) => [a[0] + p[0] / pts.length, a[1] + p[1] / pts.length, a[2] + p[2] / pts.length], [0, 0, 0]);
     const rs = pts.map((p) => dist3(p, c)), rm = rs.reduce((a, b) => a + b, 0) / rs.length;
-    if (closed && rm > 0 && Math.max(...rs.map((r) => Math.abs(r - rm))) / rm < 0.02) detail = `Circle · Ø ${fmt(rm * 2)} mm · R ${fmt(rm)} mm`;
-    logMeasure('Edge length', `${fmt(L)} mm`, detail);
+    if (closed && rm > 0 && Math.max(...rs.map((r) => Math.abs(r - rm))) / rm < 0.02) detail = `Circle · Ø ${fmt(rm * 2)} ${un} · R ${fmt(rm)} ${un}`;
+    logMeasure('Edge length', `${fmt(L)} ${un}`, detail);
     vp.setMeasureOverlay([], [closed ? [...pts, pts[0]] : pts]);
   } else if (M.mode === 'faces') {
     const tg = vp.pickPlanarFace(e);
@@ -1424,13 +1485,84 @@ function measureClick(e) {
       const dt = a.normal[0] * b.normal[0] + a.normal[1] * b.normal[1] + a.normal[2] * b.normal[2];
       const ang = (Math.acos(Math.min(1, Math.abs(dt))) * 180) / Math.PI;
       const dd = Math.abs((b.point[0] - a.point[0]) * a.normal[0] + (b.point[1] - a.point[1]) * a.normal[1] + (b.point[2] - a.point[2]) * a.normal[2]);
-      if (ang < 0.05) logMeasure('Distance between parallel faces', `${fmt(dd)} mm`, 'Faces are parallel');
+      if (ang < 0.05) logMeasure('Distance between parallel faces', `${fmt(dd)} ${un}`, 'Faces are parallel');
       else logMeasure('Angle between faces', `${ang.toFixed(2)}°`, `Supplement ${(180 - ang).toFixed(2)}°`);
     }
   }
 }
 
 // ------------------------------------------------------------------ inspect / print
+function showInterference() {
+  if (dialog || sketch) return;
+  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id));
+  const hits = bodies.length > 1 ? interference(bodies) : [];
+  const wrap = $('#props-wrap');
+  wrap.innerHTML = `<div class="props"><div class="title">${ficon('combine', 20)}INTERFERENCE</div><div class="body">${
+    bodies.length < 2 ? 'Needs at least two visible bodies.' : hits.length ? `<div class="stat"><span>Interfering pairs</span><b class="warn">${hits.length}</b></div>` + hits.map((h) => `<div class="sep"></div><b>${esc(h.a.name)} ∩ ${esc(h.b.name)}</b><div class="stat"><span>Overlap volume</span><b>${fmtVolume(h.volume)}</b></div>`).join('') : '<div class="stat"><span>Result</span><b class="ok">No interference</b></div>'
+  }</div><div class="foot"><button class="btn primary" id="i-close">Close</button></div></div>`;
+  wrap.classList.add('open');
+  vp.selected.clear(); hits.forEach((h) => { vp.selected.add(h.a.id); vp.selected.add(h.b.id); }); vp.refreshMaterials();
+  $('#i-close').onclick = () => { wrap.classList.remove('open'); };
+}
+function showDriveJoints() {
+  if (dialog || sketch) return;
+  const joints = doc.features.map((f, i) => [f, i]).filter(([f]) => f.type === 'joint' && ['revolute', 'slider', 'cylindrical', 'planar'].includes(f.params.jtype));
+  const wrap = $('#props-wrap');
+  if (!joints.length) return toast('No movable joints yet. Add a Revolute, Slider, Cylindrical or Planar joint first.', true);
+  const rng = (f) => (['revolute', 'cylindrical'].includes(f.params.jtype) ? [-180, 180, 1, '°'] : (() => { const m = Math.max(50, Math.abs(f.params.value) * 2); return [-m, m, m / 200, ' mm']; })());
+  wrap.innerHTML = `<div class="props"><div class="title">${ficon('joint', 20)}DRIVE JOINTS</div><div class="body">${joints.map(([f, i]) => { const [lo, hi, st, u] = rng(f); return `<div class="stat"><span>${esc(f.name)} (${f.params.jtype})</span><b id="dj-v${i}">${+f.params.value.toFixed(2)}${u}</b></div><input type="range" data-i="${i}" min="${lo}" max="${hi}" step="${st}" value="${f.params.value}" style="width:100%">`; }).join('')}</div><div class="foot"><button class="btn primary" id="i-close">Done</button></div></div>`;
+  wrap.classList.add('open');
+  wrap.querySelectorAll('input[type=range]').forEach((r) => {
+    let pushed = false;
+    r.oninput = () => {
+      const i = +r.dataset.i;
+      if (!pushed) { pushUndo(snapshot()); pushed = true; }
+      doc.features[i] = { ...doc.features[i], params: { ...doc.features[i].params, value: +r.value } };
+      refresh();
+      const u = rng(doc.features[i])[3];
+      const el = $('#dj-v' + i); if (el) el.textContent = `${+(+r.value).toFixed(2)}${u}`;
+    };
+    r.onchange = () => { pushed = false; };
+  });
+  $('#i-close').onclick = () => { wrap.classList.remove('open'); };
+}
+function pick2D(accept) { const i = $('#file-2d'); i.accept = accept; i.click(); }
+/** Add imported 2D shapes to the open sketch, or start a new one on the XY plane first. */
+function addImportedShapes(shapes, label) {
+  if (!shapes.length) return toast(`No usable outlines found in ${label}.`, true);
+  if (dialog) return toast('Finish the open command first.', true);
+  if (!sketch) { enterSketch(doc.marker, true, 'XY'); }
+  setSketchShapes([...curSketch().params.shapes, ...shapes]);
+  sketch.sel = -1; renderSketchPanel(); drawSketches();
+  toast(`Inserted ${shapes.length} outline${shapes.length > 1 ? 's' : ''} from ${label}`);
+}
+async function import2D(file) {
+  try {
+    const text = await file.text();
+    const svg = /\.svg$/i.test(file.name);
+    addImportedShapes(svg ? parseSVG(text) : parseDXF(text), file.name);
+  } catch (e) { toast('Import failed: ' + e.message, true); }
+}
+function showTextDialog() {
+  if (dialog) return;
+  const m = modal(`<div class="modal-title">Text</div><div class="modal-body"><label>Text<textarea id="tx-s" rows="2" style="font:inherit">Sketchy</textarea></label><label>Height (${getUnits()})<input id="tx-h" type="number" value="${+(10 / lenF()).toFixed(3)}" step="any"></label><label style="flex-direction:row;align-items:center;gap:6px"><input id="tx-b" type="checkbox"> Bold</label></div><div class="foot" style="padding:10px 16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn" id="tx-c">Cancel</button><button class="btn primary" id="tx-ok">Insert</button></div>`);
+  $('#tx-c').onclick = m.close;
+  $('#tx-ok').onclick = async () => {
+    const s = $('#tx-s').value, h = +$('#tx-h').value * lenF();
+    if (!s.trim() || !(h > 0)) return toast('Enter some text and a height.', true);
+    try { const shapes = await textShapes(s, h, $('#tx-b').checked); m.close(); addImportedShapes(shapes, 'text'); } catch (e) { toast('Text failed: ' + e.message, true); }
+  };
+  $('#tx-s').focus();
+}
+function startAsBuilt() {
+  startFeature('joint');
+  if (!dialog) return;
+  const i = dialog.index, f = doc.features[i];
+  // As-built: both bodies stay where they are, so the joint origin sits on the moving body's current point.
+  doc.features[i] = { ...f, name: uniqueName('As-built Joint'), params: { ...f.params, pointB: [...f.params.pointA] } };
+  renderDialog(); refresh();
+  toast('As-built joint: bodies stay in place; set the joint type and axis.');
+}
 function showInfo() {
   if (dialog || sketch) return;
   const bodies = result.bodies.filter((b) => (vp.selected.size ? vp.selected.has(b.id) : true) && !hiddenBodies.has(b.id));
@@ -1441,9 +1573,9 @@ function showInfo() {
     const fits = s[0] <= bx && s[1] <= by && s[2] <= bz;
     const vol = b.volume / 1000;
     return `<div class="sep"></div><b>${esc(b.name)}</b>
-      <div class="stat"><span>Size (mm)</span><b>${s.map((v) => v.toFixed(2)).join(' × ')}</b></div>
-      <div class="stat"><span>Volume</span><b>${vol.toFixed(3)} cm³</b></div>
-      <div class="stat"><span>Surface area</span><b>${(b.area / 100).toFixed(2)} cm²</b></div>
+      <div class="stat"><span>Size (${getUnits()})</span><b>${s.map((v) => dispStr(v, 3)).join(' × ')}</b></div>
+      <div class="stat"><span>Volume</span><b>${fmtVolume(b.volume)}</b></div>
+      <div class="stat"><span>Surface area</span><b>${fmtArea(b.area)}</b></div>
       <div class="stat"><span>Mass (PLA, solid)</span><b>${(vol * 1.24).toFixed(1)} g</b></div>
       <div class="stat"><span>Fits ${esc(bedName.split(' (')[0])}</span><b class="${fits ? 'ok' : 'warn'}">${fits ? 'Yes' : 'No — too large'}</b></div>`;
   }).join('');
@@ -1464,18 +1596,35 @@ function exportSTL(selectedOnly) {
   download(writeSTL(bodies, doc.name), `${doc.name}.stl`);
   toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as STL`);
 }
+function exportMesh(fmt) {
+  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id)).map((b) => ({ ...b, color: (doc.appearance || {})[b.id] }));
+  if (!bodies.length) return toast('Nothing to export.', true);
+  const w = { '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
+  download(w(bodies, doc.name), `${doc.name}.${fmt === 'step' ? 'step' : fmt}`);
+  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}${fmt === 'step' ? ' (faceted mesh, not exact surfaces)' : ''}`);
+}
 async function importSTL(file) {
   try {
-    const soup = parseSTL(await file.arrayBuffer());
-    const pre = snapshot();
+    let soup = parseSTL(await file.arrayBuffer());
     const name = file.name.replace(/\.stl$/i, '');
-    const f = { id: 'f' + doc.nextId++, type: 'import', name, params: { data: encodeFloats(soup), tris: soup.length / 9 } };
-    doc.features.splice(doc.marker, 0, f); doc.marker++;
-    pushUndo(pre);
-    result = rebuild(doc.features, doc.marker);
-    if (result.errors[f.id]) { restore(pre); undoStack.pop(); refresh(); return toast(`Import failed: ${result.errors[f.id]} (mesh must be watertight)`, true); }
+    const attempt = (data) => {
+      const pre = snapshot();
+      const f = { id: 'f' + doc.nextId++, type: 'import', name, params: { data: encodeFloats(data), tris: data.length / 9 } };
+      doc.features.splice(doc.marker, 0, f); doc.marker++;
+      pushUndo(pre);
+      result = rebuild(doc.features, doc.marker);
+      if (result.errors[f.id]) { restore(pre); undoStack.pop(); return result.errors[f.id]; }
+      return null;
+    };
+    let err = attempt(soup), note = '';
+    if (err) {
+      const fixed = repairSoup(soup);
+      err = attempt(fixed.soup);
+      if (err) { refresh(); return toast(`Import failed: ${err}. Mesh repair could not make it a closed solid (${fixed.report.skippedHoles} unfillable holes).`, true); }
+      soup = fixed.soup; note = ` - repaired: ${describeRepair(fixed.report)}`;
+    }
     vp.fitted = false; refresh();
-    toast(`Imported ${name} (${(soup.length / 9).toLocaleString()} triangles)`);
+    toast(`Imported ${name} (${(soup.length / 9).toLocaleString()} triangles)${note}`);
   } catch (e) { toast('Import failed: ' + e.message, true); }
 }
 function captureThumb() {
@@ -1491,40 +1640,126 @@ function captureThumb() {
     return c.toDataURL('image/jpeg', 0.72);
   } catch { return null; }
 }
-const projectJSON = (name = doc.name, withThumb = false) => JSON.stringify({ format: 'sketchy', version: 1, ...doc, name, ...(withThumb ? { thumb: captureThumb() } : {}) });
-function loadProject(txt) {
+const projectJSON = (name = doc.name, withThumb = false) => { const { rev, ...rest } = doc; return JSON.stringify({ format: 'sketchy', version: 1, ...rest, name, ...(withThumb ? { thumb: captureThumb() } : {}) }); };
+function loadProject(txt, rev = 0) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {} };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, units: UNIT_TABLE[d.units] ? d.units : 'mm', rev };
+  setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
   vp.fitted = false; refresh();
 }
 const safeName = (n) => n.replace(/[^\w .()-]/g, '_').slice(0, 80) || 'Untitled';
+const putDesign = (name, ifMatch) => call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true), { 'if-match': String(ifMatch) });
+const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
+
+/** Ask what to do when the saved design changed elsewhere. Resolves 'overwrite' | 'copy' | 'theirs' | null. */
+function conflictDialog(info, name) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const m = modal(`<div class="modal-title">"${esc(name)}" changed on the server</div><div class="modal-body">
+      <p style="margin:0">It was saved${info.device ? ` from <b>${esc(info.device)}</b>` : ''}${info.modified ? ` ${ago(info.modified)}` : ''} (revision ${info.rev}) after you opened it. Saving now would replace those changes.</p>
+      <div class="conflict-actions">
+        <button class="btn primary" data-c="copy">Save mine as a copy…</button>
+        <button class="btn" data-c="theirs">Discard mine, open theirs</button>
+        <button class="btn danger" data-c="overwrite">Overwrite with mine</button>
+      </div></div><div class="modal-foot"><button class="btn" data-c="">Cancel</button></div>`, () => finish(null));
+    m.el.querySelectorAll('[data-c]').forEach((b) => (b.onclick = () => { finish(b.dataset.c || null); m.close(); }));
+  });
+}
+
+async function openDesign(name, quiet = false) {
+  const d = await call('GET', '/projects/' + encodeURIComponent(name));
+  if (!d.ok) return toast(d.data?.error || 'Could not open design.', true);
+  try { loadProject(typeof d.data === 'string' ? d.data : JSON.stringify(d.data), d.rev); doc.name = name; $('#doc-name').textContent = name; bannerRev = d.rev; hideBanner(); refresh(); if (!quiet) toast(`Opened "${name}"`); }
+  catch (x) { toast(x.message, true); }
+}
+
 async function save(as) {
   let name = doc.name;
   if (acct.server && !(await requireLogin())) return;
   if (as || name === 'Untitled') { const n = prompt('Design name', name === 'Untitled' ? 'My design' : name); if (!n) return; name = safeName(n); }
   if (acct.server) {
     doc.saves = (doc.saves || 0) + 1;
-    const r = await call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true));
+    const expect = name === doc.name ? doc.rev || 0 : 0; // a new name should not already exist
+    let r = await putDesign(name, expect);
+    if (r.status === 409) {
+      const choice = await conflictDialog(r.data, name);
+      if (choice === 'overwrite') r = await putDesign(name, '*');
+      else if (choice === 'copy') {
+        let n2 = safeName(prompt('Name for your copy', `${name} (copy)`) || '');
+        if (!n2 || n2 === 'Untitled') return;
+        r = await putDesign(n2, 0);
+        if (r.status === 409) return toast(`"${n2}" already exists — choose another name.`, true);
+        name = n2;
+      } else if (choice === 'theirs') return openDesign(name);
+      else return;
+    }
     if (!r.ok) return toast('Save failed: ' + (r.data?.error || r.status), true);
+    doc.rev = r.data.rev; bannerRev = doc.rev; hideBanner();
     toast(`Saved "${name}" to your designs`);
   } else download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`);
   doc.name = name; $('#doc-name').textContent = name;
   dirty = false; $('#doc-dirty').classList.remove('on');
 }
+
+// ---- cross-device: drafts, remote-change banner
+let draftT = null, bannerRev = 0;
+const draftKey = () => (doc.name === 'Untitled' ? '__untitled' : safeName(doc.name));
+function scheduleServerDraft() {
+  if (!acct.user) return;
+  clearTimeout(draftT);
+  draftT = setTimeout(async () => { if (acct.user && dirty) await call('PUT', '/drafts/' + encodeURIComponent(draftKey()), projectJSON(doc.name), { 'x-base-rev': String(doc.rev || 0) }); }, 4000);
+}
+async function checkDrafts() {
+  if (!acct.user) return;
+  const r = await call('GET', '/drafts');
+  if (!r.ok || !r.data.length) return;
+  const localT = +localStorage.getItem('sketchy.autosave.t') || 0;
+  const d = r.data.find((x) => x.modified > localT + 2000);
+  if (!d) return;
+  const title = d.key === '__untitled' ? 'an unsaved design' : `"${d.key}"`;
+  const choice = await new Promise((resolve) => {
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const m = modal(`<div class="modal-title">Resume where you left off?</div><div class="modal-body"><p style="margin:0">There is an autosaved draft of ${esc(title)} from <b>${esc(d.device || 'another device')}</b>, ${ago(d.modified)}.</p></div>
+      <div class="modal-foot"><button class="btn" data-c="discard">Discard draft</button><button class="btn" data-c="">Not now</button><button class="btn primary" data-c="resume">Resume</button></div>`, () => finish(''));
+    m.el.querySelectorAll('[data-c]').forEach((b) => (b.onclick = () => { finish(b.dataset.c); m.close(); }));
+  });
+  if (choice === 'resume') {
+    const g = await call('GET', '/drafts/' + encodeURIComponent(d.key));
+    if (g.ok) { loadProject(typeof g.data === 'string' ? g.data : JSON.stringify(g.data), d.base ?? 0); doc.name = d.key === '__untitled' ? 'Untitled' : d.key; $('#doc-name').textContent = doc.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh(); toast('Draft restored'); }
+  } else if (choice === 'discard') await call('DELETE', '/drafts/' + encodeURIComponent(d.key));
+}
+function showBanner(info) {
+  const b = $('#banner');
+  b.hidden = false;
+  b.innerHTML = `<span>${uicon('warn', 15, 1.6)} "${esc(doc.name)}" was updated${info.device ? ` from <b>${esc(info.device)}</b>` : ''} (revision ${info.rev}).${dirty ? ' You have unsaved changes — saving will ask what to do.' : ''}</span><button class="btn sm" id="bn-reload">${dirty ? 'Discard mine & reload' : 'Reload'}</button><button class="btn sm" id="bn-x">Dismiss</button>`;
+  $('#bn-reload').onclick = () => { if (dirty && !confirm('Discard your unsaved changes and load the latest version?')) return; openDesign(doc.name); };
+  $('#bn-x').onclick = hideBanner;
+}
+const hideBanner = () => { const b = $('#banner'); if (b) b.hidden = true; };
+function startRemotePolling() {
+  setInterval(async () => {
+    if (document.hidden || !acct.user || !doc.rev || doc.name === 'Untitled') return;
+    const r = await call('GET', '/projects/' + encodeURIComponent(doc.name) + '/meta');
+    if (r.ok && r.data.rev > doc.rev && r.data.rev !== bannerRev) { bannerRev = r.data.rev; showBanner(r.data); }
+  }, 20000);
+  addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+}
 function downloadProject() { download(new Blob([projectJSON()], { type: 'application/json' }), `${doc.name}.sketchy.json`); }
 function openFromServer() { toggleDataPanel(true); }
 function newDoc() {
   if (dirty && !confirm('Discard unsaved changes?')) return;
-  doc = blankDoc(); undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
+  doc = blankDoc(); setUnits('mm'); undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = 'Untitled'; vp.fitted = false; refresh();
 }
 let autosaveT;
 function scheduleAutosave() {
   clearTimeout(autosaveT);
-  autosaveT = setTimeout(() => { try { localStorage.setItem('sketchy.autosave', projectJSON()); } catch { /* too large */ } }, 800);
+  autosaveT = setTimeout(() => { try { localStorage.setItem('sketchy.autosave', projectJSON()); localStorage.setItem('sketchy.autosave.t', String(Date.now())); } catch { /* too large */ } }, 800);
+  scheduleServerDraft();
 }
 
 // ------------------------------------------------------------------ undo / redo
@@ -1599,8 +1834,8 @@ function bindViewport() {
     const fld = defOf(f).fields.find((x) => x.key === 'distance');
     const move = (ev) => {
       const d = Math.round((start.d + 10 * (((ev.clientX - start.x) * sd[0] + (ev.clientY - start.y) * sd[1]) / l2)) * 2) / 2;
-      commitNumber(dialog.index, 'distance', String(d), fld);
-      const inp = $('#props-wrap input.num'); if (inp) inp.value = String(d);
+      commitNumber(dialog.index, 'distance', dispStr(d, 6), fld);
+      const inp = $('#props-wrap input.num'); if (inp) inp.value = dispStr(d);
     };
     const up = () => { removeEventListener('pointermove', move); vp.controls.enabled = true; renderDialog(); };
     addEventListener('pointermove', move);
@@ -1887,9 +2122,13 @@ async function renderDataPanel() {
       el.onclick = async (e) => {
         if (e.target.closest('.dp-del')) return;
         if (dirty && !confirm('Discard unsaved changes?')) return;
-        const d = await call('GET', '/projects/' + encodeURIComponent(pr.name));
-        if (!d.ok) return toast(d.data?.error || 'Could not open design.', true);
-        try { loadProject(typeof d.data === 'string' ? d.data : JSON.stringify(d.data)); doc.name = pr.name; $('#doc-name').textContent = pr.name; refresh(); } catch (x) { toast(x.message, true); }
+        const dr = await call('GET', '/drafts');
+        const draft = dr.ok && dr.data.find((x) => x.key === pr.name && x.modified > pr.modified + 2000);
+        if (draft && confirm(`A newer autosaved draft of "${pr.name}" exists (${draft.device || 'another device'}, ${ago(draft.modified)}).\n\nOK = resume the draft, Cancel = open the saved version.`)) {
+          const g = await call('GET', '/drafts/' + encodeURIComponent(pr.name));
+          if (g.ok) { loadProject(typeof g.data === 'string' ? g.data : JSON.stringify(g.data), draft.base ?? 0); doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh(); return; }
+        }
+        openDesign(pr.name);
       };
       el.querySelector('.dp-del').onclick = async () => {
         if (!confirm(`Delete "${pr.name}" permanently?`)) return;
@@ -1997,9 +2236,10 @@ async function boot() {
   vp.home();
   $('#loading')?.remove();
   SU = createSketchUI({
-    vp, THREE, sketch: () => sketch, params: () => curSketch().params,
+    vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
     setShapes: (sh) => setSketchShapes(sh), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
-    evalExpr: (t) => evalExpr(t, (n) => paramState.values[n]), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
+    cons: () => curSketch().params.cons || [], setCons: (c) => setSketchCons(c),
+    toast: (m) => toast(m), evalExpr: (t, kind = 'len') => evalExpr(t, (n) => paramState.values[n], kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
   buildNavBar(); bindViewport(); bindZoomWindow(); bindKeys(); bindManip();
   bindTooltips();
@@ -2021,14 +2261,18 @@ async function boot() {
   $('#cube-home').onclick = () => vp.home();
   $('#cube-menu').dataset.menu = 1;
   $('#cube-menu').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 140, r.bottom + 4, [{ label: 'Go Home', uicon: 'home', run: () => vp.home() }, { sep: true }, { label: 'Orthographic', check: vp.opts.ortho, run: () => vp.setOrtho(true) }, { label: 'Perspective', check: !vp.opts.ortho, run: () => vp.setOrtho(false) }]); };
+  $('#file-2d').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) import2D(f); };
   $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importSTL(f); };
   $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { loadProject(await f.text()); } catch (x) { toast(x.message, true); } };
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
-  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.stl$/i.test(f.name)) importSTL(f); });
+  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.stl$/i.test(f.name)) importSTL(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
   await refreshAccount();
-  setAccountMenuHandler((anchor) => { const r = anchor.getBoundingClientRect(); showMenu(r.right - 200, r.bottom + 4, [{ head: `SIGNED IN AS ${acct.user.toUpperCase()}` }, { label: 'My Designs…', uicon: 'folder', run: () => toggleDataPanel(true) }, { sep: true }, { label: 'Sign out', run: async () => { await signOut(); toast('Signed out'); if (dataOpen) renderDataPanel(); } }]); });
+  setAccountMenuHandler((anchor) => { const r = anchor.getBoundingClientRect(); showMenu(r.right - 200, r.bottom + 4, [{ head: `SIGNED IN AS ${acct.user.toUpperCase()}${acct.admin ? ' (ADMIN)' : ''}` }, { label: 'My Designs…', uicon: 'folder', run: () => toggleDataPanel(true) }, { label: 'Change password…', uicon: 'gear', run: showChangePassword }, ...(acct.admin ? [{ label: 'Users…', uicon: 'user', run: showAdmin }] : []), { sep: true }, { label: 'Sign out', run: async () => { await signOut(); toast('Signed out'); if (dataOpen) renderDataPanel(); } }]); });
   try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length) { loadProject(a); toast('Restored your last session'); } } } catch { /* ignore */ }
   if (localStorage.getItem('sketchy.data') === '1') toggleDataPanel(true);
+  setAccountChangeHandler(() => { if (dataOpen) renderDataPanel(); });
+  startRemotePolling();
+  checkDrafts();
   refresh();
   window.__sketchy = { moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
 }

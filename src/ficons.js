@@ -82,6 +82,12 @@ const FI = {
   slot: `<path d="M10 10H22A6 6 0 0 1 22 22H10A6 6 0 0 1 10 10Z" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(10, 16)}${pt(22, 16)}`,
   ellipse: `<ellipse cx="16" cy="16" rx="12" ry="7.5" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(16, 16)}`,
   crect: `<rect x="5" y="8" width="22" height="16" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(16, 16)}${pt(27, 24)}`,
+  conh: `<path d="M5 16H27" stroke="#1f4f93" stroke-width="2"/>${pt(5, 16)}${pt(27, 16)}<text x="12" y="11" font-size="9" font-weight="700" font-family="sans-serif" fill="#e0453a">H</text>`,
+  conv: `<path d="M16 5V27" stroke="#1f4f93" stroke-width="2"/>${pt(16, 5)}${pt(16, 27)}<text x="19" y="19" font-size="9" font-weight="700" font-family="sans-serif" fill="#e0453a">V</text>`,
+  concentric: `<circle cx="16" cy="16" r="11" fill="none" stroke="#1f4f93" stroke-width="2"/><circle cx="16" cy="16" r="5" fill="none" stroke="#1f4f93" stroke-width="2"/>${pt(16, 16)}`,
+  conequal: `<path d="M5 12H27M5 20H27" stroke="#1f4f93" stroke-width="2"/><path d="M12 8V24M20 8V24" stroke="#e0453a" stroke-width="1.2" stroke-dasharray="1.5 1.5"/>`,
+  conpar: `<path d="M6 24L18 6M14 26L26 8" stroke="#1f4f93" stroke-width="2"/>`,
+  conperp: `<path d="M5 26H27M10 26V6" stroke="#1f4f93" stroke-width="2"/><path d="M10 20H16V26" fill="none" stroke="#e0453a" stroke-width="1.4"/>`,
   disabled: `<rect x="5" y="5" width="22" height="22" rx="3" fill="${G.l}" stroke="${G.r}" stroke-width="1"/>`,
 };
 

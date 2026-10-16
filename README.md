@@ -42,6 +42,7 @@ Click **Sign in** (top right) to create an account, then **File → Save to My D
 * Data lives in the `sketchy-data` volume (`/data`): `users.json` (scrypt-hashed passwords), `sessions.json`, `projects/<user-id>/*.json`
 * Set `ALLOW_REGISTRATION=false` in `docker-compose.yml` to close sign-ups once your users exist
 * Sessions are HttpOnly + SameSite=Strict cookies and the API requires a custom header, which blocks cross-site requests. Put it behind HTTPS (e.g. a reverse proxy) if you expose it beyond your LAN — the app itself serves plain HTTP
+* click your name for **Change password**; the admin sees **Users…** (list, reset a password, delete). Server drafts keep an in-progress design synced across devices and warn on conflicting edits
 * Without the server (e.g. `npm run dev`) saving downloads a `.sketchy.json` file; the last session is also auto-restored from browser storage
 
 ### Develop
@@ -62,10 +63,16 @@ npm run dev         # http://localhost:5173
 | **Hole** | Simple, counterbore, countersink, through-all, optional internal thread. Place by clicking a face |
 | **Thread** | Real helical groove (external or internal, left/right-handed) cut into a body |
 | **Press/Pull** | Click a flat face and drag it in the viewport (or type a distance) to push or pull it |
-| Fillet · Chamfer | On picked edges |
-| **Shell** | Hollow a body to a wall thickness, optionally opening picked faces |
+| Fillet · Chamfer | On picked edges or faces (constant radius) |
+| **Shell** | Hollow a body to a wall thickness (inside, outside or centred), optionally opening picked faces |
 | **Scale** · **Split Body** | Uniform / non-uniform scale; split by plane or by another body |
-| Combine · Move/Copy · Mirror · Pattern · Remove | Click bodies in the viewport to fill body fields |
+| Combine · Move/Copy · Mirror · Remove | Click bodies in the viewport to fill body fields |
+| **Pattern** | Linear, circular, **along a sketch path** or **on a face** (grid on the picked plane) |
+| **Text · Insert SVG · Insert DXF** | Sketch tools: text uses real Roboto outlines (counters become holes); SVG (paths, shapes, transforms, curves flattened) and DXF (LINE/ARC/CIRCLE/LWPOLYLINE/POLYLINE, touching segments joined, `$INSUNITS` honoured) are scaled to mm and centred. Also drag a `.svg`/`.dxf` onto the viewport |
+| **Interference** · **Drive Joints** · **As-built Joint** | Lists overlapping body pairs with volume; sliders move revolute/slider/cylindrical/planar joints; as-built keeps both bodies where they are |
+| **Units** | File → Document units (see the menu for the list). Geometry stays in mm; fields, measure and properties convert |
+| **Mesh repair** | Non-watertight STLs are welded, de-duplicated, re-oriented and hole-filled on import; the toast says what was fixed |
+| **Export** | STL, **3MF** (with body colours), **OBJ**, and **STEP (faceted mesh)** — triangles only, not exact surfaces |
 | **Joint** | Rigid, revolute, slider, cylindrical, planar and ball joints positioning one body relative to another |
 | **Parameters** | Name dimensions (`width = 40 mm`) and use expressions in any numeric field (`width/2 + 3 mm`, `sin(30)*r`). Changing a parameter rebuilds the whole timeline |
 | **Measure** (Inspect tab) | Distance (vertex snap), angle, edge length (detects circles), angle/distance between faces |
@@ -77,6 +84,10 @@ Shortcuts (Fusion defaults): `F2` rename · `Enter` accepts a dialog · `S` comm
 ### Editing experience (Fusion-style)
 
 * **Sketching** — every closed region becomes a shaded **profile**; click inside regions in the Extrude/Revolve dialog to pick which ones (a circle inside a rectangle is a hole by default, like Fusion). Tools: line, open path, rectangle, centre rectangle, rounded rectangle, circle, ellipse, slot, polygon.
+* **Arcs** — the 3-point **Arc** tool, and in the Line / Open Path tools press `A` for a **tangent arc**. Lines and arcs that meet end to end automatically form a closed, selectable profile.
+* **Parametric dimensions** — click a shape in the Select tool and type an *expression* in any dimension label (`width/2`, `hole + 0.2 mm`); it follows your named parameters, so changing a parameter reshapes the sketch. The **Sketch Dimension** tool (`D`) jumps straight to a shape's dimensions.
+* **Constraints** — Horizontal, Vertical, Coincident, Concentric, Equal, Parallel and Perpendicular. Pick two items (the first one moves) and the relation is kept through edits and parameter changes; a badge marks each one (click to delete) and the palette lists them.
+* **Offset and Fillet** — offset a closed shape by a typed distance (negative goes inward); round a corner of a rectangle or path with a typed radius.
 * **Type while you draw** — after the first click, a dimension box shows live values; type a number, `Tab` to the next field, `Enter` to commit (width/height, diameter, radius, length/angle, corner radius…). Expressions and parameters work.
 * **Inference snapping** — endpoints, midpoints, centres, quadrants and the origin snap with markers and dashed alignment guides; the grid step adapts to zoom; hold `Ctrl` to snap to nothing.
 * **Select tool** (`Esc` in a sketch) — hover/click shapes, drag to move, drag handles to resize, click a dimension label to type a value, arrow keys nudge.
@@ -91,10 +102,10 @@ Shortcuts (Fusion defaults): `F2` rename · `Enter` accepts a dialog · `S` comm
 
 The kernel is mesh-based (manifold-3d), not a B-rep, so a few Fusion operations are approximated or absent:
 face-level operations act on flat faces only; *Draft* is an extrude taper on single-outline profiles (not a draft of existing faces);
-*To object* extents use the object's bounding box; there is no *Split Face* (needs B-rep faces); booleans are body-to-body.
+*To object* extents use the object's bounding box; fillets are constant-radius (no variable radius, setbacks or tangent-chain option); there is no Thicken, Replace Face, Boundary Fill, per-face shell thickness, IGES or exact STEP; Components are not implemented (use bodies and joints); there is no *Split Face* (needs B-rep faces); booleans are body-to-body.
 
 ## Roadmap
 
-Fillet/chamfer of tangent-chained edge loops and corner blends, sketch constraints & dimensions, shell/hollow, 3MF export, component hierarchy.
+Variable-radius fillets and corner blends, draft on existing faces, component hierarchy, emboss, exact STEP.
 
 MIT licensed.
