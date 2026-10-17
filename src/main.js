@@ -3147,7 +3147,8 @@ async function renderDataPanel() {
   host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-openfile" title="Open a project file from your computer" aria-label="Open a project file from your computer">${uicon('upload', 16)}</button><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
     <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16, 1.8)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
     <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
-    <div class="dp-actions"><button class="btn primary" id="dp-new">New design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New folder</button></div>`;
+    <div class="dp-actions"><button class="btn primary" id="dp-new">New design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New folder</button></div>
+    <div class="dp-version">Sketchy v${typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''}</div>`;
   $('#dp-close').onclick = () => toggleDataPanel(false);
   $('#dp-refresh').onclick = renderDataPanel;
   $('#dp-openfile').onclick = () => $('#file-proj').click();
