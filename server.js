@@ -271,6 +271,8 @@ async function readMeta(dir, name) {
   return { rev, seq: rev, modified: 0, device: '' };
 }
 
+/** A version description from a request header: decoded, one line, control characters removed, 200 characters at most. */
+const cleanNote = (h) => { try { return decodeURIComponent(String(h || '')).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 200); } catch { return ''; } };
 const verDir = (D, name) => path.join(D.proj, '.versions', name);
 async function snapshotVersion(D, name, cur) { // keep the file about to be overwritten
   if (!MAX_VERSIONS) return;
@@ -279,7 +281,7 @@ async function snapshotVersion(D, name, cur) { // keep the file about to be over
   if (!st) return;
   await fs.mkdir(dir, { recursive: true });
   await fs.copyFile(src, path.join(dir, `${cur.rev || 1}.json`));
-  await writeJSON(path.join(dir, `${cur.rev || 1}.meta`), { rev: cur.rev || 1, modified: cur.modified || st.mtimeMs, device: cur.device || '', size: st.size });
+  await writeJSON(path.join(dir, `${cur.rev || 1}.meta`), { rev: cur.rev || 1, modified: cur.modified || st.mtimeMs, device: cur.device || '', size: st.size, note: cur.note || '' });
   const revs = (await fs.readdir(dir)).filter((f) => f.endsWith('.json')).map((f) => parseInt(f, 10)).sort((a, b) => b - a);
   for (const r of revs.slice(MAX_VERSIONS)) for (const e of ['.json', '.meta']) await fs.rm(path.join(dir, r + e), { force: true });
 }
@@ -324,7 +326,7 @@ async function writeProject(username, name, objStr, device, ifSeq, opts = {}) {
   const rev = opts.auto && exists ? cur.rev || 1 : (cur.rev || 0) + 1, seq = (cur.seq || 0) + 1;
   if (exists && !opts.auto) await snapshotVersion(D, name, { ...cur, modified: cur.modified || exists.mtimeMs });
   await fs.writeFile(file, objStr);
-  await writeJSON(path.join(D.proj, name + '.meta'), { rev, seq, modified: Date.now(), device });
+  await writeJSON(path.join(D.proj, name + '.meta'), { rev, seq, modified: Date.now(), device, note: opts.auto && exists ? cur.note || '' : opts.note || '' }); // a description belongs to the version that was saved with it
   await fs.writeFile(path.join(D.proj, name + '.ver'), String(rev));
   await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
   return { rev, seq };
@@ -750,7 +752,7 @@ async function api(req, res, url) {
       const list = await Promise.all(files.map(async (f) => {
         const n = f.slice(0, -5), st = await fs.stat(path.join(D.proj, f));
         const m = await readMeta(D.proj, n);
-        return { name: n, modified: st.mtimeMs, size: st.size, ver: m.rev || 1, seq: m.seq || 1, device: m.device || '', thumb: thumbs.has(n + '.jpg'), folder: fmap[n] || '' };
+        return { name: n, modified: st.mtimeMs, size: st.size, ver: m.rev || 1, seq: m.seq || 1, device: m.device || '', note: m.note || '', thumb: thumbs.has(n + '.jpg'), folder: fmap[n] || '' };
       }));
       return send(res, 200, list.sort((a, b) => b.modified - a.modified));
     }
@@ -813,7 +815,7 @@ async function api(req, res, url) {
       const thumb = typeof obj.thumb === 'string' && /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(obj.thumb);
       delete obj.thumb;
       let res2;
-      try { res2 = await writeProject(user, name, JSON.stringify(obj), device, req.headers['if-match'], { auto: req.headers['x-autosave'] === '1' }); }
+      try { res2 = await writeProject(user, name, JSON.stringify(obj), device, req.headers['if-match'], { auto: req.headers['x-autosave'] === '1', note: cleanNote(req.headers['x-note']) }); }
       catch (e) { if (e instanceof Conflict) return send(res, 409, { error: 'conflict', rev: e.rev, seq: e.seq, modified: e.modified, device: e.device }); throw e; }
       if (thumb && thumb[1].length < 400000) await fs.writeFile(path.join(D.proj, name + '.jpg'), Buffer.from(thumb[1], 'base64'));
       if (folderHdr !== null) { const F = await readFolders(D); if (folderHdr) { addFolder(F, folderHdr); F.map[name] = folderHdr; } else delete F.map[name]; await writeFolders(D, F); }

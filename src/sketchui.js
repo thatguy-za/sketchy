@@ -286,6 +286,8 @@ export function createSketchUI(app) {
           else if (e.key === 'Escape') { e.preventDefault(); cancelShape(); }
         };
       });
+      // the first box takes the keyboard straight away with its text selected: type a value, Tab to the next box, type again, Enter
+      if (!document.body.classList.contains('touch')) setTimeout(() => { if (dimbox && inputs[0] && dimbox.contains(inputs[0])) inputs[0].focus(); }, 0);
     }
     updateDimbox();
   }
@@ -349,6 +351,7 @@ export function createSketchUI(app) {
       inp.classList.toggle('live', !typed);
       inp.parentNode.classList.toggle('typed', typed);
       if (document.activeElement !== inp && !typed) inp.value = k === 'ang' ? fmt(lv.ang) + '°' : `${dispStr(lv[k])} ${unit}`;
+      else if (document.activeElement === inp && !typed) { inp.value = k === 'ang' ? String(fmt(lv.ang)) : dispStr(lv[k]); inp.select(); } // still showing the live size: keep following the cursor, and stay highlighted for replacing
     }
     layoutDimbox(s, lv);
   }

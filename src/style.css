@@ -1010,3 +1010,5 @@ body.touch .row { margin: 10px 0; }
 #loading { position: absolute; inset: 0; display: grid; place-items: center; color: #667; }
 .dp-version { flex: none; padding: 0 12px 10px; color: var(--muted); font-size: var(--fs-xs); text-align: center; user-select: text; }
 .oauth-actions { display: flex; gap: 8px; margin: 14px 0 6px; } .oauth-actions .btn { flex: 1; }
+.ver-note { margin-top: 2px; font-size: var(--fs-sm); color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.muted { color: var(--muted); font-weight: 400; }

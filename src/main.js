@@ -1077,7 +1077,18 @@ function openDialog(index, isNew, pre) {
   renderDialog();
   refresh();
   setupGizmo();
+  focusFirstNumber();
 }
+/** A feature dialog opens with its first number selected, so typing replaces it (Tab moves to the next). Not on touch screens, where it would raise the keyboard. */
+function focusFirstNumber() {
+  if (document.body.classList.contains('touch')) return;
+  setTimeout(() => { const n = document.querySelector('#props-wrap input.num'); if (n && dialog && !sketch) { n.focus(); n.select(); } }, 80); // after the dialog has finished drawing itself
+}
+// Any number box selects its whole value when it gets focus, by click or Tab, so typing a number replaces it.
+const isNumberBox = (el) => el?.tagName === 'INPUT' && (el.type === 'number' || el.classList.contains('num') || /^(decimal|numeric)$/.test(el.inputMode));
+document.addEventListener('focusin', (e) => { const t = e.target; if (isNumberBox(t)) { t.select(); t._fresh = true; } });
+document.addEventListener('mouseup', (e) => { if (e.target._fresh) { e.preventDefault(); e.target._fresh = false; } }, true); // the click that focused it must not drop the selection
+document.addEventListener('keydown', (e) => { if (e.target._fresh) e.target._fresh = false; }, true);
 
 function bodiesBefore(i) { return result.snaps[i] || result.bodies; }
 
@@ -1347,7 +1358,7 @@ function dialogPick(e) {
   }
   if (pk.kind === 'points3d') { // each click adds a point: on the model if there is one under the cursor, otherwise level with the last point
     const cur = f.params[pk.key] || [];
-    const sn = vp.pickSnap(e);
+    const sn = vp.snapAt(e, edgeEntries());
     const pt = sn ? sn.point : vp.pickHorizontal(e, cur.length ? cur[cur.length - 1][2] : 0);
     if (!pt) return;
     patchParams(i, { [pk.key]: [...cur, pt.map((v) => +v.toFixed(3))] });
@@ -1355,10 +1366,18 @@ function dialogPick(e) {
     return;
   }
   if (pk.kind === 'point') {
-    const sn = vp.pickSnap(e);
+    const sn = vp.snapAt(e, edgeEntries()); // corners and edges snap, then the face under the cursor
     if (!sn) return;
     const patch = { [pk.key]: sn.point.map((v) => +v.toFixed(3)) };
-    if (pk.dirKey) { const tg = vp.pickPlanarFace(e); if (tg?.normal) { patch[pk.dirKey] = tg.normal.map((v) => +v.toFixed(4)); if (f.type === 'hole') patch.face = { id: tg.id, point: tg.point.map((v) => +v.toFixed(3)), normal: tg.normal.map((v) => +v.toFixed(4)) }; } } // the hole remembers its face so it follows it when the model changes
+    if (pk.dirKey) {
+      let tg = vp.pickPlanarFace(e), nrm = tg?.normal, fid = tg?.id;
+      if ((!nrm || sn.kind !== 'face') && sn.normals?.length) { // on a corner or edge: use the adjoining face that faces the camera most
+        const view = new THREE.Vector3(); vp.camera.getWorldDirection(view);
+        const up = sn.normals.find((n) => n[2] > 0.99); // a top face is the usual place for a hole
+        nrm = up || [...sn.normals].sort((a, b) => view.dot(new THREE.Vector3(...a)) - view.dot(new THREE.Vector3(...b)))[0]; fid = sn.id;
+      }
+      if (nrm) { patch[pk.dirKey] = nrm.map((v) => +v.toFixed(4)); if (f.type === 'hole') patch.face = { id: fid, point: sn.point.map((v) => +v.toFixed(3)), normal: nrm.map((v) => +v.toFixed(4)) }; } // the hole remembers its face so it follows it when the model changes
+    }
     patchParams(i, patch);
     dialog.pick = null; renderDialog(); setupGizmo();
     return;
@@ -1792,7 +1811,7 @@ function measureClick(e) {
   const fmt = (v) => dispStr(v);
   const un = getUnits();
   if (M.mode === 'dist' || M.mode === 'angle') {
-    const sn = vp.pickSnap(e);
+    const sn = vp.snapAt(e, edgeEntries());
     if (!sn) return;
     const need = M.mode === 'dist' ? 2 : 3;
     if (M.pts.length >= need) M.pts = [];
@@ -2283,7 +2302,7 @@ function loadProject(txt, rev = 0, seq = rev) {
   vp.fitted = false; refresh();
 }
 const safeName = (n) => n.replace(/[^\w .()-]/g, '_').slice(0, 80) || 'Untitled';
-const putDesign = (name, ifMatch, folder, auto = false) => call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true), { 'if-match': String(ifMatch), ...(folder === undefined ? {} : { 'x-folder': encodeURIComponent(folder) }), ...(auto ? { 'x-autosave': '1' } : {}) });
+const putDesign = (name, ifMatch, folder, auto = false, note = '') => call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true), { 'if-match': String(ifMatch), ...(folder === undefined ? {} : { 'x-folder': encodeURIComponent(folder) }), ...(auto ? { 'x-autosave': '1' } : {}), ...(note ? { 'x-note': encodeURIComponent(note) } : {}) });
 const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
 
 /** Ask what to do when the saved design changed elsewhere. Resolves 'overwrite' | 'copy' | 'theirs' | null. */
@@ -2310,7 +2329,21 @@ async function openDesign(name, quiet = false) {
   catch (x) { toast(x.message, true); }
 }
 
-async function save(as) {
+/** The Save button: asks what changed, then saves a new version with that description (shown in the version history). */
+async function saveVersion() {
+  const named = acct.server && doc.name !== 'Untitled';
+  const m = modal(`<div class="modal-title">Save a version</div>
+    <form class="modal-body" autocomplete="off">
+      <p class="p0">${named ? `This saves <b>${esc(doc.name)}</b> as V${(doc.rev || 0) + 1}. You can open or restore any earlier version from the designs panel.` : 'Choose a name next, then this becomes the first version.'}</p>
+      <label>What changed? <span class="muted">(optional)</span><input name="note" maxlength="200" placeholder="e.g. Added mounting holes" aria-label="Description of this version" spellcheck="true"></label>
+      <div class="modal-foot flush"><button type="button" class="btn" id="sv-cancel">Cancel</button><button type="submit" class="btn primary">Save version</button></div>
+    </form>`);
+  const form = m.el.querySelector('form');
+  m.el.querySelector('#sv-cancel').onclick = () => m.close();
+  form.note.focus();
+  form.onsubmit = async (e) => { e.preventDefault(); const note = form.note.value.trim(); m.close(); await save(false, note); };
+}
+async function save(as, note = '') {
   let name = doc.name, folder = doc.folder || '';
   if (acct.server && !(await requireLogin())) return;
   if (acct.server && (as || name === 'Untitled')) { // in-app Save dialog: name + folder
@@ -2324,10 +2357,10 @@ async function save(as) {
   if (acct.server) {
     doc.saves = (doc.saves || 0) + 1;
     const expect = name === doc.name ? doc.seq || 0 : 0; // a new name should not already exist
-    let r = await putDesign(name, expect, folder);
+    let r = await putDesign(name, expect, folder, false, note);
     if (r.status === 409) {
       const choice = await conflictDialog(r.data, name);
-      if (choice === 'overwrite') r = await putDesign(name, '*', folder);
+      if (choice === 'overwrite') r = await putDesign(name, '*', folder, false, note);
       else if (choice === 'copy') {
         const pick = await saveDialog({ name: `${name} (copy)`, folder, title: 'Save a copy', okLabel: 'Save copy' });
         if (!pick || pick.name === 'Untitled') return;
@@ -2339,7 +2372,7 @@ async function save(as) {
     }
     if (!r.ok) return toast('Save failed: ' + (r.data?.error || r.status), true);
     doc.rev = r.data.rev; doc.seq = r.data.seq; doc.conflict = false; bannerRev = doc.seq; hideBanner(); doc.folder = folder; rememberLast(name);
-    toast(`Saved "${name}"${folder ? ` in ${folder}` : ''}`);
+    toast(`Saved "${name}" as V${doc.rev}${folder ? ` in ${folder}` : ''}`);
     if ($('#data-panel').classList.contains('open')) renderDataPanel();
   } else download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`);
   doc.name = name; $('#doc-name').textContent = name;
@@ -2560,7 +2593,8 @@ function renderDocTabs() {
       e.preventDefault();
       if (t.id !== activeTab) activateTab(t.id);
       showMenu(e.clientX, e.clientY, [
-        { label: acct.server ? 'Save version' : 'Save (download)', uicon: 'save', hint: 'Ctrl+S', run: () => save(false) },
+        { label: acct.server ? 'Save version…' : 'Save (download)', uicon: 'save', run: () => (acct.server ? saveVersion() : save(false)) },
+        ...(acct.server ? [{ label: 'Save without a description', uicon: 'save', hint: 'Ctrl+S', run: () => save(false) }] : []),
         { label: 'Save as…', uicon: 'save', hint: 'Ctrl+Shift+S', run: () => save(true) },
         { label: 'Export…', uicon: 'upload', run: exportDialog },
         { sep: true },
@@ -2737,6 +2771,13 @@ function bindViewport() {
   cv.addEventListener('pointermove', (e) => {
     if (sketch && !sketch.picking) return sketchPointer(e, 'move');
     if (e.buttons || hoverRaf) return;
+    const snapping = (measure && (measure.mode === 'dist' || measure.mode === 'angle')) || (dialog && (dialog.pick?.kind === 'point' || dialog.pick?.kind === 'points3d'));
+    if (snapping) { // show where a click would snap to (corner, edge or face)
+      hoverRaf = true;
+      requestAnimationFrame(() => { hoverRaf = false; if (measure || dialog) vp.setSnapMarker(vp.snapAt(e, edgeEntries())); });
+      return;
+    }
+    vp.setSnapMarker(null);
     if (measure) { measureHover(e); return; }
     if (dialog) {
       if (!defOf(doc.features[dialog.index])?.pickEdges) {
@@ -2985,7 +3026,7 @@ function openMarking(x, y) {
   closeMarking();
   if (!dialog && !sketch && !measure) {
     const rect = $('#gl').getBoundingClientRect();
-    const en = vp.pickEdge({ clientX: x, clientY: y }, edgeEntries());
+    const en = vp.pickEdge({ clientX: x, clientY: y }, edgeEntries(), 12); // a little more forgiving than hovering: you are aiming for a thin line
     if (en && !selEdges.some((e) => e.body === en.body && matchChain([en.chain], e.pts))) toggleSelEdge(en, false);
   }
   const host = $('#marking');
@@ -3108,8 +3149,8 @@ async function showVersions(pr) {
   const r = await call('GET', '/projects/' + encodeURIComponent(pr.name) + '/versions');
   if (!r.ok) return toast(r.data?.error || 'Could not load versions.', true);
   const when = (t) => new Date(t).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-  const rows = [{ rev: pr.ver, modified: pr.modified, device: pr.device, cur: true }, ...r.data];
-  const m = modal(`<div class="modal-title">Versions of ${esc(pr.name)}</div><div class="modal-body">${rows.map((v) => `<div class="ver-row" data-rev="${v.rev}"><div><b>V${v.rev}</b>${v.cur ? ' <span class="ver-cur">latest</span>' : ''}<div class="ver-sub">${when(v.modified)}${v.device ? ' · ' + esc(v.device) : ''}</div></div>${v.cur ? '' : '<div class="ver-btns"><button class="btn" data-a="open">Open</button><button class="btn" data-a="restore">Restore</button></div>'}</div>`).join('')}${r.data.length ? '' : '<div class="ver-sub">No earlier versions yet. Each save keeps the previous one.</div>'}<div class="ver-sub">The server keeps the most recent earlier versions of each design.</div></div>`);
+  const rows = [{ rev: pr.ver, modified: pr.modified, device: pr.device, note: pr.note, cur: true }, ...r.data];
+  const m = modal(`<div class="modal-title">Versions of ${esc(pr.name)}</div><div class="modal-body">${rows.map((v) => `<div class="ver-row" data-rev="${v.rev}"><div><b>V${v.rev}</b>${v.cur ? ' <span class="ver-cur">latest</span>' : ''}<div class="ver-sub">${when(v.modified)}${v.device ? ' · ' + esc(v.device) : ''}</div>${v.note ? `<div class="ver-note">${esc(v.note)}</div>` : ''}</div>${v.cur ? '' : '<div class="ver-btns"><button class="btn" data-a="open">Open</button><button class="btn" data-a="restore">Restore</button></div>'}</div>`).join('')}${r.data.length ? '' : '<div class="ver-sub">No earlier versions yet. Each save keeps the previous one.</div>'}<div class="ver-sub">The server keeps the most recent earlier versions of each design.</div></div>`);
   m.el.querySelectorAll('.ver-row button').forEach((b) => {
     b.onclick = async () => {
       const rev = +b.closest('.ver-row').dataset.rev;
@@ -3370,7 +3411,7 @@ async function boot() {
   const set = (id, html) => { $('#' + id).innerHTML = html; };
   set('btn-data', uicon('library', 18, 1.5));
   set('btn-undo', uicon('undo', 18, 1.5) + caret); set('btn-redo', uicon('redo', 18, 1.5) + caret);
-  set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('search', 18, 1.8));
+  set('btn-save', uicon('save', 18, 1.5)); set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('search', 18, 1.8));
  
   set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
   set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
@@ -3393,6 +3434,7 @@ async function boot() {
   bindTooltips();
   $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
   $('#btn-data').onclick = () => toggleDataPanel();
+  $('#btn-save').onclick = saveVersion;
   $('#btn-newtab').onclick = () => newDoc();
   renderDocTabs();
   $('#btn-ext').onclick = openQuickSearch;

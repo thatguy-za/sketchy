@@ -475,6 +475,64 @@ export class Viewport {
     }
     return { id: hit.object.userData.id, point: (best || hit.point).toArray(), vertex: !!best };
   }
+  /** Is this world point in view, not hidden behind a body? */
+  _visible(pt) {
+    const dir = pt.clone().sub(this.camera.position), dd = dir.length();
+    if (!this.opts.ortho) { this.ray.set(this.camera.position, dir.normalize()); const h = this.ray.intersectObjects(this.bodyGroup.children, false)[0]; return !(h && h.distance < dd - 0.05); }
+    const cd = new THREE.Vector3(); this.camera.getWorldDirection(cd);
+    this.ray.set(pt.clone().addScaledVector(cd, -5000), cd);
+    const h = this.ray.intersectObjects(this.bodyGroup.children, false)[0];
+    return !(h && h.distance < 5000 - 0.05);
+  }
+  /**
+   * Snap a point to the model near the cursor: first a corner (a vertex where edges meet), then anywhere along an edge, then the
+   * point under the cursor on a face. `entries` are edge chains ({body, chain}). Returns { point, kind: 'corner'|'edge'|'face', id, normals }
+   * where `normals` are the normals of the faces meeting there (to choose which face a hole goes on).
+   */
+  snapAt(ev, entries, px = 14) {
+    const r = this.rect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    const proj = (p) => { const v = p.clone().project(this.camera); return { x: ((v.x + 1) / 2) * r.width, y: ((1 - v.y) / 2) * r.height, z: v.z }; };
+    let corner = null, cd = px;
+    for (const e of entries) {
+      const ends = e.chain.closed ? e.chain.pts : e.chain.pts;
+      for (let i = 0; i < ends.length; i++) {
+        const P = new THREE.Vector3(...ends[i]), q = proj(P);
+        if (q.z > 1) continue;
+        const d = Math.hypot(q.x - mx, q.y - my);
+        if (d < cd && this._visible(P)) { cd = d; corner = { point: ends[i], id: e.body, frame: e.chain.frames?.[i] }; }
+      }
+    }
+    if (corner) return { point: [...corner.point], kind: 'corner', id: corner.id, normals: corner.frame ? [corner.frame.n1, corner.frame.n2] : [] };
+    let edge = null, ed = px;
+    for (const e of entries) {
+      const P = e.chain.pts.map((p) => new THREE.Vector3(...p));
+      if (e.chain.closed) P.push(P[0]);
+      for (let i = 0; i < P.length - 1; i++) {
+        const a = proj(P[i]), b = proj(P[i + 1]);
+        if (a.z > 1 || b.z > 1) continue;
+        const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy || 1;
+        const t = Math.max(0, Math.min(1, ((mx - a.x) * dx + (my - a.y) * dy) / l2));
+        const d = Math.hypot(a.x + dx * t - mx, a.y + dy * t - my);
+        if (d < ed) { const pt = P[i].clone().lerp(P[i + 1], t); if (this._visible(pt)) { ed = d; edge = { point: pt.toArray(), id: e.body, frame: e.chain.frames?.[Math.min(i, e.chain.frames.length - 1)] }; } }
+      }
+    }
+    if (edge) return { point: edge.point.map((v) => +v.toFixed(4)), kind: 'edge', id: edge.id, normals: edge.frame ? [edge.frame.n1, edge.frame.n2] : [] };
+    const f = this.pickSnap(ev);
+    return f ? { point: f.point, kind: 'face', id: f.id, normals: [] } : null;
+  }
+  /** A small marker showing where a snap would land (orange corner, blue edge, grey face); null hides it. */
+  setSnapMarker(sn) {
+    if (!this.snapMarker) {
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+      this.snapMarker = new THREE.Points(g, new THREE.PointsMaterial({ size: 11, sizeAttenuation: false, depthTest: false, transparent: true }));
+      this.snapMarker.renderOrder = 10; this.snapMarker.frustumCulled = false; this.snapMarker.visible = false;
+      this.scene.add(this.snapMarker);
+    }
+    if (!sn) { this.snapMarker.visible = false; return; }
+    this.snapMarker.geometry.attributes.position.array.set(sn.point); this.snapMarker.geometry.attributes.position.needsUpdate = true;
+    this.snapMarker.material.color.set(sn.kind === 'corner' ? 0xf08c00 : sn.kind === 'edge' ? 0x0b6bcb : 0x8a9099);
+    this.snapMarker.visible = true;
+  }
   // ---- sketch profile regions (shaded, pickable) ----
   // items: [{id, polys}] from kernel.profilesOf; params: sketch plane params.
   setProfiles(items, params, pickable = true) { this.setProfileGroups(items?.length ? [{ items, params, pickable }] : []); }
@@ -553,10 +611,10 @@ export class Viewport {
     g.setIndex(new THREE.BufferAttribute(pv.tris, 1));
     g.computeVertexNormals();
     const cut = pv.op === 'cut';
-    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: cut ? 0xe0584d : 0x9aa1ab, transparent: true, opacity: cut ? 0.45 : 0.62, side: THREE.DoubleSide, depthWrite: false, roughness: 0.7 }));
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: cut ? 0xe0453a : 0x2f7cf6, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false, roughness: 0.7 }));
     m.raycast = () => {};
     m.renderOrder = 3;
-    const e = new THREE.LineSegments(new THREE.EdgesGeometry(g, 30), new THREE.LineBasicMaterial({ color: cut ? 0xb0342b : 0x4a5058 }));
+    const e = new THREE.LineSegments(new THREE.EdgesGeometry(g, 30), new THREE.LineBasicMaterial({ color: cut ? 0xa8281f : 0x1c4fb8 }));
     e.raycast = () => {};
     m.add(e);
     this.previewGroup.add(m);
@@ -753,11 +811,11 @@ export class Viewport {
       }
     }
   }
-  pickEdge(ev, entries = this.pickEntries) {
+  pickEdge(ev, entries = this.pickEntries, tol = 7) {
     const r = this.rect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
     const proj = (p) => { const v = p.clone().project(this.camera); return [(v.x + 1) / 2 * r.width, (1 - v.y) / 2 * r.height, v]; };
-    let best = null, bd = 7;
+    let best = null, bd = tol;
     for (const e of entries) {
       const P = e.chain.pts.map((p) => new THREE.Vector3(...p));
       if (e.chain.closed) P.push(P[0]);

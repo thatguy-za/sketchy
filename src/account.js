@@ -63,6 +63,8 @@ export function modal(html, onClose) {
   const onKey = (e) => { if (e.key === 'Escape') { close(); removeEventListener('keydown', onKey, true); } };
   addEventListener('keydown', onKey, true);
   document.body.appendChild(back);
+  // a window that asks for a number opens with that number selected (unless it already put the focus somewhere itself)
+  if (!document.body.classList.contains('touch')) setTimeout(() => { if (!back.contains(document.activeElement)) back.querySelector('input[type=number], input[inputmode=decimal], input[inputmode=numeric]')?.focus(); }, 0);
   return { el: back.firstChild, close };
 }
 

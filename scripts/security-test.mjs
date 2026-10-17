@@ -119,6 +119,21 @@ try {
   check('a design over the size limit is refused', (await call('PUT', '/api/projects/huge', big, {}, true)).status === 413);
   check('a normal design saves', (await call('PUT', '/api/projects/small', { features: [] })).status === 200);
 
+
+  console.log('Version descriptions');
+  cookie = ''; await call('POST', '/api/login', { username: 'boss', password: 'correct-horse-battery' });
+  await call('PUT', '/api/projects/Noted', { features: [], v: 1 }, { 'x-note': encodeURIComponent('First pass\u0000\nwith "quotes" <b>') });
+  const lst1 = (await call('GET', '/api/projects')).json.find((x) => x.name === 'Noted');
+  check('the description is stored, one line, controls removed', lst1.note === 'First pass with "quotes" <b>', JSON.stringify(lst1.note));
+  await call('PUT', '/api/projects/Noted', { features: [], v: 1, x: 1 }, { 'x-autosave': '1' });
+  check('an autosave keeps the description of that version', (await call('GET', '/api/projects')).json.find((x) => x.name === 'Noted').note === 'First pass with "quotes" <b>');
+  await call('PUT', '/api/projects/Noted', { features: [], v: 2 }, { 'x-note': encodeURIComponent('x'.repeat(500)) });
+  const vers = (await call('GET', '/api/projects/Noted/versions')).json;
+  check('the older version keeps its description in the history', vers[0].rev === 1 && vers[0].note === 'First pass with "quotes" <b>', JSON.stringify(vers[0]));
+  check('descriptions are capped at 200 characters', (await call('GET', '/api/projects')).json.find((x) => x.name === 'Noted').note.length === 200);
+  await call('PUT', '/api/projects/Noted', { features: [], v: 3 });
+  check('a save without a description has none', (await call('GET', '/api/projects')).json.find((x) => x.name === 'Noted').note === '');
+
   console.log('MCP');
   const tok = (await call('POST', '/api/mcp/tokens', { name: 'test' })).json.token;
   const rpc = async (name, args) => (await (await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) })).json());

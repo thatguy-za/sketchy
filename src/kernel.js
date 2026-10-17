@@ -1326,8 +1326,10 @@ export function rebuild(features, count, opts = {}) {
           const cs = t(K.CrossSection.union(polys));
           const d = Math.abs(p.distance);
           let m = t(cs.extrude(d));
-          if (p.distance < 0) { m = t(m.translate([0, 0, -d])); b.m = t(b.m.subtract(t(m.transform(M)))); }
-          else b.m = t(b.m.add(t(m.transform(M))));
+          if (p.distance < 0) m = t(m.translate([0, 0, -d]));
+          const slab = t(m.transform(M)); // the material being added (distance > 0) or removed (distance < 0)
+          if (opts.previewId && opts.previewId === f.id) { const me = slab.getMesh(); preview = { op: p.distance < 0 ? 'cut' : 'join', verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts) }; }
+          b.m = p.distance < 0 ? t(b.m.subtract(slab)) : t(b.m.add(slab));
           break;
         }
         case 'joint': {
