@@ -16,7 +16,7 @@ import { parseSVG, parseDXF, textShapes } from './import2d.js';
 import { repairSoup, describeRepair } from './meshrepair.js';
 import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
 import { Viewport } from './viewport.js';
-import { findEdgeChains, matchChain, roundPts, planarFace, norm as vnorm } from './edges.js';
+import { findEdgeChains, matchChain, roundPts, edgeRef, planarFace, norm as vnorm } from './edges.js';
 import { acct, call, refreshAccount, ensureSignedIn, requireLogin, showAuth, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showAccount, openUserMenu, showAdmin } from './account.js';
 import { evalExpr, resolveParams, applyConfig, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
 import { saveDialog, askName, confirmBox, alertBox, chooseFolder, safeName as fileSafeName } from './files.js';
@@ -129,6 +129,7 @@ function refreshNow() {
   try { result = rebuild(feats, limit(), { bodyComp: doc.bodyComp, capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null }); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
+  for (const [id, origin] of Object.entries(result.shifted || {})) if (resolvedMap[id]) resolvedMap[id] = { ...resolvedMap[id], origin }; // sketches that followed their face
   vp.bodyColors = doc.appearance || {};
   vp.setBodies([...result.bodies, ...(result.surfaces || [])].filter((b) => !hiddenBodies.has(b.id)));
   for (const id of [...vp.selected]) if (!result.bodies.some((b) => b.id === id)) vp.selected.delete(id);
@@ -214,11 +215,11 @@ function updateEdgeView() {
   else if (/edges? selected/.test($('#hud').textContent)) $('#hud').innerHTML = '';
 }
 function toggleSelEdge(en, additive) {
-  const pts = roundPts(en.chain.pts);
+  const ref = edgeRef(en.body, en.chain);
   const same = (e) => e.body === en.body && matchChain([en.chain], e.pts);
   const has = selEdges.some(same);
-  if (!additive) { selEdges = has && selEdges.length === 1 ? [] : [{ body: en.body, pts }]; }
-  else selEdges = has ? selEdges.filter((e) => !same(e)) : [...selEdges, { body: en.body, pts }];
+  if (!additive) { selEdges = has && selEdges.length === 1 ? [] : [ref]; }
+  else selEdges = has ? selEdges.filter((e) => !same(e)) : [...selEdges, ref];
   selFace = null; vp.selected.clear(); vp.refreshMaterials(); vp.showFaces([], null);
   updateEdgeView(); renderTree(); renderRibbon();
 }
@@ -237,7 +238,7 @@ function edgesOfFace(f) {
   const n = f.normal, d0 = n[0] * f.point[0] + n[1] * f.point[1] + n[2] * f.point[2];
   return chainsFor(b)
     .filter((ch) => ch.pts.every((p) => Math.abs(n[0] * p[0] + n[1] * p[1] + n[2] * p[2] - d0) < 2e-3 && onBoundary(p)))
-    .map((ch) => ({ body: b.id, pts: roundPts(ch.pts) }));
+    .map((ch) => edgeRef(b.id, ch));
 }
 
 // ---- on-canvas distance manipulator (extrude arrow + value box)
@@ -334,9 +335,8 @@ function updatePickEdges() {
 }
 function toggleEdge(entry) {
   const f = doc.features[dialog.index];
-  const pts = roundPts(entry.chain.pts);
   const has = f.params.edges.some((e) => e.body === entry.body && matchChain([entry.chain], e.pts));
-  const edges = has ? f.params.edges.filter((e) => !(e.body === entry.body && matchChain([entry.chain], e.pts))) : [...f.params.edges, { body: entry.body, pts }];
+  const edges = has ? f.params.edges.filter((e) => !(e.body === entry.body && matchChain([entry.chain], e.pts))) : [...f.params.edges, edgeRef(entry.body, entry.chain)];
   updateParam(dialog.index, 'edges', edges);
   renderDialog();
 }
@@ -430,8 +430,6 @@ function sketchOnSelectedFace() {
 }
 function renderRibbon() {
   vp.hold('sketch', !!sketch);
-  const wb = $('#btn-workspace');
-  wb.innerHTML = '<span>DESIGN</span>'; wb.setAttribute('aria-label', 'Design workspace'); wb.disabled = true; wb.style.cursor = 'default';
   const picking = !!sketch?.picking, inSketch = !!sketch && !picking;
   const tabList = sketch ? ['SKETCH'] : WORKSPACE_TABS;
   const tabsEl = $('#tabs');
@@ -963,8 +961,9 @@ function showMenu(x, y, items) {
     if (it.disabled) e.setAttribute('aria-disabled', 'true');
     e.setAttribute('role', 'menuitem'); e.tabIndex = -1;
     if (it.dim) e.style.opacity = '.55';
-    const ic = it.swatch ? `<span class="swatch" style="background:${it.swatch}"></span>` : it.ficon ? ficon(it.ficon, 22) : it.uicon ? uicon(it.uicon, 16) : it.icon ? icon(it.icon, 16) : it.check === undefined ? '<span class="ph"></span>' : '';
+    const ic = it.swatch ? '<span class="swatch"></span>' : it.ficon ? ficon(it.ficon, 22) : it.uicon ? uicon(it.uicon, 16) : it.icon ? icon(it.icon, 16) : it.check === undefined ? '<span class="ph"></span>' : '';
     e.innerHTML = ic + `<span>${esc(it.label)}</span>` + (it.hint ? `<small>${it.hint}</small>` : '');
+    if (it.swatch) e.querySelector('.swatch').style.background = it.swatch;
     e.onclick = () => { m.hidden = true; it.run(); };
     m.appendChild(e);
   }
@@ -1211,7 +1210,7 @@ function renderDialog() {
       return g;
     };
     if (fld.type === 'edges') {
-      ctl.innerHTML = `<span>${val.length} selected</span> <button class="btn" id="d-edgeclear" style="margin-left:8px">Clear</button><div style="color:var(--muted);font-size:var(--fs-xs);margin-top:4px">Click edges in the viewport to add or remove them.</div>`;
+      ctl.innerHTML = `<span>${val.length} selected</span> <button class="btn ml8" id="d-edgeclear">Clear</button><div class="hint-sm">Click edges in the viewport to add or remove them.</div>`;
       ctl.querySelector('button').onclick = () => { set([]); renderDialog(); };
     } else if (fld.type === 'num') ctl.appendChild(numIn(fld.key, val));
     else if (fld.type === 'vec3') ctl.appendChild(vec3());
@@ -1249,15 +1248,15 @@ function renderDialog() {
       ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
     } else if (fld.type === 'bodies') {
       const avail = bodiesBefore(idx);
-      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk" style="font-weight:400"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
       ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'surfaces') {
       const avail = result.surfSnaps?.[idx] || result.surfaces.map((q) => ({ id: q.id, name: q.name }));
-      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk" style="font-weight:400"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click surfaces in the viewport.</div>' : '<div class="note">No surfaces yet.</div>';
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click surfaces in the viewport.</div>' : '<div class="note">No surfaces yet.</div>';
       ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'face' || fld.type === 'faces') {
       const list = fld.type === 'face' ? (val ? [val] : []) : val || [];
-      ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm" style="margin-left:6px">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : (fld.note || 'Click flat faces in the viewport. Click again to deselect.')}</div>`;
+      ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm ml6">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : (fld.note || 'Click flat faces in the viewport. Click again to deselect.')}</div>`;
       ctl.querySelector('button').onclick = () => { patchParams(idx, { [fld.key]: fld.type === 'face' ? null : [] }); renderDialog(); };
     } else if (fld.type === 'points3d') {
       const f2 = lenF(), pts = (val || []).map((q) => [...q]);
@@ -1359,7 +1358,7 @@ function dialogPick(e) {
     const sn = vp.pickSnap(e);
     if (!sn) return;
     const patch = { [pk.key]: sn.point.map((v) => +v.toFixed(3)) };
-    if (pk.dirKey) { const tg = vp.pickPlanarFace(e); if (tg?.normal) patch[pk.dirKey] = tg.normal.map((v) => +v.toFixed(4)); }
+    if (pk.dirKey) { const tg = vp.pickPlanarFace(e); if (tg?.normal) { patch[pk.dirKey] = tg.normal.map((v) => +v.toFixed(4)); if (f.type === 'hole') patch.face = { id: tg.id, point: tg.point.map((v) => +v.toFixed(3)), normal: tg.normal.map((v) => +v.toFixed(4)) }; } } // the hole remembers its face so it follows it when the model changes
     patchParams(i, patch);
     dialog.pick = null; renderDialog(); setupGizmo();
     return;
@@ -1528,7 +1527,7 @@ function renderSketchPanel() {
   const sh = p.shapes;
   const fieldsFor = (s) => ({ rect: ['x', 'y', 'w', 'h'], circle: ['cx', 'cy', 'r'], ngon: ['cx', 'cy', 'r', 'n', 'rot'], rrect: ['x', 'y', 'w', 'h', 'r'], slot: ['x1', 'y1', 'x2', 'y2', 'w'], ellipse: ['cx', 'cy', 'rx', 'ry'], path: [] }[s.t]);
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('sketch', 20)}SKETCH PALETTE</div><div class="body">
-    <div class="mh" style="font-weight:700;margin:0 0 4px">Options</div>
+    <div class="mh strong mb4">Options</div>
     <div class="row"><label>Sketch plane</label><select id="sp-plane">${[...['XY', 'XZ', 'YZ'].map((k) => [k, k]), ...doc.features.filter((q, qi) => q.type === 'plane' && qi < sketch.index).map((q) => ['ref:' + q.id, q.name]), ...(p.plane === 'custom' && !p.planeRef ? [['custom', 'custom']] : [])].map(([k, l]) => `<option value="${esc(k)}" ${(k === p.plane && !p.planeRef) || k === 'ref:' + p.planeRef ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
     <div class="row"><label>Plane offset</label><input id="sp-off" type="text" inputmode="decimal" value="${dispStr(p.offset)}"></div>
     <div class="row"><label>Snap (${getUnits()})</label><select id="sp-snap">${['auto', ...UNIT_TABLE[getUnits()].steps.slice(2, 9)].map((v) => { const mmv = v === 'auto' ? 'auto' : v * lenF(); const sel = v === 'auto' ? sketch.snap === 'auto' : typeof sketch.snap === 'number' && Math.abs(sketch.snap - mmv) < 1e-9; return `<option value="${mmv}" ${sel ? 'selected' : ''}>${v}</option>`; }).join('')}</select></div>
@@ -1536,15 +1535,15 @@ function renderSketchPanel() {
     <label class="chk"><input type="checkbox" id="sp-grid" ${sketch.grid?.visible === false ? '' : 'checked'}> Sketch Grid</label>
     <label class="chk"><input type="checkbox" id="sp-showprof" ${sketch.showProfile === false ? '' : 'checked'}> Show Profile</label>
     <label class="chk"><input type="checkbox" id="sp-snapon" ${sketch.snapOn === false ? '' : 'checked'}> Snap</label>
-    <div style="margin:6px 0"><button class="btn" id="sp-lookat">Look At</button></div>
-    <div class="sep"></div>${(p.cons || []).length ? `<div class="mh" style="font-weight:700;margin-bottom:4px">Constraints (${p.cons.length})</div><div id="sp-cons"></div><div class="sep"></div>` : ''}<div class="mh" style="font-weight:700;margin-bottom:4px">Shapes (${sh.length})</div><div id="sp-list"></div>
+    <div class="my6"><button class="btn" id="sp-lookat">Look At</button></div>
+    <div class="sep"></div>${(p.cons || []).length ? `<div class="mh strong mb4">Constraints (${p.cons.length})</div><div id="sp-cons"></div><div class="sep"></div>` : ''}<div class="mh strong mb4">Shapes (${sh.length})</div><div id="sp-list"></div>
     <div class="note">Nested shapes become holes. To sketch on a body, start a new sketch and click one of its flat faces.</div></div>
     <div class="foot"><button class="btn" id="sp-cancel">Cancel</button><button class="btn primary" id="sp-ok">Finish Sketch</button></div></div>`;
   const consHost = $('#sp-cons');
   if (consHost) (p.cons || []).forEach((c, i) => {
     const row = document.createElement('div');
     row.className = 'shape-item';
-    row.innerHTML = `<b style="width:18px;text-align:center;color:#d84a3a">${CON_GLYPH[c.t]}</b><span>${CON_LABEL[c.t]}</span><button class="x" title="Delete">✕</button>`;
+    row.innerHTML = `<b class="con-glyph">${CON_GLYPH[c.t]}</b><span>${CON_LABEL[c.t]}</span><button class="x" title="Delete">✕</button>`;
     row.querySelector('.x').onclick = () => setSketchCons(p.cons.filter((_, k) => k !== i));
     consHost.appendChild(row);
   });
@@ -1572,8 +1571,8 @@ function renderSketchPanel() {
   $('#sp-plane').onchange = (e) => {
     const v = e.target.value;
     if (v === 'custom') return;
-    if (v.startsWith('ref:')) { const g = resolvedMap[v.slice(4)]; if (!g) return; setSketchParam({ planeRef: v.slice(4), plane: 'custom', origin: g.origin, normal: g.normal, xdir: g.xdir }); }
-    else setSketchParam({ plane: v, planeRef: undefined, origin: undefined, normal: undefined, xdir: undefined });
+    if (v.startsWith('ref:')) { const g = resolvedMap[v.slice(4)]; if (!g) return; setSketchParam({ planeRef: v.slice(4), faceRef: undefined, plane: 'custom', origin: g.origin, normal: g.normal, xdir: g.xdir }); }
+    else setSketchParam({ plane: v, planeRef: undefined, faceRef: undefined, origin: undefined, normal: undefined, xdir: undefined });
     vp.lookAtPlane(curSketch().params); renderSketchPanel();
   };
   $('#sp-off').oninput = (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setSketchParam({ offset: v * lenF() }); };
@@ -1736,7 +1735,7 @@ function openParameters() {
       host.append(name, ex, ut, val, cm, del);
       showVal();
     });
-    if (!list.length) host.insertAdjacentHTML('beforeend', '<div class="hint" style="grid-column:1/-1">No parameters yet.</div>');
+    if (!list.length) host.insertAdjacentHTML('beforeend', '<div class="hint span-all">No parameters yet.</div>');
   };
   m.el.querySelector('#p-add').onclick = () => {
     let n = 1; const used = new Set((doc.params || []).map((q) => q.name));
@@ -1863,7 +1862,7 @@ function showDriveJoints() {
   const wrap = $('#props-wrap');
   if (!joints.length) return toast('No movable joints yet. Add a Revolute, Slider, Cylindrical or Planar joint first.', true);
   const rng = (f) => (['revolute', 'cylindrical'].includes(f.params.jtype) ? [-180, 180, 1, '°'] : (() => { const m = Math.max(50, Math.abs(f.params.value) * 2); return [-m, m, m / 200, ' mm']; })());
-  wrap.innerHTML = `<div class="props"><div class="title">${ficon('joint', 20)}DRIVE JOINTS</div><div class="body">${joints.map(([f, i]) => { const [lo, hi, st, u] = rng(f); return `<div class="stat"><span>${esc(f.name)} (${f.params.jtype})</span><b id="dj-v${i}">${+f.params.value.toFixed(2)}${u}</b></div><input type="range" data-i="${i}" min="${lo}" max="${hi}" step="${st}" value="${f.params.value}" style="width:100%">`; }).join('')}</div><div class="foot"><button class="btn primary" id="i-close">Done</button></div></div>`;
+  wrap.innerHTML = `<div class="props"><div class="title">${ficon('joint', 20)}DRIVE JOINTS</div><div class="body">${joints.map(([f, i]) => { const [lo, hi, st, u] = rng(f); return `<div class="stat"><span>${esc(f.name)} (${f.params.jtype})</span><b id="dj-v${i}">${+f.params.value.toFixed(2)}${u}</b></div><input type="range" data-i="${i}" min="${lo}" max="${hi}" step="${st}" value="${f.params.value}" class="w100">`; }).join('')}</div><div class="foot"><button class="btn primary" id="i-close">Done</button></div></div>`;
   wrap.classList.add('open');
   wrap.querySelectorAll('input[type=range]').forEach((r) => {
     let pushed = false;
@@ -1891,13 +1890,14 @@ function appearanceDialog(ids) {
     <form class="modal-body ap">
       <p class="rp-lead">${bodies.length === 1 ? `<b>${esc(bodies[0].name)}</b>` : `<b>${bodies.length} bodies</b>`}</p>
       <div role="radiogroup" aria-label="Material" class="ap-mats">
-        <button type="button" class="ap-mat" role="radio" data-m="" aria-checked="${material === ''}"><i style="background:radial-gradient(circle at 32% 28%, #fff 0, #c3c7cd 32%, #000 140%)"></i><span>Default</span></button>
-        ${groups.map((g) => `<div class="ap-gh">${g}</div>` + MATERIALS.filter((m) => m.group === g).map((m) => `<button type="button" class="ap-mat" role="radio" data-m="${m.id}" aria-checked="${material === m.id}"><i style="${swatch(m)}"></i><span>${esc(m.name)}</span><small>${m.density} g/cm³</small></button>`).join('')).join('')}
+        <button type="button" class="ap-mat" role="radio" data-m="" aria-checked="${material === ''}"><i class="sw-default"></i><span>Default</span></button>
+        ${groups.map((g) => `<div class="ap-gh">${g}</div>` + MATERIALS.filter((m) => m.group === g).map((m) => `<button type="button" class="ap-mat" role="radio" data-m="${m.id}" aria-checked="${material === m.id}"><i data-mid="${m.id}"></i><span>${esc(m.name)}</span><small>${m.density} g/cm³</small></button>`).join('')).join('')}
       </div>
       <label class="ex-chk"><input type="checkbox" name="custom" ${customOn ? 'checked' : ''}><span>Custom colour</span><input type="color" name="color" value="${color}" aria-label="Colour"></label>
-      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="ap-c">Cancel</button><button type="submit" class="btn primary">Apply</button></div>
+      <div class="modal-foot flush"><button type="button" class="btn" id="ap-c">Cancel</button><button type="submit" class="btn primary">Apply</button></div>
     </form>`);
   const form = md.el.querySelector('form'), mats = [...md.el.querySelectorAll('.ap-mat')];
+  md.el.querySelectorAll('[data-mid]').forEach((i) => { const m = MATERIALS.find((x) => x.id === i.dataset.mid); if (m) i.style.cssText = swatch(m); });
   const pick = (id) => { material = id; mats.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.m === id))); };
   mats.forEach((b) => (b.onclick = () => pick(b.dataset.m)));
   form.color.oninput = () => { form.custom.checked = true; };
@@ -1926,8 +1926,8 @@ function saveImageDialog() {
       <label>Size<select name="size">${sizes.map(([w, h, l], i) => `<option value="${i}">${esc(l)}</option>`).join('')}</select></label>
       <label>Background<select name="bg"><option value="transparent">Transparent</option><option value="#ffffff">White</option><option value="#eef1f4">Light grey</option><option value="#16181c">Dark</option></select></label>
       <label class="ex-chk"><input type="checkbox" name="render" ${vp.opts.render ? 'checked' : 'checked'}><span>Render look (shadows and reflections)</span></label>
-      <div class="note" id="si-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
-      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="si-c">Cancel</button><button type="submit" class="btn primary">Save PNG</button></div>
+      <div class="note err-note" id="si-err" role="alert"></div>
+      <div class="modal-foot flush"><button type="button" class="btn" id="si-c">Cancel</button><button type="submit" class="btn primary">Save PNG</button></div>
     </form>`);
   const form = md.el.querySelector('form');
   md.el.querySelector('#si-c').onclick = () => md.close();
@@ -1958,7 +1958,7 @@ function showSection() {
     wrap.innerHTML = `<div class="props"><div class="title">${ficon('sectionan', 20)}SECTION ANALYSIS</div><div class="body">
       <div class="row"><label>Plane</label><select id="sa-ax"><option value="X"${st.axis === 'X' ? ' selected' : ''}>YZ (normal X)</option><option value="Y"${st.axis === 'Y' ? ' selected' : ''}>XZ (normal Y)</option><option value="Z"${st.axis === 'Z' ? ' selected' : ''}>XY (normal Z)</option></select></div>
       <div class="row"><label>Offset (${u})</label><input id="sa-off" type="number" step="any" value="${+(st.offset / lenF()).toFixed(4)}"></div>
-      <input id="sa-sl" type="range" min="${lo}" max="${hi}" step="${Math.max((hi - lo) / 400, 0.01)}" value="${st.offset}" style="width:100%">
+      <input id="sa-sl" type="range" min="${lo}" max="${hi}" step="${Math.max((hi - lo) / 400, 0.01)}" value="${st.offset}" class="w100">
       <div class="row"><label>Flip side</label><input id="sa-fl" type="checkbox"${st.flip ? ' checked' : ''}></div>
       <div class="note">Hides everything beyond the plane and caps the cut. Nothing is added to the timeline.</div></div>
       <div class="foot"><button class="btn primary" id="i-close">Done</button></div></div>`;
@@ -2002,8 +2002,8 @@ function askPattern(kind, { count = 1, centre = [0, 0], preview = () => {} } = {
           ? `<div class="pt-grid">${num('nx', 'Count along X', 3, 'min="1" max="200" step="1"')}${num('dx', `Spacing X (${u})`, d(20))}${num('ny', 'Count along Y', 2, 'min="1" max="200" step="1"')}${num('dy', `Spacing Y (${u})`, d(20))}</div>`
           : `<div class="pt-grid">${num('n', 'Count (with the original)', 6, 'min="2" max="500" step="1"')}${num('angle', 'Total angle (°)', 360)}${num('cx', `Centre X (${u})`, d(centre[0]))}${num('cy', `Centre Y (${u})`, d(centre[1]))}</div>
              <label class="ex-chk"><input type="checkbox" name="turn" checked><span>Turn each copy with the pattern</span></label>`}
-        <div class="note" id="pt-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
-        <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="pt-c">Cancel</button><button type="submit" class="btn primary">Add copies</button></div>
+        <div class="note err-note" id="pt-err" role="alert"></div>
+        <div class="modal-foot flush"><button type="button" class="btn" id="pt-c">Cancel</button><button type="submit" class="btn primary">Add copies</button></div>
       </form>`, () => finish(null));
     const form = m.el.querySelector('form'), err = m.el.querySelector('#pt-err');
     const read = () => rect
@@ -2024,7 +2024,7 @@ function askPattern(kind, { count = 1, centre = [0, 0], preview = () => {} } = {
 }
 function showTextDialog() {
   if (dialog) return;
-  const m = modal(`<div class="modal-title">Text</div><div class="modal-body"><label>Text<textarea id="tx-s" rows="2" style="font:inherit">Sketchy</textarea></label><label>Height (${getUnits()})<input id="tx-h" type="number" value="${+(10 / lenF()).toFixed(3)}" step="any"></label><label style="flex-direction:row;align-items:center;gap:6px"><input id="tx-b" type="checkbox"> Bold</label></div><div class="foot" style="padding:10px 16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn" id="tx-c">Cancel</button><button class="btn primary" id="tx-ok">Insert</button></div>`);
+  const m = modal(`<div class="modal-title">Text</div><div class="modal-body"><label>Text<textarea id="tx-s" rows="2" class="font-inherit">Sketchy</textarea></label><label>Height (${getUnits()})<input id="tx-h" type="number" value="${+(10 / lenF()).toFixed(3)}" step="any"></label><label class="row-label"><input id="tx-b" type="checkbox"> Bold</label></div><div class="foot foot-end"><button class="btn" id="tx-c">Cancel</button><button class="btn primary" id="tx-ok">Insert</button></div>`);
   $('#tx-c').onclick = m.close;
   $('#tx-ok').onclick = async () => {
     const s = $('#tx-s').value, h = +$('#tx-h').value * lenF();
@@ -2161,8 +2161,8 @@ function exportDialog() {
       <label>Format<select id="ex-fmt" name="fmt">${EXPORT_FORMATS.map(([v, l]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + v})</option>`).join('')}</select></label>
       <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
       <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
-      <div class="note" id="ex-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
-      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="ex-c">Cancel</button><button type="submit" class="btn primary">Export</button></div>
+      <div class="note err-note" id="ex-err" role="alert"></div>
+      <div class="modal-foot flush"><button type="button" class="btn" id="ex-c">Cancel</button><button type="submit" class="btn primary">Export</button></div>
     </form>`);
   const form = m.el.querySelector('form'), fmtSel = m.el.querySelector('#ex-fmt');
   const sync = () => {
@@ -2223,7 +2223,7 @@ function repairDialog(part, why = '') {
         <label>Only holes with a rim shorter than<span class="rp-row"><input name="maxhole" type="number" min="0" step="any" value="0" inputmode="decimal"><span>mm (0 = any size)</span></span></label>
         <label>Remove pieces smaller than<span class="rp-row"><input name="shell" type="number" min="0" max="100" step="any" value="0" inputmode="decimal"><span>% of the largest piece (0 = keep all)</span></span></label>
         <div class="rp-result" id="rp-res" aria-live="polite"></div>
-        <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="rp-c">Cancel</button><button type="submit" class="btn primary">Import repaired mesh</button></div>
+        <div class="modal-foot flush"><button type="button" class="btn" id="rp-c">Cancel</button><button type="submit" class="btn primary">Import repaired mesh</button></div>
       </form>`, () => finish(null));
     const form = m.el.querySelector('form'), res = m.el.querySelector('#rp-res');
     let last = null;
@@ -2292,7 +2292,7 @@ function conflictDialog(info, name) {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
     const m = modal(`<div class="modal-title">"${esc(name)}" changed on the server</div><div class="modal-body">
-      <p style="margin:0">It was saved${info.device ? ` from <b>${esc(info.device)}</b>` : ''}${info.modified ? ` ${ago(info.modified)}` : ''} (revision ${info.rev}) after you opened it. Saving now would replace those changes.</p>
+      <p class="p0">It was saved${info.device ? ` from <b>${esc(info.device)}</b>` : ''}${info.modified ? ` ${ago(info.modified)}` : ''} (revision ${info.rev}) after you opened it. Saving now would replace those changes.</p>
       <div class="conflict-actions">
         <button class="btn primary" data-c="copy">Save mine as a copy…</button>
         <button class="btn" data-c="theirs">Discard mine, open theirs</button>
@@ -2364,7 +2364,7 @@ async function checkDrafts() {
   const title = d.key === '__untitled' ? 'an unsaved design' : `"${d.key}"`;
   const choice = await new Promise((resolve) => {
     let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const m = modal(`<div class="modal-title">Resume where you left off?</div><div class="modal-body"><p style="margin:0">There is an autosaved draft of ${esc(title)} from <b>${esc(d.device || 'another device')}</b>, ${ago(d.modified)}.</p></div>
+    const m = modal(`<div class="modal-title">Resume where you left off?</div><div class="modal-body"><p class="p0">There is an autosaved draft of ${esc(title)} from <b>${esc(d.device || 'another device')}</b>, ${ago(d.modified)}.</p></div>
       <div class="modal-foot"><button class="btn" data-c="discard">Discard draft</button><button class="btn" data-c="">Not now</button><button class="btn primary" data-c="resume">Resume</button></div>`, () => finish(''));
     m.el.querySelectorAll('[data-c]').forEach((b) => (b.onclick = () => { finish(b.dataset.c); m.close(); }));
   });
@@ -2582,11 +2582,61 @@ function scheduleAutosave() {
 function undo() { if (dialog || sketch || !undoStack.length) return; redoStack.push(snapshot()); restore(undoStack.pop()); markDirty(); refresh(); }
 function redo() { if (dialog || sketch || !redoStack.length) return; undoStack.push(snapshot()); restore(redoStack.pop()); markDirty(); refresh(); }
 
+// ------------------------------------------------------------------ touch helpers
+let touchMulti = false;
+/** Shift/Ctrl/Cmd on a keyboard, or the Multi-select toggle on the touch bar, adds to the selection instead of replacing it. */
+const multiSel = (e) => touchMulti || !!(e && (e.shiftKey || e.ctrlKey || e.metaKey));
+/** Floating buttons for what touch screens lack a keyboard for: undo, cancel, finish and multi-select. */
+function buildTouchBar() {
+  const bar = document.createElement('div');
+  bar.id = 'touchbar'; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'Touch controls');
+  const key = (k) => () => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+  const items = [
+    ['multi', 'Multi-select', null, () => { touchMulti = !touchMulti; syncBar(); }],
+    ['undo', 'Undo', 'undo', () => undo()],
+    ['esc', 'Cancel', 'close', key('Escape')],
+    ['enter', 'Done', 'check', key('Enter')],
+  ];
+  bar.innerHTML = items.map(([id, label, ic]) => `<button class="btn" id="tb-${id}" type="button">${ic ? uicon(ic, 18, 1.6) : ''}<span>${label}</span></button>`).join('');
+  items.forEach(([id, , , run]) => { bar.querySelector('#tb-' + id).onclick = run; });
+  $('#viewport').appendChild(bar);
+  function syncBar() {
+    const busy = !!sketch || !!measure;
+    bar.classList.toggle('on', document.body.classList.contains('touch'));
+    $('#tb-multi').classList.toggle('active', touchMulti); $('#tb-multi').setAttribute('aria-pressed', String(touchMulti));
+    for (const id of ['esc', 'enter']) $('#tb-' + id).hidden = !busy;
+  }
+  setInterval(syncBar, 400);
+  syncBar();
+}
+
 // ------------------------------------------------------------------ viewport events
 function bindViewport() {
   const cv = $('#gl');
   let down = null, rdown = null;
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  // Touch: fingers on the canvas. A second finger means navigation (pinch / two-finger pan), so taps and sketch input ignore it;
+  // a long press opens the context menu and a quick second tap acts as a double-click.
+  const fingers = new Set(); let multi = false, press = null, lastTap = null, tapDbl = 0;
+  const endPress = () => { clearTimeout(press?.t); press = null; };
+  cv.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    document.body.classList.add('touch');
+    fingers.add(e.pointerId);
+    if (fingers.size > 1) { multi = true; down = null; endPress(); return; }
+    multi = false;
+    const x = e.clientX, y = e.clientY;
+    press = { x, y, t: setTimeout(() => { press = null; down = null; if (!sketch?.pts) openMarking(x, y); }, 550) };
+  }, true);
+  cv.addEventListener('pointermove', (e) => { if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 8) endPress(); }, true);
+  const lift = (e) => { if (e.pointerType !== 'touch') return; fingers.delete(e.pointerId); endPress(); if (!fingers.size) setTimeout(() => { if (!fingers.size) multi = false; }, 0); };
+  cv.addEventListener('pointerup', lift, true); cv.addEventListener('pointercancel', lift, true);
+  /** Taps close together in time and place count as a double-click. */
+  const doubleTap = (e) => {
+    const now = performance.now(), l = lastTap; lastTap = { t: now, x: e.clientX, y: e.clientY };
+    if (l && now - l.t < 350 && Math.hypot(e.clientX - l.x, e.clientY - l.y) < 24) { lastTap = null; tapDbl = now; return true; }
+    return false;
+  };
   // Navigation: middle = pan, Shift + middle = orbit, double-click middle = fit
   cv.addEventListener('pointerdown', (e) => {
     if (e.button !== 1) return;
@@ -2595,8 +2645,10 @@ function bindViewport() {
   }, true);
   cv.addEventListener('pointerdown', (e) => { if (e.button === 2) rdown = { x: e.clientX, y: e.clientY }; });
   cv.addEventListener('pointerup', (e) => { if (e.button === 2 && rdown && Math.hypot(e.clientX - rdown.x, e.clientY - rdown.y) < 5 && !sketch?.pts) openMarking(e.clientX, e.clientY); rdown = null; });
-  cv.addEventListener('pointerdown', (e) => { if (sketch && !sketch.picking && e.button === 0) { SU.pointer(e, 'down'); return; } down = { x: e.clientX, y: e.clientY, b: e.button }; });
+  cv.addEventListener('pointerdown', (e) => { if (multi) return; if (sketch && !sketch.picking && e.button === 0) { SU.pointer(e, 'down'); return; } down = { x: e.clientX, y: e.clientY, b: e.button }; });
   cv.addEventListener('pointerup', (e) => {
+    if (e.pointerType === 'touch' && (multi || fingers.size)) { down = null; return; }
+    if (e.pointerType === 'touch' && e.button === 0 && !sketch?.picking && doubleTap(e)) { down = null; (sketch ? SU.dblclick() : dblPick(e)); return; }
     if (sketch && !sketch.picking) { if (e.button === 0) SU.pointer(e, 'up'); return; }
     if (!down || e.button !== 0 || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || vp.gizmo.dragging) { down = null; return; }
     down = null;
@@ -2616,8 +2668,8 @@ function bindViewport() {
       return;
     }
     const eh = vp.pickEdge(e, edgeEntries());
-    if (eh) { toggleSelEdge(eh, e.shiftKey || e.ctrlKey || e.metaKey); return; }
-    const add = e.shiftKey || e.ctrlKey || e.metaKey;
+    if (eh) { toggleSelEdge(eh, multiSel(e)); return; }
+    const add = multiSel(e);
     const pf = vp.pickProfileAt(e);
     if (pf) { // a sketch region under the cursor (unless a body surface is in front of it)
       const bh = vp.pickBody(e);
@@ -2631,7 +2683,7 @@ function bindViewport() {
       }
     }
     if (profSel.size && !add) { profSel.clear(); updateProfileView(); }
-    if (selEdges.length && !(e.shiftKey || e.ctrlKey || e.metaKey)) { selEdges = []; updateEdgeView(); }
+    if (selEdges.length && !(multiSel(e))) { selEdges = []; updateEdgeView(); }
     if (selPriority === 'face') {
       const tg = vp.pickPlanarFace(e);
       vp.selected.clear(); vp.refreshMaterials();
@@ -2642,15 +2694,16 @@ function bindViewport() {
       return;
     }
     const hit = vp.pickBody(e);
-    selectBody(hit?.id, e.shiftKey || e.ctrlKey || e.metaKey);
+    selectBody(hit?.id, multiSel(e));
   });
-  cv.addEventListener('dblclick', (e) => { // double-click: the whole body, whatever the click priority is
+  const dblPick = (e) => { // double-click: the whole body, whatever the click priority is
     if (e.button !== 0 || sketch || dialog || measure || selMode !== 'click') return;
     const hit = vp.pickBody(e);
     if (!hit) return;
     selFace = null; vp.showFaces([], null);
-    selectBody(hit.id, e.shiftKey || e.ctrlKey || e.metaKey);
-  });
+    selectBody(hit.id, multiSel(e));
+  };
+  cv.addEventListener('dblclick', (e) => { if (performance.now() - tapDbl > 500) dblPick(e); });
   // Press/Pull: drag the picked face along its normal
   $('#viewport').addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || e.target !== cv || !dialog) return;
@@ -2679,7 +2732,7 @@ function bindViewport() {
     addEventListener('pointermove', move);
     addEventListener('pointerup', up, { once: true });
   }, true);
-  cv.addEventListener('dblclick', () => { if (sketch && !sketch.picking) SU.dblclick(); });
+  cv.addEventListener('dblclick', () => { if (sketch && !sketch.picking && performance.now() - tapDbl > 500) SU.dblclick(); });
   let hoverRaf = false;
   cv.addEventListener('pointermove', (e) => {
     if (sketch && !sketch.picking) return sketchPointer(e, 'move');
@@ -2731,7 +2784,7 @@ function bindViewport() {
 function applyNavMode() {
   if (!vp) return;
   const B = THREE.MOUSE;
-  vp.eachPane(() => { vp.controls.mouseButtons.LEFT = sketch && !sketch.picking ? -1 : { orbit: B.ROTATE, pan: B.PAN, zoom: B.DOLLY, zwin: -1 }[navMode]; });
+  vp.eachPane(() => { vp.controls.touches = { ONE: sketch && !sketch.picking ? -1 : { orbit: THREE.TOUCH.ROTATE, pan: THREE.TOUCH.PAN, zoom: THREE.TOUCH.DOLLY_PAN, zwin: -1 }[navMode], TWO: THREE.TOUCH.DOLLY_PAN }; vp.controls.mouseButtons.LEFT = sketch && !sketch.picking ? -1 : { orbit: B.ROTATE, pan: B.PAN, zoom: B.DOLLY, zwin: -1 }[navMode]; });
   const hud = { pan: 'Pan: drag to move the view', zoom: 'Zoom: drag up/down', zwin: 'Zoom Window: drag a rectangle' }[navMode];
   if (hud && !sketch && !measure && !dialog) $('#hud').innerHTML = hud + ' · Esc to exit';
   else if (!hud && !sketch && !measure && !dialog && /Pan:|Zoom/.test($('#hud').textContent)) $('#hud').innerHTML = '';
@@ -2976,7 +3029,7 @@ function openMarking(x, y) {
     const b = document.createElement('div');
     b.className = 'pill' + (pl.dim ? ' dim' : '');
     b.style.left = pl.dx + 'px'; b.style.top = pl.dy + 'px';
-    b.innerHTML = `<span>${esc(pl.label)}</span>` + (pl.f ? ficon(pl.f, 20) : pl.u ? `<span style="color:${pl.red ? '#e0453a' : '#555'};display:grid">${uicon(pl.u, 16, pl.red ? 2.4 : 1.6)}</span>` : '');
+    b.innerHTML = `<span>${esc(pl.label)}</span>` + (pl.f ? ficon(pl.f, 20) : pl.u ? `<span class="pl-ic ${pl.red ? 'red' : ''}">${uicon(pl.u, 16, pl.red ? 2.4 : 1.6)}</span>` : '');
     b.onclick = done(pl.run);
     mm.appendChild(b);
   }
@@ -3220,7 +3273,7 @@ async function renderDataPanel() {
         drop(row, path);
         grid.appendChild(row);
         if (!isClosed) {
-          if (!inside.length && !folders.some((f) => f.startsWith(path + '/'))) grid.insertAdjacentHTML('beforeend', `<div class="dp-empty dp-fempty" style="margin-left:${depth * 14 + 22}px">Empty folder. Drag designs here, or choose Save and pick it.</div>`);
+          if (!inside.length && !folders.some((f) => f.startsWith(path + '/'))) { grid.insertAdjacentHTML('beforeend', '<div class="dp-empty dp-fempty">Empty folder. Drag designs here, or choose Save and pick it.</div>'); grid.lastElementChild.style.marginLeft = `${depth * 14 + 22}px`; }
           for (const pr of inside.sort((a, b) => b.modified - a.modified)) { const c = designCard(pr, false); c.style.marginLeft = depth * 14 + 14 + 'px'; grid.appendChild(c); }
         }
       }
@@ -3235,7 +3288,7 @@ async function renderDataPanel() {
     grid.innerHTML = '';
     if (doc.features.length || doc.name !== 'Untitled') grid.appendChild(card(doc.name, { ver: (doc.saves || 0) + 1 }));
     grid.insertAdjacentHTML('beforeend', acct.server
-      ? `<div class="dp-empty">Sign in to see the designs saved on this server.<br><button class="btn primary" id="dp-signin" style="margin-top:10px">Sign in</button></div>`
+      ? `<div class="dp-empty">Sign in to see the designs saved on this server.<br><button class="btn primary mt10" id="dp-signin">Sign in</button></div>`
       : '<div class="dp-empty">Saving to the server needs the Sketchy container (<code>docker compose up</code>). Use <b>File → Open from my computer</b> to open a project file.</div>');
     $('#dp-signin')?.addEventListener('click', async () => { if (await showAuth()) renderDataPanel(); });
   }
@@ -3319,7 +3372,7 @@ async function boot() {
  
   set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
   set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
-  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" style="position:absolute;inset:0;display:grid;place-items:center;color:#667">Loading CAD kernel…</div>');
+  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading">Loading CAD kernel…</div>');
   await initKernel({ locateFile: () => wasmUrl });
   vp = new Viewport($('#gl'), $('#cube'));
   vp.opts.bedSize = PRINTERS[bedName] || vp.opts.bedSize;
@@ -3333,7 +3386,8 @@ async function boot() {
     cons: () => curSketch().params.cons || [], setCons: (c) => setSketchCons(c),
     toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, (n) => paramState.values[n], kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
-  buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip();
+  if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('touch');
+  buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip();
   bindTooltips();
   $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
   $('#btn-data').onclick = () => toggleDataPanel();

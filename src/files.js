@@ -45,8 +45,8 @@ export function askName({ title, label = 'Name', value = '', ok = 'OK', hint = '
     let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
     const m = modal(`<div class="modal-title">${esc(title)}</div>
       <form class="modal-body"><label>${esc(label)}<input id="an-v" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(value)}"></label>
-      <div class="note" id="an-err" role="alert" style="color:var(--danger);min-height:1.2em">${esc(hint)}</div>
-      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="an-c">Cancel</button><button type="submit" class="btn primary">${esc(ok)}</button></div></form>`, () => finish(null));
+      <div class="note err-note" id="an-err" role="alert">${esc(hint)}</div>
+      <div class="modal-foot flush"><button type="button" class="btn" id="an-c">Cancel</button><button type="submit" class="btn primary">${esc(ok)}</button></div></form>`, () => finish(null));
     const inp = m.el.querySelector('#an-v');
     setTimeout(() => { inp.focus(); inp.select(); }, 0);
     m.el.querySelector('#an-c').onclick = () => m.close();
@@ -63,7 +63,7 @@ export function askName({ title, label = 'Name', value = '', ok = 'OK', hint = '
 /** In-app notice with one button. Resolves when it is closed. */
 export function alertBox({ title, message, ok = 'OK' }) {
   return new Promise((resolve) => {
-    const m = modal(`<div class="modal-title">${esc(title)}</div><div class="modal-body"><p style="margin:0;line-height:1.5">${esc(message)}</p></div>
+    const m = modal(`<div class="modal-title">${esc(title)}</div><div class="modal-body"><p class="p-tight">${esc(message)}</p></div>
       <div class="modal-foot"><button class="btn primary" id="ab-ok">${esc(ok)}</button></div>`, () => resolve());
     m.el.querySelector('#ab-ok').onclick = () => m.close();
     setTimeout(() => m.el.querySelector('#ab-ok').focus(), 0);
@@ -74,7 +74,7 @@ export function alertBox({ title, message, ok = 'OK' }) {
 export function confirmBox({ title, message, ok = 'OK', danger = false }) {
   return new Promise((resolve) => {
     let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const m = modal(`<div class="modal-title">${esc(title)}</div><div class="modal-body"><p style="margin:0;line-height:1.5">${esc(message)}</p></div>
+    const m = modal(`<div class="modal-title">${esc(title)}</div><div class="modal-body"><p class="p-tight">${esc(message)}</p></div>
       <div class="modal-foot"><button class="btn" id="cb-c">Cancel</button><button class="btn primary${danger ? ' destructive' : ''}" id="cb-ok">${esc(ok)}</button></div>`, () => finish(false));
     m.el.querySelector('#cb-c').onclick = () => m.close();
     m.el.querySelector('#cb-ok').onclick = () => { finish(true); m.close(); };
@@ -127,8 +127,8 @@ export async function saveDialog({ name = '', folder = '', title = 'Save design'
           <div class="sv-newrow" hidden><input aria-label="New folder name" maxlength="80" placeholder="Folder name" autocomplete="off"><button type="button" class="btn sm primary sv-create">Create</button><button type="button" class="btn sm sv-cancel">Cancel</button></div>
           <div class="sv-tree" aria-labelledby="sv-lab"></div></div>
         <div class="sv-here" id="sv-here" aria-live="polite"></div>
-        <div class="note" id="sv-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
-        <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="sv-c">Cancel</button><button type="submit" class="btn primary">${esc(okLabel)}</button></div>
+        <div class="note err-note" id="sv-err" role="alert"></div>
+        <div class="modal-foot flush"><button type="button" class="btn" id="sv-c">Cancel</button><button type="submit" class="btn primary">${esc(okLabel)}</button></div>
       </form>`, () => finish(null));
     m.el.style.width = 'min(460px, 94vw)';
     const nameIn = m.el.querySelector('#sv-name'), here = m.el.querySelector('#sv-here');
@@ -162,8 +162,8 @@ export async function chooseFolder({ title = 'Move to', current = '', exclude = 
       <form class="modal-body sv"><div class="sv-loc"><div class="sv-bar"><button type="button" class="btn sm" id="sv-newbtn">${uicon('plus', 14)} New folder</button></div>
         <div class="sv-newrow" hidden><input aria-label="New folder name" maxlength="80" placeholder="Folder name" autocomplete="off"><button type="button" class="btn sm primary sv-create">Create</button><button type="button" class="btn sm sv-cancel">Cancel</button></div>
         <div class="sv-tree" aria-label="Folders"></div></div>
-      <div class="note" id="sv-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
-      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="sv-c">Cancel</button><button type="submit" class="btn primary">${esc(ok)}</button></div></form>`, () => finish(null));
+      <div class="note err-note" id="sv-err" role="alert"></div>
+      <div class="modal-foot flush"><button type="button" class="btn" id="sv-c">Cancel</button><button type="submit" class="btn primary">${esc(ok)}</button></div></form>`, () => finish(null));
     const tree = folderTree(m.el.querySelector('.sv-tree'), folders, { selected: folders.includes(current) ? current : '', counts: countsOf(st.designs) });
     const showNew = newFolderRow(m, tree, () => folders, (l) => { folders = l; });
     m.el.querySelector('#sv-newbtn').onclick = () => showNew(true);

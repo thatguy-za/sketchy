@@ -1,6 +1,6 @@
 // Parametric kernel: replays the feature timeline on top of manifold-3d (WASM).
 import Module from 'manifold-3d';
-import { findEdgeChains, matchChain, planarFace } from './edges.js';
+import { findEdgeChains, matchChain, matchChainNear, planarFace } from './edges.js';
 import { pathPolygon, openLoops } from './sketchgeo.js';
 import { repairSoup } from './meshrepair.js';
 import { ringMesh, surfaceMesh, loftRings, sweepRings, helixRings, smoothPath, axisFrame, sub, add, scl, dot, len, unit, cross } from './solids.js';
@@ -569,21 +569,47 @@ function holeTool(p, t) {
   return tool;
 }
 
-/** Find the triangle of a mesh that lies on the stored planar face {point, normal}. */
+/**
+ * Find the triangle of a mesh that lies on the stored planar face {point, normal}. If the face has since moved (an earlier
+ * dimension was edited), fall back to the flat face with the same normal whose plane is nearest, provided no other plane
+ * is about as near, so later features follow the face instead of failing.
+ */
 export function findFaceTri(verts, tris, point, normal) {
   let best = -1, bd = Infinity;
+  const near = [];
   for (let i = 0; i < tris.length / 3; i++) {
     const a = [verts[tris[i * 3] * 3], verts[tris[i * 3] * 3 + 1], verts[tris[i * 3] * 3 + 2]];
     const b = [verts[tris[i * 3 + 1] * 3], verts[tris[i * 3 + 1] * 3 + 1], verts[tris[i * 3 + 1] * 3 + 2]];
     const c = [verts[tris[i * 3 + 2] * 3], verts[tris[i * 3 + 2] * 3 + 1], verts[tris[i * 3 + 2] * 3 + 2]];
     const n = unit(vcross3(sub(b, a), sub(c, a)));
     if (dot(n, normal) < 0.999) continue;
-    if (Math.abs(dot(sub(point, a), normal)) > 0.02) continue;
-    const ctr = scl(add(add(a, b), c), 1 / 3);
+    const off = dot(sub(a, point), normal), ctr = scl(add(add(a, b), c), 1 / 3);
+    const inPlane = len(sub(sub(ctr, point), scl(normal, dot(sub(ctr, point), normal))));
+    near.push({ i, off, inPlane });
+    if (Math.abs(off) > 0.02) continue;
     const d = len(sub(ctr, point));
     if (d < bd) { bd = d; best = i; }
   }
-  return best;
+  if (best >= 0 || !near.length) return best;
+  // the face moved: pick the nearest parallel plane, and only if it is clearly the nearest
+  const planes = new Map();
+  for (const q of near) {
+    const key = Math.round(q.off * 100);
+    const e = planes.get(key);
+    if (!e || q.inPlane < e.inPlane) planes.set(key, { ...q, key });
+  }
+  const ranked = [...planes.values()].sort((a, b) => Math.abs(a.off) - Math.abs(b.off));
+  if (ranked.length > 1 && Math.abs(ranked[0].off) > 0.7 * Math.abs(ranked[1].off)) return -1;
+  return ranked[0].i;
+}
+/** Where a stored planar face {point, normal} is now on a body: {point, normal} from the live mesh, or null. */
+function faceNow(m, ref) {
+  const me = m.getMesh(), np = me.numProp;
+  const V = np === 3 ? me.vertProperties : Float32Array.from({ length: (me.vertProperties.length / np) * 3 }, (_, k) => me.vertProperties[Math.floor(k / 3) * np + (k % 3)]);
+  const tri = findFaceTri(V, me.triVerts, ref.point, ref.normal);
+  if (tri < 0) return null;
+  const pf = planarFace(V, me.triVerts, tri);
+  return pf ? { point: pf.point, normal: pf.normal } : null;
 }
 const vcross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const axisVec = (a) => ({ X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] }[a] || [0, 0, 1]);
@@ -662,7 +688,7 @@ export function rebuild(features, count, opts = {}) {
     const fr = planeFrame({ plane: ref });
     return { origin: fr.o, normal: fr.n };
   };
-  const sketches = {};
+  const sketches = {}, shifted = {};
   const surfaces = new Map(); // id -> {id, name, verts, tris}: open surface bodies (not solids)
   const surfSnaps = [];
   let surfCount = 0;
@@ -722,7 +748,14 @@ export function rebuild(features, count, opts = {}) {
       const p = f.params;
       switch (f.type) {
         case 'primitive': addBody(f.id, makePrimitive(p, t), f.name); break;
-        case 'sketch': sketches[f.id] = f; break;
+        case 'sketch': {
+          const fr = p.faceRef, fb = fr && live.get(fr.id), now = fb && faceNow(fb.m, fr);
+          if (now && p.origin) { // a sketch placed on a face moves with that face when an earlier feature changes
+            const n = unit(now.normal), d = dot(sub(now.point, fr.point), n);
+            if (Math.abs(d) > 1e-9) { const origin = add(p.origin, scl(n, d)); sketches[f.id] = { ...f, params: { ...p, origin } }; shifted[f.id] = origin; break; }
+          }
+          sketches[f.id] = f; break;
+        }
         case 'sketch3d': sketches[f.id] = f; break; // used as a path by Sweep, Pipe and Pattern
         case 'plane': break; // construction geometry only (see resolvePlanes)
         case 'extrude': {
@@ -762,7 +795,7 @@ export function rebuild(features, count, opts = {}) {
             const rings = loftRings([lift(polys[0], 0), lift(polys2[0], dirSign * d)]);
             m = solidFromRings(rings, false, t);
           } else {
-            m = p.twist || p.scaleTop !== 1
+            m = p.twist || (p.scaleTop ?? 1) !== 1
               ? t(cs.extrude(d, p.twist ? 32 : 1, p.twist || 0, p.scaleTop ?? 1))
               : t(cs.extrude(d));
             if (p.symmetric) m = t(m.translate([0, 0, -d / 2]));
@@ -874,8 +907,8 @@ export function rebuild(features, count, opts = {}) {
             const chains = findEdgeChains(me.vertProperties, me.numProp, me.triVerts);
             const todo = [];
             for (const e of edges) {
-              const ch = matchChain(chains, e.pts);
-              if (!ch) throw new Error('An edge no longer exists — reselect the edges');
+              const ch = matchChainNear(chains, e.pts, e.nrm);
+              if (!ch) throw new Error('An edge could not be found again after an earlier change — reselect the edges');
               for (const c of p.tangent ? connectedChains(chains, ch) : [ch]) if (!todo.includes(c)) todo.push(c);
             }
             for (const ch of todo) {
@@ -1036,8 +1069,12 @@ export function rebuild(features, count, opts = {}) {
         }
         case 'hole': {
           const tool = holeTool(p, t);
+          let pos = p.pos;
+          const fb = p.face && live.get(p.face.id || p.target);
+          const now = fb && faceNow(fb.m, p.face);
+          if (now) { const n = unit(now.normal); pos = add(pos, scl(n, dot(sub(now.point, p.face.point), n))); } // ride along with the face it was placed on
           const dir = unit(p.dir);
-          const placed = t(tool.transform(axisFrame(p.pos, scl(dir, -1))));
+          const placed = t(tool.transform(axisFrame(pos, scl(dir, -1))));
           applyOp(f, placed, 'cut', p.target);
           break;
         }
@@ -1052,7 +1089,8 @@ export function rebuild(features, count, opts = {}) {
           else { inner = t(b.m.minkowskiDifference(sph(p.thickness / 2))); outer = t(b.m.minkowskiSum(sph(p.thickness / 2))); }
           if (inner.isEmpty()) throw new Error('Wall thickness is too large for this body');
           let cavity = inner;
-          for (const o of p.open || []) {
+          for (const o0 of p.open || []) {
+            const o = faceNow(b.m, o0) || o0; // follow the face if an earlier edit moved it
             const M = axisFrame(o.point, o.normal), inv = invFrame(M);
             const cs = t(t(inner.transform(inv)).project());
             const prism = t(t(cs.extrude(p.thickness + 2 + 0.2)).translate([0, 0, -p.thickness - 0.2]));
@@ -1346,5 +1384,5 @@ export function rebuild(features, count, opts = {}) {
   });
   garbage.forEach((o) => { try { o.delete(); } catch { /* shared handle */ } });
   const surfList = [...surfaces.values()].map((q) => { let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity; for (let i = 0; i < q.verts.length; i += 3) { x0 = Math.min(x0, q.verts[i]); x1 = Math.max(x1, q.verts[i]); y0 = Math.min(y0, q.verts[i + 1]); y1 = Math.max(y1, q.verts[i + 1]); z0 = Math.min(z0, q.verts[i + 2]); z1 = Math.max(z1, q.verts[i + 2]); } return { ...q, surface: true, bbox: { min: [x0, y0, z0], max: [x1, y1, z1] } }; });
-  return { bodies, surfaces: surfList, surfSnaps, errors, snaps, sketchUsed, captured, preview };
+  return { bodies, surfaces: surfList, surfSnaps, errors, snaps, sketchUsed, captured, preview, shifted };
 }

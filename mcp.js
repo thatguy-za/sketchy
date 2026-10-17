@@ -1,7 +1,9 @@
 // MCP (Model Context Protocol) endpoint, Streamable HTTP transport, JSON responses only (no SSE stream).
 // Lets an AI assistant (Claude, ChatGPT, anything MCP-capable) build designs inside one user's Sketchy account.
-// Auth is a per-user bearer token (created on the Account page); every tool acts only on that user's designs.
-// Zero dependencies; the modelling kernel (src/headless.js) is loaded lazily on first use.
+// Auth is a per-user bearer token in the Authorization header (created on the Account page); every tool acts only on that user's designs.
+// Tools that rebuild a design run in worker threads (mcp-pool.js) so a heavy design can't stall the server.
+import { createTools } from './mcp-tools.js';
+import { validateArguments } from './mcp-validate.js';
 
 const VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const SERVER = { name: 'sketchy', version: '0.0.4' };
@@ -38,137 +40,17 @@ const TOOLS = [
   { name: 'export_stl', description: 'Export the design (or chosen bodies) as a binary STL file, returned base64-encoded, ready for slicing.', schema: { type: 'object', properties: { design: DESIGN, bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids to include; default all.' } }, required: ['design'] }, ro: true },
 ];
 
-const locks = new Map();
-const withLock = async (key, fn) => {
-  const prev = locks.get(key) || Promise.resolve();
-  let done; const next = new Promise((r) => (done = r));
-  locks.set(key, prev.then(() => next));
-  await prev;
-  try { return await fn(); } finally { done(); if (locks.get(key) === next) locks.delete(key); }
-};
-
 const text = (obj) => ({ content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 1) }] });
 const fail = (msg) => ({ isError: true, content: [{ type: 'text', text: msg }] });
+const LOCAL = new Set(['list_designs', 'create_design']); // cheap tools that never rebuild a design
 
 /**
- * @param {object} d  { storage: {list, read, write}, loadHeadless: () => Promise<module>, device: string }
- * @returns {(user: string, msg: object) => Promise<object|null>} JSON-RPC message handler
+ * @param {object} d  { storage, pool, device }  pool.run(user, name, args, device) runs a tool in a worker thread with a time and memory limit
+ * @returns {(user: string, msg: object, ctx?: {strike: (kind: string) => void}) => Promise<object|null>} JSON-RPC message handler
  */
 export function createMcp(d) {
-  const nameOk = (n) => typeof n === 'string' && /^[\w .()-]{1,80}$/.test(n) && !n.startsWith('.');
-
-  const load = async (user, name) => {
-    const r = await d.storage.read(user, name);
-    if (!r) throw new Error(`No design called "${name}". Call list_designs to see what exists.`);
-    const o = r.obj;
-    return { obj: o, rev: r.rev, doc: { name: o.name || name, features: o.features || [], marker: (o.features || []).length, nextId: o.nextId || 1, params: o.params || [], appearance: o.appearance || {}, units: o.units || 'mm' } };
-  };
-  const save = (user, name, base, doc, rev) => d.storage.write(user, name, { ...base, format: 'sketchy', version: 1, name, features: doc.features, marker: doc.features.length, nextId: doc.nextId, params: doc.params, appearance: doc.appearance, units: doc.units }, d.device, rev);
-
-  const findIndex = (doc, ref) => {
-    const s = String(typeof ref === 'number' ? '#' + ref : ref);
-    let i = /^#\d+$/.test(s) ? +s.slice(1) - 1 : doc.features.findIndex((f) => f.id === s);
-    if (i < 0) i = doc.features.findIndex((f) => f.name === s);
-    if (i < 0 || i >= doc.features.length) throw new Error(`No feature "${ref}". Call get_design to see the timeline.`);
-    return i;
-  };
-
-  const tools = {
-    async list_designs(user) {
-      const l = await d.storage.list(user);
-      return text(l.length ? l.map((x) => ({ name: x.name, revision: x.rev, modified: new Date(x.modified).toISOString() })) : 'No designs yet. Use create_design.');
-    },
-    async create_design(user, a) {
-      if (!nameOk(a.name)) return fail('Invalid name. Use 1-80 letters, numbers, spaces or . _ ( ) -');
-      if (await d.storage.read(user, a.name)) return fail(`A design called "${a.name}" already exists. Use get_design to open it.`);
-      const doc = { name: a.name, features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: 'mm' };
-      await save(user, a.name, {}, doc, 0);
-      return text({ created: a.name, hint: 'Add a sketch with add_feature kind "sketch", then an "extrude".' });
-    },
-    async get_design(user, a, H) {
-      const { doc, rev } = await load(user, a.design);
-      const { result } = H.evaluate(doc);
-      return text({ name: doc.name, revision: rev, parameters: doc.params, timeline: doc.features.map(H.describeFeature), model: H.summarize(doc, result) });
-    },
-    async describe_feature_types(user, a, H) {
-      const c = H.catalog();
-      if (a.kind) return c[a.kind] ? text({ kind: a.kind, ...c[a.kind] }) : fail(`Unknown kind "${a.kind}". Kinds: ${Object.keys(c).join(', ')}`);
-      return text({ kinds: c });
-    },
-    async add_feature(user, a, H) {
-      return withLock(user + '/' + a.design, async () => {
-        const { obj, doc, rev } = await load(user, a.design);
-        const { result } = H.evaluate(doc);
-        const f = H.makeFeature(doc, result, a.kind, a.params || {}, a.name);
-        const pos = a.position ? Math.max(0, Math.min(doc.features.length, a.position - 1)) : doc.features.length;
-        doc.features.splice(pos, 0, f);
-        const ev = H.evaluate(doc);
-        const err = ev.result.errors[f.id];
-        if (err && !a.keep_on_error) return fail(`The ${a.kind} could not be built: ${err}\nNothing was saved. Adjust the parameters and try again.`);
-        const nrev = await save(user, a.design, obj, doc, rev);
-        return text({ added: H.describeFeature(f, pos), revision: nrev, ...(err ? { warning: err } : {}), model: H.summarize(doc, ev.result) });
-      });
-    },
-    async update_feature(user, a, H) {
-      return withLock(user + '/' + a.design, async () => {
-        const { obj, doc, rev } = await load(user, a.design);
-        const before = H.evaluate(doc).result.errors;
-        const i = findIndex(doc, a.feature);
-        const f = doc.features[i];
-        doc.features[i] = { ...f, ...(a.name ? { name: a.name } : {}), ...(typeof a.suppressed === 'boolean' ? { suppressed: a.suppressed } : {}), params: { ...f.params, ...(a.params || {}) } };
-        if (a.params && f.exprs) { const ex = { ...f.exprs }; for (const k of Object.keys(a.params)) delete ex[k]; doc.features[i].exprs = Object.keys(ex).length ? ex : undefined; }
-        const ev = H.evaluate(doc);
-        const fresh = Object.entries(ev.result.errors).filter(([id, m]) => before[id] !== m);
-        if (fresh.length && !a.keep_on_error) return fail(`That change breaks the model: ${fresh.map(([id, m]) => `${id}: ${m}`).join('; ')}\nNothing was saved.`);
-        const nrev = await save(user, a.design, obj, doc, rev);
-        return text({ updated: H.describeFeature(doc.features[i], i), revision: nrev, model: H.summarize(doc, ev.result) });
-      });
-    },
-    async delete_feature(user, a, H) {
-      return withLock(user + '/' + a.design, async () => {
-        const { obj, doc, rev } = await load(user, a.design);
-        const i = findIndex(doc, a.feature);
-        const [gone] = doc.features.splice(i, 1);
-        const ev = H.evaluate(doc);
-        const nrev = await save(user, a.design, obj, doc, rev);
-        return text({ deleted: gone.name || gone.id, revision: nrev, model: H.summarize(doc, ev.result) });
-      });
-    },
-    async set_parameters(user, a, H) {
-      return withLock(user + '/' + a.design, async () => {
-        const { obj, doc, rev } = await load(user, a.design);
-        if (!Array.isArray(a.parameters) || !a.parameters.length) return fail('Pass at least one parameter.');
-        const list = [...doc.params];
-        for (const p of a.parameters) {
-          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(p.name || '')) return fail(`"${p.name}" is not a valid parameter name (letters, digits, underscore; not starting with a digit).`);
-          const np = { name: p.name, expr: String(p.expr), unit: p.unit || 'length', comment: p.comment || '' };
-          const i = list.findIndex((q) => q.name === p.name);
-          if (i >= 0) list[i] = np; else list.push(np);
-        }
-        doc.params = list;
-        const ev = H.evaluate(doc);
-        if (ev.paramErrors && Object.keys(ev.paramErrors).length) return fail(`Parameter problem: ${JSON.stringify(ev.paramErrors)}\nNothing was saved.`);
-        const nrev = await save(user, a.design, obj, doc, rev);
-        return text({ parameters: doc.params, revision: nrev, model: H.summarize(doc, ev.result) });
-      });
-    },
-    async inspect_design(user, a, H) {
-      const { doc, rev } = await load(user, a.design);
-      const { result } = H.evaluate(doc);
-      return text({ name: doc.name, revision: rev, features: doc.features.length, model: H.summarize(doc, result) });
-    },
-    async export_stl(user, a, H) {
-      const { doc } = await load(user, a.design);
-      const { result } = H.evaluate(doc);
-      const bodies = a.bodies?.length ? result.bodies.filter((b) => a.bodies.includes(b.id)) : result.bodies;
-      if (!bodies.length) return fail('The design has no bodies to export.');
-      const buf = Buffer.from(await H.stlOf(bodies, doc.name).arrayBuffer());
-      if (buf.length > 12e6) return fail('The STL is too large to return here; export it from the Sketchy app instead.');
-      return text({ filename: `${doc.name}.stl`, bytes: buf.length, triangles: bodies.reduce((n, b) => n + b.tris.length / 3, 0), base64: buf.toString('base64') });
-    },
-  };
-
-  const rpc = async (user, m) => {
+  const local = createTools({ storage: d.storage, device: d.device });
+  const rpc = async (user, m, ctx) => {
     const id = m.id;
     const ok = (result) => ({ jsonrpc: '2.0', id, result });
     const err = (code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
@@ -181,27 +63,37 @@ export function createMcp(d) {
       case 'tools/list':
         return ok({ tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.schema, annotations: { readOnlyHint: !!t.ro, destructiveHint: t.name === 'delete_feature', openWorldHint: false } })) });
       case 'tools/call': {
-        const fn = tools[m.params?.name];
-        if (!fn) return err(-32602, `Unknown tool: ${m.params?.name}`);
+        const tool = TOOLS.find((t) => t.name === m.params?.name);
+        if (!tool) return err(-32602, `Unknown tool: ${String(m.params?.name).slice(0, 60)}`);
+        const bad = validateArguments(tool.schema, m.params.arguments ?? {});
+        if (bad) return ok(fail(`Invalid arguments: ${bad}`));
         try {
-          const H = ['list_designs', 'create_design'].includes(m.params.name) ? null : await d.loadHeadless();
-          return ok(await fn(user, m.params.arguments || {}, H));
-        } catch (e) { return ok(fail(e.message || String(e))); }
+          if (LOCAL.has(tool.name)) return ok(await local[tool.name](user, m.params.arguments || {}, null));
+          return ok(await d.pool.run(user, tool.name, m.params.arguments || {}, d.device));
+        } catch (e) {
+          if (e.kind && e.kind !== 'busy') ctx?.strike?.(e.kind); // timeout, memory or crash: counts against the token
+          return ok(fail(e.kind ? e.message : e.message || String(e)));
+        }
       }
       case 'resources/list': return ok({ resources: [] });
       case 'prompts/list': return ok({ prompts: [] });
-      default: return err(-32601, `Method not found: ${m.method}`);
+      default: return err(-32601, `Method not found: ${String(m.method).slice(0, 60)}`);
     }
   };
 
   /** Handle one JSON-RPC message or a batch. Returns the response body, or null when only notifications were sent. */
-  return async (user, body) => {
+  return async (user, body, ctx = {}) => {
     const one = async (m) => {
-      if (!m || m.jsonrpc !== '2.0' || typeof m.method !== 'string') return { jsonrpc: '2.0', id: m?.id ?? null, error: { code: -32600, message: 'Invalid request' } };
+      if (!m || typeof m !== 'object' || m.jsonrpc !== '2.0' || typeof m.method !== 'string') return { jsonrpc: '2.0', id: m?.id ?? null, error: { code: -32600, message: 'Invalid request' } };
       if (m.id === undefined || m.id === null) { return null; } // notification
-      return rpc(user, m);
+      return rpc(user, m, ctx);
     };
-    if (Array.isArray(body)) { const r = (await Promise.all(body.map(one))).filter(Boolean); return r.length ? r : null; }
+    if (Array.isArray(body)) {
+      if (body.length > 20) return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'A batch can hold at most 20 messages.' } };
+      const r = [];
+      for (const m of body) { const x = await one(m); if (x) r.push(x); } // one after another, so a batch can't fan out into many parallel rebuilds
+      return r.length ? r : null;
+    }
     return one(body);
   };
 }

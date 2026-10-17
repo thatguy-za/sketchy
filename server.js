@@ -5,6 +5,7 @@
 //   node server.js reset-password <user> [new-password]   (generates one if omitted)
 //   node server.js make-admin <user>
 import { createMcp } from './mcp.js';
+import { createPool } from './mcp-pool.js';
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -15,7 +16,17 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
 const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const port = +process.env.PORT || 8080;
 const MAX_VERSIONS = Math.max(0, parseInt(process.env.MAX_VERSIONS ?? '20', 10) || 0); // old revisions kept per design
-const SESSION_MS = 365 * 24 * 3600 * 1000; // sliding: renewed whenever the app is opened, so active users stay signed in
+const DAY = 24 * 3600e3;
+const SESSION_MS = Math.max(1, +process.env.SESSION_DAYS || 30) * DAY;                       // sliding: renewed whenever the app is opened, so active people stay signed in
+const SESSION_MAX_MS = Math.max(SESSION_MS, (+process.env.SESSION_MAX_DAYS || 90) * DAY);   // but no sign-in lasts longer than this, however often it is used
+const MAX_SESSIONS = Math.max(1, +process.env.MAX_SESSIONS_PER_USER || 10);                 // devices signed in at once; the least recently used is signed out
+// Limits that keep one account (or one client) from filling the disk or hogging the server. 0 switches a limit off.
+const MAX_DESIGN_BYTES = (process.env.MAX_DESIGN_MB === undefined ? 64 : +process.env.MAX_DESIGN_MB || 0) * 1048576; // one saved design
+const DEFAULT_QUOTA_MB = process.env.USER_QUOTA_MB === undefined ? 2048 : +process.env.USER_QUOTA_MB || 0; // everything one account stores; admins can change it per person
+// TRUST_PROXY=false stops the server believing X-Forwarded-For / CF-Connecting-IP. Leave it unset behind a reverse proxy; set it
+// when the container's port is published straight to the internet (a client could then pretend to be any address).
+const TRUST_PROXY = !/^(0|false|no|off)$/i.test(process.env.TRUST_PROXY || '');
+const log = (event, ip = '', extra = '') => console.log(`${new Date().toISOString()} ${event}${ip ? ' ip=' + ip : ''}${extra ? ' ' + extra : ''}`); // one line per security event, easy to feed to fail2ban
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png' };
 
 // In the Docker image the server starts as root, makes the data directory writable, and then switches to an unprivileged user
@@ -45,23 +56,73 @@ await fs.mkdir(path.join(dataDir, 'drafts'), { recursive: true });
 
 const readJSON = async (f, d) => { try { return JSON.parse(await fs.readFile(f, 'utf8')); } catch { return d; } };
 const writeJSON = async (f, v) => { const t = f + '.tmp'; await fs.writeFile(t, JSON.stringify(v), { mode: 0o600 }); await fs.rename(t, f); };
-let users = await readJSON(usersFile, {});       // username -> {id, salt, hash, created, lastLogin, admin}
-let sessions = await readJSON(sessionsFile, {}); // sha256(token) -> {user, exp}
+const nullMap = (o) => Object.assign(Object.create(null), o); // keys like __proto__ or constructor are then ordinary names
+let users = nullMap(await readJSON(usersFile, {}));       // username -> {id, salt, hash, created, lastLogin, admin}
+let sessions = nullMap(await readJSON(sessionsFile, {})); // sha256(token) -> {user, exp}
 let settings = await readJSON(settingsFile, {});
 // Open sign-up is a Server settings option (admins change it in the app). Until an admin has set it, sign-up is closed; an
 // ALLOW_REGISTRATION environment variable from an older setup is honoured once, as the starting value.
 if (settings.allowRegistration === undefined) { settings.allowRegistration = process.env.ALLOW_REGISTRATION === 'true'; await writeJSON(settingsFile, settings); }
+for (const [k, v] of Object.entries(sessions)) { // sessions made by an older version: give them the new limits
+  v.created ||= Date.now(); v.last ||= v.created;
+  v.exp = Math.min(v.exp, v.created + SESSION_MAX_MS, Date.now() + SESSION_MS);
+  if (v.exp < Date.now()) delete sessions[k];
+}
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const scrypt = (pw, salt) => new Promise((res, rej) => crypto.scrypt(pw, salt, 64, (e, k) => (e ? rej(e) : res(k.toString('hex')))));
 const saveUsers = () => writeJSON(usersFile, users);
 const saveSessions = () => writeJSON(sessionsFile, sessions);
 const saveSettings = () => writeJSON(settingsFile, settings);
+// ---- Two-step sign-in (TOTP, RFC 6238): 6-digit codes from an authenticator app, 30-second steps, SHA-1 (what every app supports).
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const b32encode = (buf) => { let bits = '', out = ''; for (const b of buf) bits += b.toString(2).padStart(8, '0'); for (let i = 0; i < bits.length; i += 5) out += B32[parseInt(bits.slice(i, i + 5).padEnd(5, '0'), 2)]; return out; };
+const b32decode = (str) => { let bits = ''; for (const c of str.replace(/[\s=-]/g, '').toUpperCase()) { const v = B32.indexOf(c); if (v < 0) return null; bits += v.toString(2).padStart(5, '0'); } const out = []; for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(out); };
+const totpCode = (secretB32, step) => {
+  const key = b32decode(secretB32), msg = Buffer.alloc(8); msg.writeBigUInt64BE(BigInt(step));
+  const h = crypto.createHmac('sha1', key).update(msg).digest(), o = h[h.length - 1] & 15;
+  return String(((h.readUInt32BE(o) & 0x7fffffff) % 1e6)).padStart(6, '0');
+};
+/** The step a code belongs to (within one step either side of now), or null. Compared without leaking timing. */
+const totpStep = (secret, code) => {
+  const c = String(code || '').replace(/\s/g, ''), now = Math.floor(Date.now() / 30e3);
+  if (!/^\d{6}$/.test(c)) return null;
+  let hit = null;
+  for (const st of [now - 1, now, now + 1]) if (crypto.timingSafeEqual(Buffer.from(totpCode(secret, st)), Buffer.from(c))) hit = st;
+  return hit;
+};
+const newRecoveryCodes = () => Array.from({ length: 8 }, () => { const r = crypto.randomBytes(5).toString('hex'); return `${r.slice(0, 5)}-${r.slice(5)}`; });
+const normRecovery = (c) => String(c || '').trim().toLowerCase().replace(/[^0-9a-f]/g, '');
+/** Check a 6-digit code or a recovery code for this user. A code can be used once (the last accepted step is remembered). */
+function checkSecondFactor(u, code) {
+  const t = u.totp;
+  if (!t?.enabled) return false;
+  const st = totpStep(t.secret, code);
+  if (st !== null && st > (t.last || 0)) { t.last = st; return 'code'; }
+  const rc = normRecovery(code);
+  if (rc.length === 10) { const h = sha(rc), i = (t.recovery || []).indexOf(h); if (i >= 0) { t.recovery.splice(i, 1); return 'recovery'; } }
+  return false;
+}
+const tickets = new Map(); // ticket -> { user, exp, tries }: a password was right and the second step is pending
 const newHash = async (pw) => { const salt = crypto.randomBytes(16).toString('hex'); return { salt, hash: await scrypt(pw, salt) }; };
 
 // the earliest account becomes admin when none exists (upgrade path from older versions)
 if (Object.keys(users).length && !Object.values(users).some((u) => u.admin)) {
   const first = Object.entries(users).sort((a, b) => a[1].created - b[1].created)[0];
   first[1].admin = true; await saveUsers();
+}
+
+const RESERVED = new Set(['__proto__', 'constructor', 'prototype', 'hasownproperty', 'tostring', 'valueof']);
+const userRe = /^[a-z0-9_-]{3,32}$/;
+const COMMON_PW = new Set(['password', 'password1', 'password123', '12345678', '123456789', '1234567890', 'qwertyui', 'qwerty123', 'qwertyuiop', 'iloveyou', 'letmein1', 'admin123', 'welcome1', 'abc12345', '11111111', '00000000', 'changeme', 'sketchy123', 'sketchy1']);
+const pwOk = (p, username = '') => typeof p === 'string' && p.length >= 8 && p.length <= 200 && !COMMON_PW.has(p.toLowerCase()) && p.toLowerCase() !== String(username).toLowerCase();
+const pwMsg = 'Password must be at least 8 characters and not an obvious one (such as "password" or your username).';
+
+// Setting ADMIN_USER and ADMIN_PASSWORD creates the first account (an admin) on a fresh install, so nobody can claim it by
+// being first to open the page. Ignored once any account exists.
+if (!Object.keys(users).length && process.env.ADMIN_USER && process.env.ADMIN_PASSWORD) {
+  const name = process.env.ADMIN_USER.trim().toLowerCase();
+  if (!userRe.test(name) || RESERVED.has(name) || !pwOk(process.env.ADMIN_PASSWORD, name)) console.error('ADMIN_USER / ADMIN_PASSWORD were ignored: the username or password is not acceptable.');
+  else { users[name] = { id: crypto.randomUUID(), ...(await newHash(process.env.ADMIN_PASSWORD)), created: Date.now(), lastLogin: 0, admin: true }; await saveUsers(); console.log(`Created the admin account "${name}" from ADMIN_USER.`); }
 }
 
 // ---------------------------------------------------------------- CLI
@@ -74,22 +135,35 @@ if (cmd) {
     const u = users[args[0].toLowerCase()];
     if (!u) { console.error('No such user.'); process.exit(1); }
     const pw = args[1] || crypto.randomBytes(9).toString('base64url');
-    if (pw.length < 8) { console.error('Password must be at least 8 characters.'); process.exit(1); }
+    if (!pwOk(pw, args[0])) { console.error(pwMsg); process.exit(1); }
     Object.assign(u, await newHash(pw));
     killSessions(args[0].toLowerCase());
     await saveUsers(); await saveSessions();
     console.log(`Password for ${args[0]} is now: ${pw}`);
+  } else if (cmd === 'create-user' && args[0]) { // docker exec <name> node server.js create-user <user> [password] [--admin]
+    const name = args[0].toLowerCase(), admin = args.includes('--admin'), given = args.slice(1).find((a) => !a.startsWith('--'));
+    if (!userRe.test(name) || RESERVED.has(name)) { console.error('Username: 3-32 chars, a-z, 0-9, _ or -.'); process.exit(1); }
+    if (users[name]) { console.error('That username is taken.'); process.exit(1); }
+    const pw = given || crypto.randomBytes(9).toString('base64url');
+    if (!pwOk(pw, name)) { console.error(pwMsg); process.exit(1); }
+    users[name] = { id: crypto.randomUUID(), ...(await newHash(pw)), created: Date.now(), lastLogin: 0, admin };
+    await saveUsers();
+    console.log(`Created ${admin ? 'admin ' : ''}user ${name}. Password: ${pw}`);
+  } else if (cmd === 'reset-totp' && args[0]) {
+    const u = users[args[0].toLowerCase()];
+    if (!u) { console.error('No such user.'); process.exit(1); }
+    delete u.totp; await saveUsers(); console.log(`Two-step sign-in is now off for ${args[0]}.`);
   } else if (cmd === 'make-admin' && args[0]) {
     const u = users[args[0].toLowerCase()];
     if (!u) { console.error('No such user.'); process.exit(1); }
     u.admin = true; await saveUsers(); console.log(`${args[0]} is now an admin.`);
-  } else { console.error('Usage: node server.js list-users | reset-password <user> [pw] | make-admin <user>'); process.exit(1); }
+  } else { console.error('Usage: node server.js list-users | create-user <user> [pw] [--admin] | reset-totp <user> | reset-password <user> [pw] | make-admin <user>'); process.exit(1); }
   process.exit(0);
 }
 
 // ---------------------------------------------------------------- helpers
 const send = (res, code, body) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(body)); };
-const readBody = async (req, max = 200e6) => {
+const readBody = async (req, max = 1e6) => {
   const chunks = []; let size = 0;
   for await (const c of req) { size += c.length; if (size > max) throw Object.assign(new Error('too large'), { code: 413 }); chunks.push(c); }
   return Buffer.concat(chunks);
@@ -120,49 +194,70 @@ const clearFailures = (...keys) => keys.forEach((k) => failures.delete(k));
 const privateAddr = (a) => /^(::ffff:)?(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(a) || a === '::1' || /^f[cd][0-9a-f]{2}:/i.test(a);
 function clientIp(req) {
   const peer = req.socket.remoteAddress || '';
-  if (!privateAddr(peer)) return peer;
+  if (!TRUST_PROXY || !privateAddr(peer)) return peer;
   const fwd = String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   return fwd || peer;
 }
+const AUTH_ATTEMPTS = Math.max(1, +process.env.AUTH_ATTEMPTS_PER_15MIN || 20); // sign-in, sign-up, password and code attempts one address may make in 15 minutes
 const attempts = new Map();
 const throttled = (ip) => {
   const now = Date.now(), a = (attempts.get(ip) || []).filter((t) => now - t < 15 * 60e3);
   attempts.set(ip, a);
-  return a.length >= 20;
+  return a.length >= AUTH_ATTEMPTS;
 };
 const noteAttempt = (ip) => { if (!attempts.has(ip)) attempts.set(ip, []); attempts.get(ip).push(Date.now()); };
+// Fixed-window request counter: returns the seconds to wait when `key` has made more than `max` requests in `windowMs`, else 0.
+const hits = new Map();
+function rate(key, max, windowMs) {
+  const now = Date.now();
+  let h = hits.get(key);
+  if (!h || h.reset < now) { h = { n: 0, reset: now + windowMs }; hits.set(key, h); }
+  return ++h.n > max ? Math.ceil((h.reset - now) / 1000) : 0;
+}
+// Memory guard: addresses and usernames are attacker-chosen, so the bookkeeping maps are swept and capped.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, h] of hits) if (h.reset < now) hits.delete(k);
+  for (const [k, a] of attempts) if (!a.some((t) => now - t < 15 * 60e3)) attempts.delete(k);
+  for (const [k, f] of failures) if (f.until < now && !f.times.some((t) => now - t < loginCfg().failWindowMinutes * 60e3)) failures.delete(k);
+  for (const m of [hits, attempts, failures]) if (m.size > 50000) for (const k of [...m.keys()].slice(0, m.size - 50000)) m.delete(k);
+}, 60e3).unref();
 
-const tokenOf = (req) => parseCookies(req.headers.cookie).sketchy_session;
+// Over HTTPS the cookie gets the __Host- prefix: browsers then accept it only if it is Secure, set from this exact host and has no Domain,
+// so a sibling subdomain or an insecure page can't plant or overwrite it.
+const isHttps = (req) => req.headers['x-forwarded-proto'] === 'https' || !!req.socket.encrypted;
+const COOKIE = '__Host-sketchy_session', COOKIE_PLAIN = 'sketchy_session';
+const tokenOf = (req) => { const c = parseCookies(req.headers.cookie); return c[COOKIE] || c[COOKIE_PLAIN]; };
+const gone = (v) => !v || v.exp < Date.now() || Date.now() > (v.created || 0) + SESSION_MAX_MS;
 function currentUser(req) {
   const tok = tokenOf(req);
   if (!tok) return null;
-  const s = sessions[sha(tok)];
-  if (!s || s.exp < Date.now() || !users[s.user]) return null;
+  const k = sha(tok), s = sessions[k];
+  if (!s || gone(s) || !users[s.user]) return null;
+  if (Date.now() - (s.last || 0) > 5 * 60e3) { s.last = Date.now(); saveSessions(); } // "last active", for the list of signed-in devices
   return s.user;
 }
-const secure = (req) => (req.headers['x-forwarded-proto'] === 'https' || req.socket.encrypted ? '; Secure' : '');
-/** Starts a session and remembers it in a long-lived HttpOnly cookie; a plain "known visitor" cookie tells the UI to show login (not sign-up) after a sign-out. */
-function setSession(req, res, username, tok = crypto.randomBytes(32).toString('hex')) {
-  sessions[sha(tok)] = { user: username, exp: Date.now() + SESSION_MS };
-  for (const [k, v] of Object.entries(sessions)) if (v.exp < Date.now()) delete sessions[k];
+/** Starts (or, with `keep`, renews) a session and puts it in an HttpOnly cookie. */
+function setSession(req, res, username, tok = crypto.randomBytes(32).toString('hex'), keep = null) {
+  const now = Date.now(), created = keep?.created || now;
+  sessions[sha(tok)] = { user: username, created, last: now, exp: Math.min(now + SESSION_MS, created + SESSION_MAX_MS), device: keep?.device || String(req.headers['x-device-label'] || '').slice(0, 60), ip: keep?.ip || clientIp(req).slice(0, 45) };
+  for (const [k, v] of Object.entries(sessions)) if (gone(v)) delete sessions[k];
+  const mine = Object.entries(sessions).filter(([, v]) => v.user === username).sort((a, b) => (b[1].last || 0) - (a[1].last || 0));
+  for (const [k] of mine.slice(MAX_SESSIONS)) delete sessions[k]; // too many devices: the one unused longest is signed out
   saveSessions();
-  res.setHeader('set-cookie', [
-    `sketchy_session=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MS / 1000}${secure(req)}`,
-    `sketchy_known=1; SameSite=Strict; Path=/; Max-Age=${10 * 365 * 24 * 3600}${secure(req)}`,
-  ]);
+  const https = isHttps(req);
+  res.setHeader('set-cookie', `${https ? COOKIE : COOKIE_PLAIN}=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor((sessions[sha(tok)].exp - now) / 1000)}${https ? '; Secure' : ''}`);
 }
 const dropSessions = (username, exceptTok) => { for (const [k, v] of Object.entries(sessions)) if (v.user === username && k !== (exceptTok && sha(exceptTok))) delete sessions[k]; };
 
-const userRe = /^[a-z0-9_-]{3,32}$/;
-const nameOk = (n) => /^[\w .()-]{1,80}$/.test(n) && !n.startsWith('.');
-const pwOk = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 200;
+const nameOk = (n) => /^[\w .()-]{1,80}$/.test(n) && !n.startsWith('.') && !RESERVED.has(n.toLowerCase());
 const dirs = (u) => ({ proj: path.join(dataDir, 'projects', users[u].id), draft: path.join(dataDir, 'drafts', users[u].id), fold: path.join(dataDir, 'folders', users[u].id + '.json') });
 
 // ---- folders: a label layer over the flat design list. Design names stay unique per account; a design lives in at most one folder.
 const folderOk = (f) => f === '' || (typeof f === 'string' && f.length <= 200 && f.split('/').every((seg) => nameOk(seg)));
 async function readFolders(D) {
   const f = await readJSON(D.fold, null);
-  return { folders: Array.isArray(f?.folders) ? f.folders : [], map: f?.map && typeof f.map === 'object' ? f.map : {} };
+  return { folders: Array.isArray(f?.folders) ? f.folders : [], map: nullMap(f?.map && typeof f.map === 'object' ? f.map : {}) };
 }
 async function writeFolders(D, f) { await fs.mkdir(path.dirname(D.fold), { recursive: true }); await writeJSON(D.fold, f); }
 /** Add a folder and every ancestor to the list. */
@@ -188,6 +283,29 @@ async function snapshotVersion(D, name, cur) { // keep the file about to be over
   for (const r of revs.slice(MAX_VERSIONS)) for (const e of ['.json', '.meta']) await fs.rm(path.join(dir, r + e), { force: true });
 }
 
+// ---------------------------------------------------------------- storage limits
+const usageCache = new Map(); // username -> { bytes, at }
+/** An account's storage limit in bytes (0 = unlimited): the admin's per-person value, else the server default. */
+const quotaOf = (username) => { const q = users[username]?.quotaMb; return (Number.isFinite(q) && q >= 0 ? q : Number.isFinite(settings.defaultQuotaMb) ? settings.defaultQuotaMb : DEFAULT_QUOTA_MB) * 1048576; };
+async function dirBytes(dir) {
+  let n = 0;
+  for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const f = path.join(dir, e.name);
+    n += e.isDirectory() ? await dirBytes(f) : (await fs.stat(f).catch(() => ({ size: 0 }))).size;
+  }
+  return n;
+}
+/** Throws a 413 when saving `incoming` more bytes would put the account over its quota (a design being replaced counts as `replacing`). */
+async function checkQuota(username, incoming, replacing = 0) {
+  if (MAX_DESIGN_BYTES && incoming > MAX_DESIGN_BYTES) throw Object.assign(new Error('design too large'), { code: 413, msg: `This design is larger than the ${Math.round(MAX_DESIGN_BYTES / 1048576)} MB limit.` });
+  const quota = quotaOf(username);
+  if (!quota) return;
+  let c = usageCache.get(username);
+  if (!c || Date.now() - c.at > 30e3) { const D = dirs(username); c = { bytes: (await dirBytes(D.proj)) + (await dirBytes(D.draft)), at: Date.now() }; usageCache.set(username, c); }
+  if (c.bytes - replacing + incoming > quota) throw Object.assign(new Error('over quota'), { code: 413, msg: `Your account is over its ${Math.round(quota / 1048576)} MB storage limit. Delete old designs or ask the admin.` });
+  c.bytes += Math.max(0, incoming - replacing);
+}
+
 // ---------------------------------------------------------------- project storage (shared by the REST API and MCP)
 class Conflict extends Error { constructor(seq) { super('conflict'); this.seq = seq; } }
 /**
@@ -199,6 +317,7 @@ async function writeProject(username, name, objStr, device, ifSeq, opts = {}) {
   const D = dirs(username), file = path.join(D.proj, name + '.json');
   await fs.mkdir(D.proj, { recursive: true }); await fs.mkdir(D.draft, { recursive: true });
   const exists = await fs.stat(file).catch(() => null);
+  await checkQuota(username, Buffer.byteLength(objStr), exists?.size || 0);
   const cur = await readMeta(D.proj, name);
   if (exists && ifSeq !== undefined && ifSeq !== '*' && +ifSeq !== cur.seq) throw Object.assign(new Conflict(cur.seq), { rev: cur.rev, modified: exists.mtimeMs, device: cur.device || '' });
   const rev = opts.auto && exists ? cur.rev || 1 : (cur.rev || 0) + 1, seq = (cur.seq || 0) + 1;
@@ -216,11 +335,13 @@ const mcpStorage = {
     return Promise.all(files.map(async (f) => { const n = f.slice(0, -5), m = await readMeta(D.proj, n), st = await fs.stat(path.join(D.proj, f)); return { name: n, rev: m.rev || 1, modified: st.mtimeMs }; }));
   },
   async read(u, name) {
+    if (!nameOk(name)) return null; // never build a file path from an unchecked name
     const D = dirs(u), raw = await fs.readFile(path.join(D.proj, name + '.json'), 'utf8').catch(() => null);
     if (raw === null) return null;
     return { obj: JSON.parse(raw), rev: (await readMeta(D.proj, name)).seq };
   },
   async write(u, name, obj, device, rev) {
+    if (!nameOk(name)) throw new Error('Invalid design name.');
     try { return (await writeProject(u, name, JSON.stringify(obj), device, rev)).seq; }
     catch (e) { if (e instanceof Conflict) throw new Error('The design was changed by someone else while this edit was being made. Fetch it again and retry.'); throw e; }
   },
@@ -228,32 +349,59 @@ const mcpStorage = {
 
 // ---- MCP access tokens (per user; only the SHA-256 is stored)
 const mcpFile = path.join(dataDir, 'mcp-tokens.json');
-let mcpTokens = await readJSON(mcpFile, {}); // id -> {hash, user, name, created, lastUsed}
+let mcpTokens = nullMap(await readJSON(mcpFile, {})); // id -> {hash, user, name, created, lastUsed}
 const saveMcp = () => writeJSON(mcpFile, mcpTokens);
 if (settings.allowMcp === undefined) settings.allowMcp = process.env.ALLOW_MCP !== 'false';
-const mcpHandle = createMcp({ storage: mcpStorage, device: 'Claude / ChatGPT (MCP)', loadHeadless: async () => { const H = await import('./src/headless.js'); await H.initHeadless(); return H; } });
-const mcpUser = (req, url) => {
-  const m = /^Bearer\s+(\S+)/i.exec(req.headers.authorization || '');
-  const pm = /^\/mcp\/([\w-]+)$/.exec(url.pathname);
-  const tok = m?.[1] || pm?.[1] || url.searchParams.get('token');
-  if (!tok) return null;
-  const h = sha(tok), ent = Object.values(mcpTokens).find((t) => t.hash === h);
+const mcpPool = createPool({ storage: mcpStorage, size: Math.max(1, +process.env.MCP_WORKERS || 2), timeoutMs: (+process.env.MCP_TIMEOUT_SECONDS || 20) * 1000, memoryMb: +process.env.MCP_WORKER_MEMORY_MB || 512 });
+const mcpHandle = createMcp({ storage: mcpStorage, pool: mcpPool, device: 'Claude / ChatGPT (MCP)' });
+// Tokens are only accepted in the Authorization header: a token in a URL ends up in proxy logs, browser history and referrers.
+const MCP_RATE = Math.max(1, +process.env.MCP_RATE_PER_MIN || 60);         // calls per minute for one token
+const MCP_STRIKES = 5, STRIKE_WINDOW = 10 * 60e3;                          // this many strikes in ten minutes pauses the token
+const mcpOrigins = (process.env.MCP_ALLOWED_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean); // browser origins allowed to call /mcp; none by default
+const mcpUser = (req) => {
+  const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
+  if (!m) return null;
+  const h = sha(m[1]), id = Object.keys(mcpTokens).find((k) => mcpTokens[k].hash === h), ent = id && mcpTokens[id];
   if (!ent || !users[ent.user]) return null;
   if (Date.now() - (ent.lastUsed || 0) > 60e3) { ent.lastUsed = Date.now(); saveMcp(); }
-  return ent.user;
+  return { user: ent.user, id, ent };
 };
+/** A token misbehaved (too many calls, work that timed out or ran out of memory). Enough of those and it is paused until its owner resumes it. */
+function strikeToken(id, kind, ip) {
+  const ent = mcpTokens[id];
+  if (!ent || ent.paused) return;
+  const now = Date.now();
+  ent.strikes = [...(ent.strikes || []).filter((t) => now - t < STRIKE_WINDOW), now];
+  log('mcp_strike', ip, `user=${ent.user} token=${id.slice(0, 8)} reason=${kind} count=${ent.strikes.length}`);
+  if (ent.strikes.length >= MCP_STRIKES) { ent.paused = { at: now, reason: kind }; ent.strikes = []; log('mcp_token_paused', ip, `user=${ent.user} token=${id.slice(0, 8)} reason=${kind}`); }
+  saveMcp();
+}
 async function mcpEndpoint(req, res, url) {
-  res.setHeader('access-control-allow-origin', '*');
-  res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-protocol-version, mcp-session-id');
-  res.setHeader('access-control-allow-methods', 'POST, OPTIONS');
+  const origin = req.headers.origin;
+  if (origin) { // a browser page is calling: only origins the admin listed may, and they get CORS headers
+    if (!(mcpOrigins.includes('*') || mcpOrigins.includes(origin))) { log('mcp_origin_refused', clientIp(req), origin.slice(0, 80)); return send(res, 403, { error: 'This origin is not allowed to call the MCP endpoint. Set MCP_ALLOWED_ORIGINS on the server to allow it.' }); }
+    res.setHeader('access-control-allow-origin', mcpOrigins.includes('*') ? '*' : origin);
+    res.setHeader('vary', 'Origin');
+    res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-protocol-version, mcp-session-id');
+    res.setHeader('access-control-allow-methods', 'POST, OPTIONS');
+  }
   if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
   if (!settings.allowMcp) return send(res, 403, { error: 'MCP access is turned off on this server.' });
-  const user = mcpUser(req, url);
-  if (!user) { res.setHeader('www-authenticate', 'Bearer realm="sketchy"'); return send(res, 401, { error: 'Missing or invalid MCP token. Create one under Account in Sketchy.' }); }
+  const ip = clientIp(req), who = url.pathname === '/mcp' ? mcpUser(req) : null;
+  if (!who) {
+    const wait = rate('mcpfail:' + ip, 20, 15 * 60e3);
+    log('mcp_auth_failed', ip);
+    if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many attempts. Try again later.' }); }
+    res.setHeader('www-authenticate', 'Bearer realm="sketchy"');
+    return send(res, 401, { error: 'Missing or invalid MCP token. Create one under Account in Sketchy and send it as "Authorization: Bearer <token>".' });
+  }
+  if (who.ent.paused) return send(res, 403, { error: 'This token was paused after repeated problems (' + who.ent.paused.reason + '). Resume it under Account, then AI assistants.' });
   if (req.method !== 'POST') { res.setHeader('allow', 'POST'); return send(res, 405, { error: 'Use POST with a JSON-RPC body.' }); }
+  const wait = Math.max(rate('mcptok:' + who.id, MCP_RATE, 60e3), rate('mcpuser:' + who.user, MCP_RATE * 2, 60e3)); // each call can rebuild a whole design
+  if (wait) { strikeToken(who.id, 'rate_limited', ip); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
   const body = await readJSONBody(req, 4e6);
   if (!body) return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
-  const out = await mcpHandle(user, body);
+  const out = await mcpHandle(who.user, body, { strike: (kind) => strikeToken(who.id, kind, ip) });
   if (out === null) { res.statusCode = 202; return res.end(); }
   return send(res, 200, out);
 }
@@ -270,7 +418,7 @@ async function api(req, res, url) {
   if (p === '/api/me') {
     if (user) { // sliding renewal: push the expiry out (and re-issue the cookie) once a day of use
       const tok = tokenOf(req), ss = sessions[sha(tok)];
-      if (ss && ss.exp - Date.now() < SESSION_MS - 24 * 3600e3) { delete sessions[sha(tok)]; setSession(req, res, user, tok); }
+      if (ss && ss.exp - Date.now() < SESSION_MS - DAY && ss.exp < ss.created + SESSION_MAX_MS) setSession(req, res, user, tok, ss);
     }
     return send(res, 200, { user, admin: !!(user && users[user].admin), created: user ? users[user].created : 0, registration: settings.allowRegistration, mcp: settings.allowMcp, setup: !Object.keys(users).length });
   }
@@ -285,11 +433,12 @@ async function api(req, res, url) {
     if (p === '/api/register') {
       const first = !Object.keys(users).length;
       if (!settings.allowRegistration && !first) return send(res, 403, { error: 'Registration is disabled on this server.' });
-      if (!userRe.test(username)) return send(res, 400, { error: 'Username: 3–32 chars, a–z, 0–9, _ or -.' });
-      if (!pwOk(password)) return send(res, 400, { error: 'Password must be at least 8 characters.' });
+      if (!userRe.test(username) || RESERVED.has(username)) return send(res, 400, { error: 'Username: 3–32 chars, a–z, 0–9, _ or -.' });
+      if (!pwOk(password, username)) return send(res, 400, { error: pwMsg });
       if (users[username]) return send(res, 409, { error: 'That username is taken.' });
       users[username] = { id: crypto.randomUUID(), ...(await newHash(password)), created: Date.now(), lastLogin: Date.now(), admin: first };
       await saveUsers();
+      log('registered', ip, `user=${username}${first ? ' (first account, admin)' : ''}`);
       setSession(req, res, username);
       return send(res, 200, { user: username, admin: first });
     }
@@ -297,17 +446,45 @@ async function api(req, res, url) {
     if (wait) return send(res, 429, { error: `Too many failed sign-ins. Try again in ${Math.ceil(wait / 60e3)} minute${wait > 60e3 ? 's' : ''}.` });
     const u = users[username];
     const hash = await scrypt(password, u?.salt || '0'.repeat(32));
-    if (!u || !crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(u.hash))) { noteFailure(ipKey, userKey); return send(res, 401, { error: 'Wrong username or password.' }); }
+    if (!u || !crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(u.hash))) { noteFailure(ipKey, userKey); log('login_failed', ip, `user=${JSON.stringify(username.slice(0, 32))}${lockedFor(ipKey, userKey) ? ' LOCKED_OUT' : ''}`); return send(res, 401, { error: 'Wrong username or password.' }); }
+    if (u.totp?.enabled) { // the password was right; the session starts only after the second step
+      for (const [k, v] of tickets) if (v.exp < Date.now()) tickets.delete(k);
+      const ticket = crypto.randomBytes(24).toString('base64url');
+      tickets.set(ticket, { user: username, exp: Date.now() + 5 * 60e3, tries: 0 });
+      return send(res, 200, { totp: true, ticket });
+    }
     clearFailures(ipKey, userKey);
     u.lastLogin = Date.now(); await saveUsers();
     setSession(req, res, username);
     return send(res, 200, { user: username, admin: !!u.admin });
   }
 
+  if (p === '/api/login/totp') {
+    if (req.method !== 'POST') return send(res, 405, {});
+    if (throttled(ip)) return send(res, 429, { error: 'Too many attempts. Try again later.' });
+    noteAttempt(ip);
+    const b = await readJSONBody(req, 1024), t = b && tickets.get(String(b.ticket || ''));
+    if (!t || t.exp < Date.now() || !users[t.user]) return send(res, 401, { error: 'That sign-in expired. Enter your password again.', expired: true });
+    const ipKey = 'ip:' + ip, userKey = 'user:' + t.user, wait = lockedFor(ipKey, userKey);
+    if (wait) return send(res, 429, { error: `Too many failed sign-ins. Try again in ${Math.ceil(wait / 60e3)} minute${wait > 60e3 ? 's' : ''}.` });
+    const u = users[t.user], how = checkSecondFactor(u, b.code);
+    if (!how) {
+      noteFailure(ipKey, userKey); log('totp_failed', ip, `user=${t.user}`);
+      if (++t.tries >= 5) tickets.delete(b.ticket);
+      return send(res, 401, { error: 'That code is not right.', expired: t.tries >= 5 });
+    }
+    tickets.delete(b.ticket); clearFailures(ipKey, userKey);
+    u.lastLogin = Date.now(); await saveUsers();
+    if (how === 'recovery') log('totp_recovery_code_used', ip, `user=${t.user} left=${u.totp.recovery.length}`);
+    setSession(req, res, t.user);
+    return send(res, 200, { user: t.user, admin: !!u.admin, ...(how === 'recovery' ? { recoveryLeft: u.totp.recovery.length } : {}) });
+  }
+
   if (p === '/api/logout') {
+    if (req.method !== 'POST') return send(res, 405, {});
     const tok = tokenOf(req);
     if (tok) { delete sessions[sha(tok)]; saveSessions(); }
-    res.setHeader('set-cookie', 'sketchy_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+    res.setHeader('set-cookie', [`${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure`, `${COOKIE_PLAIN}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`]);
     return send(res, 200, {});
   }
 
@@ -323,16 +500,73 @@ async function api(req, res, url) {
     const u = users[user];
     const hash = await scrypt(String(b.current || ''), u.salt);
     if (!crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(u.hash))) return send(res, 401, { error: 'Current password is wrong.' });
-    if (!pwOk(b.next)) return send(res, 400, { error: 'New password must be at least 8 characters.' });
+    if (!pwOk(b.next, user)) return send(res, 400, { error: pwMsg });
     Object.assign(u, await newHash(b.next));
+    log('password_changed', ip, `user=${user}`);
     dropSessions(user, tokenOf(req)); // sign out other devices
     await saveUsers(); await saveSessions();
     return send(res, 200, {});
   }
 
+  // ---- two-step sign-in, optional for every account
+  if (p.startsWith('/api/totp')) {
+    const u = users[user], t = u.totp;
+    if (p === '/api/totp' && req.method === 'GET') return send(res, 200, { enabled: !!t?.enabled, recoveryLeft: t?.enabled ? (t.recovery || []).length : 0 });
+    if (req.method !== 'POST') return send(res, 405, {});
+    if (throttled(ip)) return send(res, 429, { error: 'Too many attempts. Try again later.' });
+    noteAttempt(ip);
+    const b = await readJSONBody(req, 1024) || {};
+    const pwOkNow = async () => { const h = await scrypt(String(b.password || ''), u.salt); return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(u.hash)); };
+    if (p === '/api/totp/setup') {
+      if (t?.enabled) return send(res, 409, { error: 'Two-step sign-in is already on.' });
+      if (!(await pwOkNow())) return send(res, 401, { error: 'Password is wrong.' });
+      const secret = b32encode(crypto.randomBytes(20));
+      u.totp = { enabled: false, pending: secret, last: 0, recovery: [] };
+      await saveUsers();
+      const uri = `otpauth://totp/Sketchy:${encodeURIComponent(user)}?secret=${secret}&issuer=Sketchy&algorithm=SHA1&digits=6&period=30`;
+      return send(res, 200, { secret, uri });
+    }
+    if (p === '/api/totp/enable') {
+      if (!t?.pending) return send(res, 400, { error: 'Start the setup first.' });
+      const st = totpStep(t.pending, b.code);
+      if (st === null) return send(res, 400, { error: 'That code is not right. Check the time on your phone and try the next code.' });
+      const codes = newRecoveryCodes();
+      u.totp = { enabled: true, secret: t.pending, last: st, recovery: codes.map((c) => sha(normRecovery(c))) };
+      await saveUsers(); log('totp_enabled', ip, `user=${user}`);
+      return send(res, 200, { recoveryCodes: codes });
+    }
+    if (p === '/api/totp/disable') {
+      if (!t?.enabled) return send(res, 400, { error: 'Two-step sign-in is not on.' });
+      if (!(await pwOkNow())) return send(res, 401, { error: 'Password is wrong.' });
+      if (!checkSecondFactor(u, b.code)) return send(res, 401, { error: 'That code is not right.' });
+      delete u.totp; await saveUsers(); log('totp_disabled', ip, `user=${user}`);
+      return send(res, 200, {});
+    }
+    return send(res, 404, { error: 'Not found' });
+  }
+
+  if (p === '/api/storage' && req.method === 'GET') { // how much room this account has used
+    const D0 = dirs(user);
+    return send(res, 200, { used: (await dirBytes(D0.proj)) + (await dirBytes(D0.draft)), quota: quotaOf(user) });
+  }
+
+  // ---- signed-in devices
+  if (p === '/api/sessions' && req.method === 'GET') {
+    const cur = tokenOf(req) && sha(tokenOf(req));
+    return send(res, 200, Object.entries(sessions).filter(([, v]) => v.user === user && !gone(v)).sort((a, b) => (b[1].last || 0) - (a[1].last || 0)).map(([k, v]) => ({ id: k.slice(0, 16), device: v.device || 'Unknown device', created: v.created, last: v.last, current: k === cur })));
+  }
+  if (p === '/api/sessions/others' && req.method === 'POST') { dropSessions(user, tokenOf(req)); await saveSessions(); log('sessions_ended', ip, `user=${user}`); return send(res, 200, {}); }
+  const sm = /^\/api\/sessions\/([0-9a-f]{16})$/.exec(p);
+  if (sm && req.method === 'DELETE') {
+    const key = Object.keys(sessions).find((k) => k.startsWith(sm[1]) && sessions[k].user === user);
+    if (!key) return send(res, 404, { error: 'No such session.' });
+    delete sessions[key]; await saveSessions();
+    return send(res, 200, {});
+  }
+
   // ---- MCP access tokens (own tokens only)
   if (p === '/api/mcp/tokens') {
-    if (req.method === 'GET') return send(res, 200, { enabled: settings.allowMcp, tokens: Object.entries(mcpTokens).filter(([, t]) => t.user === user).map(([id, t]) => ({ id, name: t.name, created: t.created, lastUsed: t.lastUsed || 0 })) });
+    if (req.method === 'GET') return send(res, 200, { enabled: settings.allowMcp, tokens: Object.entries(mcpTokens).filter(([, t]) => t.user === user).map(([id, t]) => ({ id, name: t.name, created: t.created, lastUsed: t.lastUsed || 0, paused: t.paused || null })) });
     if (req.method === 'POST') {
       if (!settings.allowMcp) return send(res, 403, { error: 'MCP access is turned off on this server.' });
       const b = await readJSONBody(req, 1024);
@@ -341,10 +575,17 @@ async function api(req, res, url) {
       const token = 'skm_' + crypto.randomBytes(32).toString('base64url');
       const id = crypto.randomUUID();
       mcpTokens[id] = { hash: sha(token), user, name: nm, created: Date.now(), lastUsed: 0 };
+      log('mcp_token_created', ip, `user=${user}`);
       await saveMcp();
       return send(res, 200, { id, name: nm, token }); // the only time the token is shown
     }
     return send(res, 405, {});
+  }
+  const rm = /^\/api\/mcp\/tokens\/([\w-]+)\/resume$/.exec(p);
+  if (rm && req.method === 'POST') {
+    if (mcpTokens[rm[1]]?.user !== user) return send(res, 404, { error: 'No such token.' });
+    delete mcpTokens[rm[1]].paused; mcpTokens[rm[1]].strikes = []; await saveMcp(); log('mcp_token_resumed', ip, `user=${user}`);
+    return send(res, 200, {});
   }
   const tm = /^\/api\/mcp\/tokens\/([\w-]+)$/.exec(p);
   if (tm && req.method === 'DELETE') {
@@ -358,18 +599,19 @@ async function api(req, res, url) {
     if (!users[user].admin) return send(res, 403, { error: 'Admins only.' });
     const parts = p.slice('/api/admin/'.length).split('/').map(decodeURIComponent);
     if (parts[0] === 'settings') {
-      if (req.method === 'GET') return send(res, 200, { ...settings, ...loginCfg() });
+      if (req.method === 'GET') return send(res, 200, { ...settings, ...loginCfg(), defaultQuotaMb: Number.isFinite(settings.defaultQuotaMb) ? settings.defaultQuotaMb : DEFAULT_QUOTA_MB });
       if (req.method === 'PUT') {
         const b = await readJSONBody(req, 1024);
         if (typeof b?.allowRegistration === 'boolean') settings.allowRegistration = b.allowRegistration;
         if (typeof b?.allowMcp === 'boolean') settings.allowMcp = b.allowMcp;
+        if (b && 'defaultQuotaMb' in b) { const n = Number(b.defaultQuotaMb); if (!Number.isInteger(n) || n < 0 || n > 1e7) return send(res, 400, { error: 'Storage must be a whole number of megabytes from 0 (no limit) to 10000000.' }); settings.defaultQuotaMb = n; usageCache.clear(); }
         const lim = { maxFailedLogins: [0, 1000], failWindowMinutes: [1, 10080], lockoutMinutes: [1, 10080] };
         for (const [k, [lo, hi]] of Object.entries(lim)) if (b && k in b) {
           const n = Number(b[k]);
           if (!Number.isInteger(n) || n < lo || n > hi) return send(res, 400, { error: `${k === 'maxFailedLogins' ? 'Failed sign-ins' : 'Minutes'} must be a whole number from ${lo} to ${hi}.` });
           settings[k] = n;
         }
-        await saveSettings(); return send(res, 200, { ...settings, ...loginCfg() });
+        await saveSettings(); return send(res, 200, { ...settings, ...loginCfg(), defaultQuotaMb: Number.isFinite(settings.defaultQuotaMb) ? settings.defaultQuotaMb : DEFAULT_QUOTA_MB });
       }
     }
     if (parts[0] === 'lockouts') { // who is locked out right now, and a way to let them back in
@@ -379,10 +621,10 @@ async function api(req, res, url) {
     if (parts[0] === 'users' && !parts[1] && req.method === 'POST') { // an admin adds a person; with no password a temporary one is generated
       const b = await readJSONBody(req, 4096);
       const username = String(b?.username || '').trim().toLowerCase();
-      if (!userRe.test(username)) return send(res, 400, { error: 'Username: 3–32 chars, a–z, 0–9, _ or -.' });
+      if (!userRe.test(username) || RESERVED.has(username)) return send(res, 400, { error: 'Username: 3–32 chars, a–z, 0–9, _ or -.' });
       if (users[username]) return send(res, 409, { error: 'That username is taken.' });
       const generated = !b?.password, pw = generated ? crypto.randomBytes(9).toString('base64url') : String(b.password);
-      if (!pwOk(pw)) return send(res, 400, { error: 'Password must be at least 8 characters.' });
+      if (!pwOk(pw, username)) return send(res, 400, { error: pwMsg });
       users[username] = { id: crypto.randomUUID(), ...(await newHash(pw)), created: Date.now(), lastLogin: 0, admin: !!b?.admin };
       await saveUsers();
       return send(res, 200, { user: username, admin: !!b?.admin, ...(generated ? { password: pw } : {}) });
@@ -393,7 +635,8 @@ async function api(req, res, url) {
         const files = (await fs.readdir(d).catch(() => [])).filter((f) => f.endsWith('.json'));
         let bytes = 0;
         for (const f of files) bytes += (await fs.stat(path.join(d, f)).catch(() => ({ size: 0 }))).size;
-        return { name, created: u.created, lastLogin: u.lastLogin || 0, admin: !!u.admin, designs: files.length, bytes };
+        const used = await dirBytes(d) + await dirBytes(path.join(dataDir, 'drafts', u.id));
+        return { name, created: u.created, lastLogin: u.lastLogin || 0, admin: !!u.admin, designs: files.length, bytes: used, quotaMb: Number.isFinite(u.quotaMb) ? u.quotaMb : null, effectiveQuotaMb: Math.round(quotaOf(name) / 1048576), totp: !!u.totp?.enabled };
       }));
       return send(res, 200, list.sort((a, b) => a.name.localeCompare(b.name)));
     }
@@ -402,11 +645,26 @@ async function api(req, res, url) {
     if (parts[2] === 'password' && req.method === 'POST') {
       const b = await readJSONBody(req, 1024);
       const pw = b?.password || crypto.randomBytes(9).toString('base64url');
-      if (!pwOk(pw)) return send(res, 400, { error: 'Password must be at least 8 characters.' });
+      if (!pwOk(pw, target)) return send(res, 400, { error: pwMsg });
       Object.assign(users[target], await newHash(pw));
       dropSessions(target);
       await saveUsers(); await saveSessions();
       return send(res, 200, { password: pw });
+    }
+    if (parts[2] === 'quota' && req.method === 'PUT') { // null = follow the server default; 0 = no limit
+      const b = await readJSONBody(req, 256);
+      if (b?.quotaMb === null) delete users[target].quotaMb;
+      else {
+        const n = Number(b?.quotaMb);
+        if (b?.quotaMb === '' || !Number.isInteger(n) || n < 0 || n > 1e7) return send(res, 400, { error: 'Storage must be a whole number of megabytes (0 = no limit).' });
+        users[target].quotaMb = n;
+      }
+      usageCache.delete(target); await saveUsers(); log('quota_changed', ip, `user=${target} by=${user} quotaMb=${users[target].quotaMb ?? 'default'}`);
+      return send(res, 200, { quotaMb: users[target].quotaMb ?? null, effectiveQuotaMb: Math.round(quotaOf(target) / 1048576) });
+    }
+    if (parts[2] === 'totp' && req.method === 'DELETE') { // for someone who lost their phone and recovery codes
+      delete users[target].totp; await saveUsers(); log('totp_reset_by_admin', ip, `user=${target} by=${user}`);
+      return send(res, 200, {});
     }
     if (parts[2] === 'admin' && req.method === 'POST') {
       const b = await readJSONBody(req, 256);
@@ -450,8 +708,9 @@ async function api(req, res, url) {
     if (req.method === 'GET') { const d = await fs.readFile(f).catch(() => null); if (!d) return send(res, 404, { error: 'No draft' }); res.setHeader('content-type', 'application/json'); return res.end(d); }
     if (req.method === 'DELETE') { await fs.rm(f, { force: true }); await fs.rm(mf, { force: true }); return send(res, 200, {}); }
     if (req.method === 'PUT') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_DESIGN_BYTES || 200e6);
       try { JSON.parse(body.toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
+      await checkQuota(user, body.length, (await fs.stat(f).catch(() => ({ size: 0 }))).size);
       await fs.writeFile(f, body);
       await writeJSON(mf, { device, base: +req.headers['x-base-rev'] || 0 });
       return send(res, 200, {});
@@ -539,7 +798,7 @@ async function api(req, res, url) {
       return send(res, 200, {});
     }
     if (req.method === 'PUT') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_DESIGN_BYTES || 200e6);
       let obj; try { obj = JSON.parse(body.toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
       const folderHdr = req.headers['x-folder'] !== undefined ? decodeURIComponent(String(req.headers['x-folder'])) : null;
       if (folderHdr !== null && !folderOk(folderHdr)) return send(res, 400, { error: 'Invalid folder name.' });
@@ -592,18 +851,39 @@ async function api(req, res, url) {
   return send(res, 404, { error: 'Not found' });
 }
 
-http.createServer(async (req, res) => {
+// Headers every response carries. The CSP is the main defence if a malicious design file ever manages to put markup on the page:
+// scripts may only come from this server (no inline script, no eval) and styles from files only (no style attributes or style tags), and nothing can be framed, posted elsewhere or sent off-site.
+const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+function harden(req, res, api) {
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('x-frame-options', 'DENY');
+  res.setHeader('referrer-policy', 'no-referrer');
+  res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  res.setHeader('cross-origin-opener-policy', 'same-origin');
+  if (api) res.setHeader('cache-control', 'no-store'); else { res.setHeader('content-security-policy', CSP); res.setHeader('cross-origin-resource-policy', 'same-origin'); }
+  if (req.headers['x-forwarded-proto'] === 'https' || req.socket.encrypted) res.setHeader('strict-transport-security', 'max-age=31536000');
+}
+
+const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://x');
-    if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) return await mcpEndpoint(req, res, url);
-    if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+    const isMcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'), isApi = url.pathname.startsWith('/api/');
+    harden(req, res, isMcp || isApi);
+    const ip = clientIp(req), wait = rate((isMcp ? 'mcp:' : isApi ? 'api:' : 'static:') + ip, isMcp ? 600 : isApi ? 1500 : 900, 60e3);
+    if (wait) { log('rate_limited', ip, url.pathname.slice(0, 40)); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
+    if (isMcp) return await mcpEndpoint(req, res, url);
+    if (isApi) return await api(req, res, url);
+    if (req.method !== 'GET' && req.method !== 'HEAD') { res.setHeader('allow', 'GET, HEAD'); res.statusCode = 405; return res.end(); }
     const p = path.normalize(path.join(root, url.pathname === '/' ? 'index.html' : url.pathname));
-    if (!p.startsWith(root)) { res.statusCode = 403; return res.end(); }
+    if (p !== root && !p.startsWith(root + path.sep)) { res.statusCode = 403; return res.end(); }
     const body = await fs.readFile(p).catch(() => null);
     if (!body) { res.statusCode = 404; return res.end('not found'); }
     res.setHeader('content-type', types[path.extname(p)] || 'application/octet-stream');
-    if (p.includes('assets')) res.setHeader('cache-control', 'public, max-age=31536000, immutable');
+    if (p.startsWith(path.join(root, 'assets') + path.sep)) res.setHeader('cache-control', 'public, max-age=31536000, immutable');
     else res.setHeader('cache-control', 'no-cache'); // the page itself is re-checked on every visit, so an upgrade shows up straight away
     res.end(body);
-  } catch (e) { send(res, e.code === 413 ? 413 : 500, { error: e.code === 413 ? 'File too large' : 'Server error' }); }
-}).listen(port, () => console.log(`Sketchy on :${port}, data in ${dataDir}, registration ${settings.allowRegistration ? 'open' : 'closed'}`));
+  } catch (e) { if (e.code === 413) res.setHeader('connection', 'close'); /* the unread upload makes the connection unusable */ if (e.code !== 413) console.error(`${new Date().toISOString()} server_error ${e.stack || e}`); send(res, e.code === 413 ? 413 : 500, { error: e.code === 413 ? e.msg || 'File too large' : 'Server error' }); }
+});
+server.requestTimeout = 5 * 60e3; server.headersTimeout = 30e3; server.keepAliveTimeout = 5e3; server.maxHeadersCount = 100;
+server.listen(port, () => console.log(`Sketchy on :${port}, data in ${dataDir}, registration ${settings.allowRegistration ? 'open' : 'closed'}${TRUST_PROXY ? '' : ', proxy headers ignored'}`));
+process.on('unhandledRejection', (e) => console.error(`${new Date().toISOString()} unhandled_rejection ${e?.stack || e}`));

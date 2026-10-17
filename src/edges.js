@@ -139,6 +139,44 @@ export function matchChain(chains, pts, tol = 0.02) {
   return null;
 }
 
+/**
+ * Like matchChain, but when the design has been edited since the edge was picked (a box made wider, a face moved) and the
+ * stored points no longer lie on any edge, find the edge that is most plausibly the same one: same orientation, nearest, similar
+ * length. Returns null when nothing is close enough or two edges are about equally good, so a wrong edge is never picked quietly.
+ */
+export function matchChainNear(chains, pts, nrm, tol = 0.02) {
+  const exact = matchChain(chains, pts, tol);
+  if (exact) return exact;
+  const sig = (q) => {
+    const c = [0, 0, 0], lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const p of q) for (let k = 0; k < 3; k++) { c[k] += p[k] / q.length; lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
+    const ext = hi.map((h, k) => h - lo[k]), big = Math.max(...ext, 1e-9);
+    let len = 0; for (let i = 1; i < q.length; i++) len += Math.hypot(q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1], q[i][2] - q[i - 1][2]);
+    return { c, len, flat: ext.map((e) => e < 1e-3 + 0.02 * big), big };
+  };
+  const want = sig(pts);
+  const scored = [];
+  for (const ch of chains) {
+    const g = sig(ch.pts);
+    if (g.flat.some((f, k) => f !== want.flat[k])) continue; // lies in a different direction
+    if (nrm && !nrm.every((r) => ch.frames.some((fr) => dot(fr.n1, r) > 0.98 || dot(fr.n2, r) > 0.98))) continue; // not between the same two kinds of face
+    const dc = Math.hypot(g.c[0] - want.c[0], g.c[1] - want.c[1], g.c[2] - want.c[2]);
+    scored.push({ ch, score: dc + 0.5 * Math.abs(g.len - want.len) });
+  }
+  scored.sort((a, b) => a.score - b.score);
+  if (!scored.length) return null;
+  const [best, next] = scored;
+  if (next && best.score > 0.7 * next.score) return null; // too close to call
+  return best.ch;
+}
+
+/** What to store when an edge is picked: its points, plus the normals of the two faces it joins, so the edge can be found again after edits. */
+export function edgeRef(body, chain) {
+  const fr = chain.frames[Math.floor(chain.frames.length / 2)];
+  const r = (v) => v.map((c) => +c.toFixed(3));
+  return { body, pts: roundPts(chain.pts), nrm: [r(fr.n1), r(fr.n2)] };
+}
+
 export const roundPts = (pts) => pts.map((p) => p.map((v) => +v.toFixed(3)));
 
 // ---------- planar face region (for sketch-on-face) ----------

@@ -677,7 +677,7 @@ export class Viewport {
     const nn = n.map((c) => c / nl);
     // x = Z x n so that the sketch "up" (y) points towards world +Z
     const xdir = Math.abs(nn[2]) > 0.99 ? [1, 0, 0] : [-nn[1] / Math.hypot(nn[0], nn[1]), nn[0] / Math.hypot(nn[0], nn[1]), 0].map((q) => +q.toFixed(6));
-    return { face: { plane: 'custom', origin, normal: nn.map((c) => +c.toFixed(6)), xdir }, tris: face.tris, mesh: hit.object };
+    return { face: { plane: 'custom', origin, normal: nn.map((c) => +c.toFixed(6)), xdir, faceRef: { id: hit.object.userData.id, point: face.point.map((c) => +c.toFixed(3)), normal: nn.map((c) => +c.toFixed(6)) } }, tris: face.tris, mesh: hit.object };
   }
   // Persistent + hover face highlights. Each entry: {id, point, normal}; hover: {tris, mesh} from pickPlanarFace.
   showFaces(selected, hover) {

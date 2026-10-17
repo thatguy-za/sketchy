@@ -24,10 +24,11 @@ ENV NODE_ENV=production DATA_DIR=/data PORT=8080 SKETCHY_DROP_ROOT=1
 COPY package*.json ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY server.js mcp.js ./
+COPY server.js mcp.js mcp-tools.js mcp-validate.js mcp-pool.js mcp-worker.js ./
 COPY src ./src
 COPY --from=build --chown=node:node /data-empty /data
 VOLUME /data
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/me').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 # starts as root only to fix the ownership of /data, then server.js switches to PUID:PGID (default 1000:1000)
 CMD ["node", "server.js"]

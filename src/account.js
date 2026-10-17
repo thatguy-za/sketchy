@@ -100,9 +100,10 @@ export function showAuth(startRegister) {
         e.preventDefault();
         const btn = form.querySelector('[type=submit]'); btn.disabled = true;
         const fd = new FormData(form);
-        const r = await call('POST', register ? '/register' : '/login', { username: fd.get('username'), password: fd.get('password') });
+        let r = await call('POST', register ? '/register' : '/login', { username: fd.get('username'), password: fd.get('password') });
         btn.disabled = false;
         if (!r.ok) { form.querySelector('.form-err').textContent = r.data?.error || 'Something went wrong.'; return; }
+        if (r.data?.totp) { r = await secondStep(page, r.data.ticket, render); if (!r) return; } // two-step sign-in is on for this account
         page.remove();
         await refreshAccount();
         resolve(true);
@@ -110,6 +111,34 @@ export function showAuth(startRegister) {
       form.username.focus();
     };
     render();
+  });
+}
+
+/** The second sign-in step for accounts with two-step sign-in: a 6-digit code from the authenticator app, or a recovery code. */
+function secondStep(page, ticket, back) {
+  return new Promise((resolve) => {
+    page.innerHTML = `<div class="auth-card" role="dialog" aria-label="Two-step sign-in">
+      <div class="auth-brand">${LOGO}<b>Sketchy</b></div>
+      <h1>Two-step sign-in</h1>
+      <p class="auth-sub">Open your authenticator app and enter the 6-digit code for Sketchy. Lost your phone? Enter one of your recovery codes instead.</p>
+      <form autocomplete="off">
+        <label>Code<input name="code" inputmode="numeric" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" required maxlength="12" aria-describedby="tf-hint"></label>
+        <div class="form-err" role="alert"></div>
+        <button class="btn primary" type="submit">Verify and sign in</button>
+      </form>
+      <div class="switch"><a href="#">Back to sign in</a></div></div>`;
+    const form = page.querySelector('form'), err = form.querySelector('.form-err');
+    page.querySelector('.switch a').onclick = (e) => { e.preventDefault(); back(); resolve(null); };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = form.querySelector('[type=submit]'); btn.disabled = true;
+      const r = await call('POST', '/login/totp', { ticket, code: form.code.value });
+      btn.disabled = false;
+      if (r.ok) return resolve(r);
+      err.textContent = r.data?.error || 'Something went wrong.';
+      if (r.data?.expired) { back(); resolve(null); } else { form.code.select(); }
+    };
+    form.code.focus();
   });
 }
 
@@ -165,7 +194,7 @@ export async function showAccount(startTab = 'profile') {
     <div class="ac-panes">
       <section class="ac-pane" role="tabpanel" id="pane-profile" aria-labelledby="tab-profile">
         <h3>Your account</h3>
-        <dl class="ac-dl"><dt>Username</dt><dd>${esc(acct.user)}</dd><dt>Role</dt><dd>${acct.admin ? 'Administrator' : 'Member'}</dd><dt>Member since</dt><dd>${esc(since)}</dd><dt>Saved designs</dt><dd id="ac-n2">…</dd></dl>
+        <dl class="ac-dl"><dt>Username</dt><dd>${esc(acct.user)}</dd><dt>Role</dt><dd>${acct.admin ? 'Administrator' : 'Member'}</dd><dt>Member since</dt><dd>${esc(since)}</dd><dt>Saved designs</dt><dd id="ac-n2">…</dd><dt>Storage</dt><dd id="ac-store">…</dd></dl>
         <p class="hint">Your designs live on this server and are private to you. Your changes are saved automatically. Saving a version (Ctrl+S) adds a restorable step to the design's history.</p>
       </section>
       <section class="ac-pane" role="tabpanel" id="pane-security" aria-labelledby="tab-security" hidden>
@@ -178,6 +207,10 @@ export async function showAccount(startTab = 'profile') {
           <div class="form-err" role="alert"></div><div class="ac-ok" role="status"></div>
           <div><button class="btn primary" type="submit">Update password</button></div>
         </form>
+        <h3 class="mh3 mt22">Two-step sign-in</h3>
+        <div id="tf-box" class="tf-box">Loading…</div>
+        <h3 class="mh3 mt22">Signed-in devices</h3>
+        <div id="ss-box" class="ss-box">Loading…</div>
       </section>
       <section class="ac-pane" role="tabpanel" id="pane-ai" aria-labelledby="tab-ai" hidden>
         <h3>AI assistants (MCP)</h3>
@@ -187,7 +220,7 @@ export async function showAccount(startTab = 'profile') {
         <div id="mc-list" class="mcp-list">Loading…</div>
         <form class="mcp-new" id="mc-form"><input name="name" placeholder="Token name, e.g. Claude Desktop" maxlength="60" aria-label="Token name"><button class="btn primary" type="submit">Create token</button></form>
         <div id="mc-out"></div>
-        <h3 class="mh3" style="margin-top:14px">Set up your assistant</h3>
+        <h3 class="mh3 mt14">Set up your assistant</h3>
         <div id="mc-guide" class="mcp-guide"></div>
       </section>
     </div>`);
@@ -205,6 +238,60 @@ export async function showAccount(startTab = 'profile') {
   show(startTab);
   // ---- counts
   call('GET', '/projects').then((r) => { const n = r.ok ? `${r.data.length} design${r.data.length === 1 ? '' : 's'}` : '—'; m.el.querySelector('#ac-n').textContent = n; m.el.querySelector('#ac-n2').textContent = r.ok ? String(r.data.length) : '—'; });
+  call('GET', '/storage').then((r) => { const el = m.el.querySelector('#ac-store'); if (!el) return; el.textContent = r.ok ? `${fmtBytes(r.data.used)} of ${r.data.quota ? fmtBytes(r.data.quota) : 'unlimited'}` : '—'; });
+  // ---- two-step sign-in
+  const tf = m.el.querySelector('#tf-box');
+  const tfCopy = (text, btn) => navigator.clipboard?.writeText(text).then(() => { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = t), 1400); });
+  const tfRender = async () => {
+    const r = await call('GET', '/totp');
+    if (!r.ok) { tf.textContent = 'Could not load.'; return; }
+    if (r.data.enabled) {
+      tf.innerHTML = `<p class="hint"><b>On.</b> You will be asked for a code from your authenticator app each time you sign in. ${r.data.recoveryLeft} recovery code${r.data.recoveryLeft === 1 ? '' : 's'} left.</p>
+        <form class="ac-form" id="tf-off" autocomplete="off"><label>Password<input name="password" type="password" autocomplete="current-password" required></label><label>Code (or a recovery code)<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+        <div class="form-err" role="alert"></div><div><button class="btn" type="submit">Turn off</button></div></form>`;
+      const f = tf.querySelector('#tf-off');
+      f.onsubmit = async (e) => { e.preventDefault(); const d = await call('POST', '/totp/disable', { password: f.password.value, code: f.code.value }); if (!d.ok) { f.querySelector('.form-err').textContent = d.data?.error || 'Could not turn it off.'; return; } tfRender(); };
+    } else {
+      tf.innerHTML = `<p class="hint">Adds a second check at sign-in: a 6-digit code from an authenticator app (such as Google Authenticator, Microsoft Authenticator, 1Password or Aegis). Optional, and recommended if this server is on the internet.</p>
+        <form class="ac-form" id="tf-on" autocomplete="off"><label>Your password<input name="password" type="password" autocomplete="current-password" required></label><div class="form-err" role="alert"></div><div><button class="btn primary" type="submit">Set up two-step sign-in</button></div></form>`;
+      const f = tf.querySelector('#tf-on');
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        const s = await call('POST', '/totp/setup', { password: f.password.value });
+        if (!s.ok) { f.querySelector('.form-err').textContent = s.data?.error || 'Could not start the setup.'; return; }
+        const spaced = s.data.secret.match(/.{1,4}/g).join(' ');
+        tf.innerHTML = `<ol class="tf-steps"><li>In your authenticator app choose <b>Add account</b>, then <b>Enter a setup key</b> (on a phone you can also <a href="${esc(s.data.uri)}">tap here</a>).</li>
+          <li>Account: <b>Sketchy (${esc(acct.user)})</b>. Key: <code class="tf-key">${esc(spaced)}</code> <button class="btn sm" type="button" id="tf-copykey">Copy</button>. Keep it on <b>time-based</b>.</li>
+          <li>Enter the 6-digit code the app shows:</li></ol>
+          <form class="ac-form" id="tf-confirm" autocomplete="off"><label>Code<input name="code" inputmode="numeric" autocomplete="one-time-code" required maxlength="8"></label><div class="form-err" role="alert"></div><div><button class="btn primary" type="submit">Turn on</button> <button class="btn" type="button" id="tf-cancel">Cancel</button></div></form>`;
+        tf.querySelector('#tf-copykey').onclick = (ev) => tfCopy(s.data.secret, ev.currentTarget);
+        tf.querySelector('#tf-cancel').onclick = tfRender;
+        const c = tf.querySelector('#tf-confirm');
+        c.code.focus();
+        c.onsubmit = async (ev) => {
+          ev.preventDefault();
+          const d = await call('POST', '/totp/enable', { code: c.code.value });
+          if (!d.ok) { c.querySelector('.form-err').textContent = d.data?.error || 'That code is not right.'; return; }
+          tf.innerHTML = `<p><b>Two-step sign-in is on.</b> Save these recovery codes somewhere safe, such as a password manager. Each works once if you lose your phone. They are not shown again.</p>
+            <pre class="tf-codes">${d.data.recoveryCodes.map(esc).join('\n')}</pre><button class="btn sm" type="button" id="tf-copycodes">Copy codes</button> <button class="btn primary" type="button" id="tf-done">I have saved them</button>`;
+          tf.querySelector('#tf-copycodes').onclick = (ev2) => tfCopy(d.data.recoveryCodes.join('\n'), ev2.currentTarget);
+          tf.querySelector('#tf-done').onclick = tfRender;
+        };
+      };
+    }
+  };
+  tfRender();
+  // ---- signed-in devices
+  const ss = m.el.querySelector('#ss-box');
+  const ssRender = async () => {
+    const r = await call('GET', '/sessions');
+    if (!r.ok) { ss.textContent = 'Could not load.'; return; }
+    ss.innerHTML = r.data.map((x) => `<div class="ss-row"><div><b>${esc(x.device)}</b>${x.current ? ' <em class="adm">this device</em>' : ''}<span>Signed in ${when(x.created)} · Last active ${when(x.last)}</span></div>${x.current ? '' : `<button class="btn sm" type="button" data-id="${esc(x.id)}">Sign out</button>`}</div>`).join('')
+      + (r.data.length > 1 ? '<div><button class="btn sm danger" type="button" id="ss-others">Sign out all other devices</button></div>' : '');
+    ss.querySelectorAll('[data-id]').forEach((b) => (b.onclick = async () => { await call('DELETE', '/sessions/' + b.dataset.id); ssRender(); }));
+    ss.querySelector('#ss-others')?.addEventListener('click', async () => { await call('POST', '/sessions/others', {}); ssRender(); });
+  };
+  ssRender();
   // ---- security
   const pf = m.el.querySelector('.ac-form');
   pf.onsubmit = async (e) => {
@@ -223,44 +310,26 @@ export async function showAccount(startTab = 'profile') {
   // ---- step-by-step setup guides, one collapsed section per assistant (Claude and ChatGPT first)
   const guide = m.el.querySelector('#mc-guide');
   const renderGuide = (tok, open = false) => {
-    const t = tok || 'YOUR_TOKEN', urlTok = `${mcpUrl}/${t}`, secure = location.protocol === 'https:';
+    const t = tok || 'YOUR_TOKEN', secure = location.protocol === 'https:';
     const code = (txt) => `<div class="mcp-snip"><div class="mcp-snip-h"><span></span><button class="btn sm" type="button" data-copy>Copy</button></div><pre>${esc(txt)}</pre></div>`;
     const json = (o) => JSON.stringify(o, null, 2);
     const hdr = { Authorization: `Bearer ${t}` };
     const note = tok ? '' : '<p class="hint">Create a token above first and these steps fill in your token. Until then <b>YOUR_TOKEN</b> stands in for it.</p>';
     const needHttps = secure ? '' : `<p class="ac-warn">You are on <b>${esc(location.origin)}</b>, which isn't a public https address. Claude's website, ChatGPT and other web assistants call Sketchy from their own servers, so they can't reach it. Either <a href="https://github.com/thatguy-za/sketchy/blob/main/docs/HTTPS.md" target="_blank" rel="noopener">put Sketchy behind https</a> or use the local option below.</p>`;
     const sections = [
-      ['Claude', `<p>Works in Claude on the web and in the Claude desktop app.</p>${needHttps}${note}
+      ['Claude', `<p>Use the Claude desktop app. Tokens are accepted only in the <code>Authorization</code> header (never in the address), and Claude's website connector screen has no place to put a header, so it can't connect.</p>${note}
         <ol>
-          <li>Create a token above (name it <em>Claude</em>) and copy the <b>connector URL</b>:${code(urlTok)}</li>
-          <li>In Claude, open <b>Settings</b> and choose <b>Connectors</b>.</li>
-          <li>Choose <b>Add custom connector</b>.</li>
-          <li>Set the name to <em>Sketchy</em> and paste the URL into <b>Remote MCP server URL</b>. Leave any advanced or sign-in fields empty, the token in the URL is the sign-in.</li>
-          <li>Click <b>Add</b>.</li>
-          <li>Start a new chat, open the connectors or tools menu (the <b>+</b> or sliders button by the message box) and switch <b>Sketchy</b> on.</li>
+          <li>Install <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> if you don't have it, and create a token above (name it <em>Claude</em>).</li>
+          <li>In the Claude desktop app open <b>Settings</b>, then <b>Developer</b>, then <b>Edit Config</b>.</li>
+          <li>Merge this into the file that opens, then save it:${code(json({ mcpServers: { sketchy: { command: 'npx', args: ['-y', 'mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${t}`] } } }))}</li>
+          <li>Quit Claude completely and open it again. Sketchy appears in the tools list of a new chat.</li>
           <li>Ask for something: <em>“Make a 60×30×8 mm bracket with two 10 mm holes and call it Bracket.”</em> Then open <b>Bracket</b> in your library.</li>
-        </ol>
-        <details class="mcp-sub"><summary>Sketchy only on this computer? Use the Claude desktop app with a local config</summary>
-          <ol>
-            <li>Install <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> if you don't have it.</li>
-            <li>In the Claude desktop app open <b>Settings</b>, then <b>Developer</b>, then <b>Edit Config</b>.</li>
-            <li>Merge this into the file that opens, then save it:${code(json({ mcpServers: { sketchy: { command: 'npx', args: ['-y', 'mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${t}`] } } }))}</li>
-            <li>Quit Claude completely and open it again. Sketchy appears in the tools list of a new chat.</li>
-          </ol>
-        </details>`],
-      ['ChatGPT', `<p>Needs a public https address and a ChatGPT plan that offers custom connectors. Menu names change between releases, so look for the closest match.</p>${needHttps}${note}
-        <ol>
-          <li>Create a token above (name it <em>ChatGPT</em>) and copy the <b>connector URL</b>:${code(urlTok)}</li>
-          <li>In ChatGPT open <b>Settings</b>, then <b>Connectors</b> (or <b>Apps</b>), then <b>Advanced settings</b>, and turn on <b>Developer mode</b>.</li>
-          <li>Back in Connectors choose <b>Create</b>.</li>
-          <li>Name it <em>Sketchy</em>, paste the URL as the <b>MCP server URL</b>, and set authentication to <b>No authentication</b> (the token is in the URL).</li>
-          <li>Tick the box confirming you trust the server, then click <b>Create</b>.</li>
-          <li>In a new chat, add <b>Sketchy</b> from the tools menu under the message box, then ask for a part to be built.</li>
-        </ol>`],
+        </ol>${secure ? '' : needHttps}`],
+      ['ChatGPT', `<p>ChatGPT's custom connector screen offers no-sign-in or OAuth, as far as we know, and Sketchy no longer takes a token in the address, so it can't connect that way. If your plan lets you add an <code>Authorization</code> header to a custom connector, use the URL and header under <b>Any other MCP client</b>. Otherwise use Claude desktop, Cursor, VS Code or Gemini CLI below.</p>${note}`],
       ['Gemini CLI', `<ol><li>Create a token above.</li><li>Open <code>~/.gemini/settings.json</code> and add:${code(json({ mcpServers: { sketchy: { httpUrl: mcpUrl, headers: hdr } } }))}</li><li>Start <code>gemini</code> and run <code>/mcp</code> to check that <b>sketchy</b> is connected.</li></ol>${note}`],
       ['Cursor', `<ol><li>Create a token above.</li><li>Open <b>Settings</b>, then <b>MCP</b>, then <b>Add new MCP server</b> (this edits <code>~/.cursor/mcp.json</code>), and add:${code(json({ mcpServers: { sketchy: { url: mcpUrl, headers: hdr } } }))}</li><li>Turn <b>sketchy</b> on in the MCP list, then ask the agent to build a part.</li></ol>${note}`],
       ['VS Code (GitHub Copilot)', `<ol><li>Create a token above.</li><li>Run <b>MCP: Open User Configuration</b> from the command palette and add:${code(json({ servers: { sketchy: { type: 'http', url: mcpUrl, headers: hdr } } }))}</li><li>Open Copilot chat in <b>Agent</b> mode, check <b>sketchy</b> under the tools button, and ask for a part.</li></ol>${note}`],
-      ['Any other MCP client', `<p>Sketchy speaks standard MCP over HTTP. Give your client either of these:</p><ul><li><b>URL and header:</b> ${code(mcpUrl)}and the header <code>Authorization: Bearer ${esc(t)}</code></li><li><b>URL only</b>, for clients that can't send headers (web assistants must be able to reach it over https):${code(urlTok)}</li></ul>${note}`],
+      ['Any other MCP client', `<p>Sketchy speaks standard MCP over HTTP. Give your client this address and header. The token is accepted only in the header, so a client that can't send one can't connect:</p>${code(mcpUrl)}and the header <code>Authorization: Bearer ${esc(t)}</code>${note}`],
     ];
     guide.innerHTML = sections.map(([name, body], i) => `<details class="mcp-llm"${open && i === 0 ? ' open' : ''}><summary>${esc(name)}</summary><div class="mcp-llm-body">${body}</div></details>`).join('');
     guide.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = (ev) => copy(b.closest('.mcp-snip').querySelector('pre').textContent, ev.currentTarget)));
@@ -275,8 +344,9 @@ export async function showAccount(startTab = 'profile') {
     for (const k of t.data.tokens) {
       const row = document.createElement('div');
       row.className = 'mcp-row';
-      row.innerHTML = `<span class="mcp-ico">${uicon('key', 16, 1.6)}</span><div class="mcp-info"><b>${esc(k.name)}</b><span>Created ${when(k.created)} · Last used ${when(k.lastUsed)}</span></div><button class="btn sm danger" type="button">Revoke</button>`;
-      row.querySelector('button').onclick = async () => {
+      row.innerHTML = `<span class="mcp-ico">${uicon('key', 16, 1.6)}</span><div class="mcp-info"><b>${esc(k.name)}</b>${k.paused ? ` <em class="adm warnb">paused</em>` : ''}<span>Created ${when(k.created)} · Last used ${when(k.lastUsed)}${k.paused ? ` · Paused ${when(k.paused.at)} after repeated problems (${esc(k.paused.reason)})` : ''}</span></div>${k.paused ? '<button class="btn sm" type="button" data-resume>Resume</button>' : ''}<button class="btn sm danger" type="button" data-revoke>Revoke</button>`;
+      row.querySelector('[data-resume]')?.addEventListener('click', async () => { await call('POST', '/mcp/tokens/' + encodeURIComponent(k.id) + '/resume', {}); loadTokens(); });
+      row.querySelector('[data-revoke]').onclick = async () => {
         if (!(await confirmBox({ title: 'Revoke token', message: `Revoke "${k.name}"? Assistants using it will lose access immediately.`, ok: 'Revoke', danger: true }))) return;
         await call('DELETE', '/mcp/tokens/' + encodeURIComponent(k.id)); out.innerHTML = ''; loadTokens();
       };
@@ -298,37 +368,74 @@ export async function showAccount(startTab = 'profile') {
   loadTokens();
 }
 
-// ---------------------------------------------------------------- admin: users
-const fmtBytes = (n) => (n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : (n / 1e3).toFixed(0) + ' KB');
+// ---------------------------------------------------------------- admin: server settings
+const fmtBytes = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(2).replace(/\.?0+$/, '') + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1).replace(/\.0$/, '') + ' MB' : Math.round(n / 1024) + ' KB');
 const fmtDate = (t) => (t ? new Date(t).toLocaleDateString() : '—');
-export async function showAdmin() {
-  const m = modal(`<div class="modal-title">Server settings</div><div class="modal-body"><h3 class="mh3">Registration</h3><label class="chk" style="font-weight:400"><input type="checkbox" id="ad-reg"> Allow new people to register</label><label class="chk" style="font-weight:400"><input type="checkbox" id="ad-mcp"> Allow AI assistants (MCP) to connect with user tokens</label><h3 class="mh3">Sign-in protection</h3>
-    <div class="ad-lock"><label>Lock out after<input type="number" id="ad-max" min="0" max="1000" step="1" inputmode="numeric"></label><span>failed sign-ins within</span><label><span class="sr-only">Minutes counted</span><input type="number" id="ad-win" min="1" max="10080" step="1" inputmode="numeric" aria-label="Minutes in which failed sign-ins are counted"></label><span>minutes, for</span><label><span class="sr-only">Lock-out minutes</span><input type="number" id="ad-lockmin" min="1" max="10080" step="1" inputmode="numeric" aria-label="Minutes a lock-out lasts"></label><span>minutes.</span></div>
-    <div class="hint">Counted per address and per username. Use 0 failed sign-ins to turn lock-outs off. Behind a reverse proxy the real address is read from its forwarding header.</div>
-    <div id="ad-locks" class="ad-locks" role="status"></div>
-    <h3 class="mh3">Users</h3>
-    <form class="ad-add" id="ad-add" autocomplete="off"><input name="username" placeholder="Username" aria-label="New username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32"><input name="password" type="text" placeholder="Password (blank = generate one)" aria-label="New password" autocomplete="new-password" minlength="8"><label class="chk" style="font-weight:400"><input type="checkbox" name="admin"> Admin</label><button class="btn primary" type="submit">Add user</button></form>
-    <div id="ad-msg" class="hint" role="status"></div><div class="ad-table" id="ad-table">Loading…</div></div>`);
-  m.el.classList.add('wide');
-  const msg = m.el.querySelector('#ad-msg'), host = m.el.querySelector('#ad-table'), reg = m.el.querySelector('#ad-reg');
+/** Server settings, in three tabs: Registration, Security (sign-in protection) and Users. */
+export async function showAdmin(startTab = 'registration') {
+  const tab = (id, ico, label) => `<button type="button" class="ac-tab" role="tab" id="atab-${id}" aria-controls="apane-${id}" data-t="${id}">${uicon(ico, 16, 1.6)}<span>${label}</span></button>`;
+  const m = modal(`<div class="modal-title">Server settings</div>
+    <div class="ac-tabs" role="tablist" aria-label="Server settings sections">${tab('registration', 'globe', 'Registration')}${tab('security', 'lock', 'Security')}${tab('users', 'user', 'Users')}</div>
+    <div class="ac-panes">
+      <section class="ac-pane" role="tabpanel" id="apane-registration" aria-labelledby="atab-registration" hidden>
+        <h3>Who can use this server</h3>
+        <label class="chk"><input type="checkbox" id="ad-reg"> Allow new people to register</label>
+        <div class="hint">Off by default. When it is off, add people yourself on the Users tab.</div>
+        <label class="chk"><input type="checkbox" id="ad-mcp"> Allow AI assistants to connect (MCP)</label>
+        <div class="hint">People create their own access tokens under Account, and each token only reaches that person's designs.</div>
+        <h3 class="mh3">Storage</h3>
+        <div class="ad-lock"><label>Default storage per person<input type="number" id="ad-quota" min="0" max="10000000" step="1" inputmode="numeric"></label><span>MB (0 = no limit)</span></div>
+        <div class="hint">Applies to everyone without their own limit, which you can set per person on the Users tab.</div>
+        <div id="ad-msg-reg" class="hint" role="status"></div>
+      </section>
+      <section class="ac-pane" role="tabpanel" id="apane-security" aria-labelledby="atab-security" hidden>
+        <h3>Sign-in protection</h3>
+        <div class="ad-lock"><label>Lock out after<input type="number" id="ad-max" min="0" max="1000" step="1" inputmode="numeric"></label><span>failed sign-ins within</span><label><span class="sr-only">Minutes counted</span><input type="number" id="ad-win" min="1" max="10080" step="1" inputmode="numeric"></label><span>minutes, for</span><label><span class="sr-only">Lock-out minutes</span><input type="number" id="ad-lockmin" min="1" max="10080" step="1" inputmode="numeric"></label><span>minutes.</span></div>
+        <div class="hint">Counted per address and per username. Use 0 failed sign-ins to turn lock-outs off. Behind a reverse proxy the real address is read from its forwarding header.</div>
+        <h3 class="mh3">Locked out now</h3>
+        <div id="ad-locks" class="ad-locks" role="status"><span class="hint">Nobody is locked out.</span></div>
+        <div id="ad-msg-sec" class="hint" role="status"></div>
+      </section>
+      <section class="ac-pane" role="tabpanel" id="apane-users" aria-labelledby="atab-users" hidden>
+        <h3>Add a person</h3>
+        <form class="ad-add" id="ad-add" autocomplete="off"><input name="username" placeholder="Username" aria-label="New username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32"><input name="password" type="text" placeholder="Password (blank = generate one)" aria-label="Password for the new user, blank to generate one" autocomplete="off"><label class="chk"><input type="checkbox" name="admin"> Admin</label><button class="btn primary" type="submit">Add</button></form>
+        <div id="ad-msg" class="hint" role="status"></div>
+        <div class="ad-users" id="ad-table">Loading…</div>
+      </section>
+    </div>`);
+  m.el.classList.add('wide', 'admin-modal');
+  const tabs = [...m.el.querySelectorAll('.ac-tab')], panes = [...m.el.querySelectorAll('.ac-pane')];
+  const show = (id, focus = false) => {
+    tabs.forEach((t) => { const on = t.dataset.t === id; t.setAttribute('aria-selected', on); t.tabIndex = on ? 0 : -1; if (on && focus) t.focus(); });
+    panes.forEach((p) => (p.hidden = p.id !== 'apane-' + id));
+  };
+  tabs.forEach((t, i) => {
+    t.onclick = () => show(t.dataset.t);
+    t.onkeydown = (e) => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); show(tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length].dataset.t, true); } };
+  });
+  show(startTab);
+  const $m = (s) => m.el.querySelector(s);
+  const msg = $m('#ad-msg'), msgReg = $m('#ad-msg-reg'), msgSec = $m('#ad-msg-sec'), host = $m('#ad-table');
   const st = await call('GET', '/admin/settings');
+  // ---- registration
+  const reg = $m('#ad-reg'), mcp = $m('#ad-mcp');
   reg.checked = !!st.data?.allowRegistration;
-  reg.onchange = async () => { await call('PUT', '/admin/settings', { allowRegistration: reg.checked }); await refreshAccount(); };
-  const mcp = m.el.querySelector('#ad-mcp'); mcp.checked = st.data?.allowMcp !== false;
-  mcp.onchange = async () => { await call('PUT', '/admin/settings', { allowMcp: mcp.checked }); };
-  const lim = { max: m.el.querySelector('#ad-max'), win: m.el.querySelector('#ad-win'), lock: m.el.querySelector('#ad-lockmin') };
+  reg.onchange = async () => { await call('PUT', '/admin/settings', { allowRegistration: reg.checked }); msgReg.textContent = 'Saved.'; await refreshAccount(); };
+  mcp.checked = st.data?.allowMcp !== false;
+  mcp.onchange = async () => { await call('PUT', '/admin/settings', { allowMcp: mcp.checked }); msgReg.textContent = 'Saved.'; };
+  // ---- security
+  const lim = { max: $m('#ad-max'), win: $m('#ad-win'), lock: $m('#ad-lockmin') };
   lim.max.value = st.data?.maxFailedLogins ?? 5; lim.win.value = st.data?.failWindowMinutes ?? 15; lim.lock.value = st.data?.lockoutMinutes ?? 15;
   const saveLimits = async () => {
     const r = await call('PUT', '/admin/settings', { maxFailedLogins: +lim.max.value, failWindowMinutes: +lim.win.value, lockoutMinutes: +lim.lock.value });
-    if (!r.ok) { msg.textContent = r.data?.error || 'Could not save.'; return; }
-    msg.textContent = 'Sign-in protection saved.';
+    msgSec.textContent = r.ok ? 'Sign-in protection saved.' : r.data?.error || 'Could not save.';
   };
   Object.values(lim).forEach((el) => (el.onchange = saveLimits));
-  const locks = m.el.querySelector('#ad-locks');
+  const locks = $m('#ad-locks');
   const loadLocks = async () => {
     const r = await call('GET', '/admin/lockouts');
     locks.innerHTML = '';
-    if (!r.ok || !r.data.length) return;
+    if (!r.ok || !r.data.length) { locks.innerHTML = '<span class="hint">Nobody is locked out.</span>'; return; }
     for (const l of r.data) {
       const row = document.createElement('div');
       row.className = 'ad-lockrow';
@@ -338,7 +445,15 @@ export async function showAdmin() {
     }
   };
   loadLocks();
-  const add = m.el.querySelector('#ad-add');
+  // ---- users
+  const dq = $m('#ad-quota');
+  dq.value = st.data?.defaultQuotaMb ?? 2048;
+  dq.onchange = async () => {
+    const r = await call('PUT', '/admin/settings', { defaultQuotaMb: dq.value === '' ? NaN : +dq.value });
+    msgReg.textContent = r.ok ? 'Default storage saved.' : r.data?.error || 'Could not save.';
+    if (r.ok) load();
+  };
+  const add = $m('#ad-add');
   add.onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(add), btn = add.querySelector('[type=submit]'); btn.disabled = true;
@@ -351,25 +466,42 @@ export async function showAdmin() {
   const load = async () => {
     const r = await call('GET', '/admin/users');
     if (!r.ok) { host.textContent = r.data?.error || 'Could not load users.'; return; }
-    host.innerHTML = `<div class="ad-row ad-head"><span>User</span><span>Designs</span><span>Storage</span><span>Last sign-in</span><span></span></div>`;
+    host.innerHTML = '';
     for (const u of r.data) {
-      const row = document.createElement('div');
-      row.className = 'ad-row';
-      row.innerHTML = `<span><b>${esc(u.name)}</b>${u.admin ? ' <em class="adm">admin</em>' : ''}${u.name === acct.user ? ' <em>(you)</em>' : ''}</span><span>${u.designs}</span><span>${fmtBytes(u.bytes)}</span><span>${fmtDate(u.lastLogin)}</span>
-        <span class="ad-act"><button class="btn sm" data-a="pw">Reset password</button><button class="btn sm" data-a="adm">${u.admin ? 'Remove admin' : 'Make admin'}</button>${u.name === acct.user ? '' : '<button class="btn sm danger" data-a="del">Delete</button>'}</span>`;
-      row.querySelector('[data-a=pw]').onclick = async () => {
+      const lim = u.effectiveQuotaMb ? fmtBytes(u.effectiveQuotaMb * 1048576) : 'no limit';
+      const pct = u.effectiveQuotaMb ? Math.min(100, (u.bytes / (u.effectiveQuotaMb * 1048576)) * 100) : 0;
+      const box = document.createElement('div');
+      box.className = 'ad-user';
+      box.innerHTML = `<div class="ad-uhead"><span><b>${esc(u.name)}</b>${u.admin ? ' <em class="adm">admin</em>' : ''}${u.totp ? ' <em class="adm">2-step</em>' : ''}${u.name === acct.user ? ' <em>(you)</em>' : ''}</span><span class="ad-umeta">${u.designs} design${u.designs === 1 ? '' : 's'} · last sign-in ${fmtDate(u.lastLogin)}</span></div>
+        <div class="ad-ustore"><div class="ad-bar" role="img" aria-label="${esc(fmtBytes(u.bytes))} used of ${esc(lim)}"><i class="${pct > 90 ? 'hot' : ''}"></i></div><span>${esc(fmtBytes(u.bytes))} of ${esc(lim)}</span>
+          <label>Limit <input type="number" min="0" max="10000000" step="1" inputmode="numeric" data-a="quota" placeholder="${u.effectiveQuotaMb}" value="${u.quotaMb ?? ''}" aria-label="Storage limit for ${esc(u.name)} in megabytes, blank for the default"> MB</label></div>
+        <div class="ad-act"><button class="btn sm" data-a="pw">Reset password</button>${u.totp ? '<button class="btn sm" data-a="totp">Turn off 2-step</button>' : ''}<button class="btn sm" data-a="adm">${u.admin ? 'Remove admin' : 'Make admin'}</button>${u.name === acct.user ? '' : '<button class="btn sm danger" data-a="del">Delete</button>'}</div>`;
+      box.querySelector('.ad-bar i').style.width = `${pct}%`;
+      box.querySelector('[data-a=quota]').onchange = async (e) => {
+        const v = e.target.value.trim();
+        const q = await call('PUT', `/admin/users/${encodeURIComponent(u.name)}/quota`, { quotaMb: v === '' ? null : Number(v) });
+        msg.textContent = q.ok ? (q.data.quotaMb === null ? `${u.name} follows the default (${q.data.effectiveQuotaMb} MB).` : q.data.effectiveQuotaMb ? `${u.name} can store ${q.data.effectiveQuotaMb} MB.` : `${u.name} has no storage limit.`) : q.data?.error || 'Could not save.';
+        await load();
+      };
+      box.querySelector('[data-a=pw]').onclick = async () => {
         if (!(await confirmBox({ title: 'Reset password', message: `Reset the password for ${u.name}? They will be signed out everywhere.`, ok: 'Reset' }))) return;
         const pw = await call('POST', `/admin/users/${encodeURIComponent(u.name)}/password`, {});
         msg.innerHTML = pw.ok ? `Temporary password for <b>${esc(u.name)}</b>: <code>${esc(pw.data.password)}</code> — shown once; ask them to change it after signing in.` : esc(pw.data?.error || 'Failed');
       };
-      row.querySelector('[data-a=adm]').onclick = async () => { const a = await call('POST', `/admin/users/${encodeURIComponent(u.name)}/admin`, { admin: !u.admin }); if (!a.ok) msg.textContent = a.data?.error || 'Failed'; await load(); await refreshAccount(); };
-      row.querySelector('[data-a=del]')?.addEventListener('click', async () => {
+      box.querySelector('[data-a=totp]')?.addEventListener('click', async () => {
+        if (!(await confirmBox({ title: 'Turn off two-step sign-in', message: `Turn off two-step sign-in for ${u.name}? They will sign in with just their password until they set it up again. Do this only for someone who lost their phone and recovery codes.`, ok: 'Turn off', danger: true }))) return;
+        const d = await call('DELETE', `/admin/users/${encodeURIComponent(u.name)}/totp`);
+        msg.textContent = d.ok ? `Two-step sign-in is off for ${u.name}.` : d.data?.error || 'Failed';
+        await load();
+      });
+      box.querySelector('[data-a=adm]').onclick = async () => { const a = await call('POST', `/admin/users/${encodeURIComponent(u.name)}/admin`, { admin: !u.admin }); if (!a.ok) msg.textContent = a.data?.error || 'Failed'; await load(); await refreshAccount(); };
+      box.querySelector('[data-a=del]')?.addEventListener('click', async () => {
         if (!(await confirmBox({ title: 'Delete user', message: `Delete ${u.name} and all of their saved designs? This cannot be undone.`, ok: 'Delete', danger: true }))) return;
         const d = await call('DELETE', `/admin/users/${encodeURIComponent(u.name)}`);
         msg.textContent = d.ok ? `Deleted ${u.name}.` : d.data?.error || 'Failed';
         await load();
       });
-      host.appendChild(row);
+      host.appendChild(box);
     }
   };
   load();

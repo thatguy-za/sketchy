@@ -1,11 +1,14 @@
 {
   "name": "sketchy",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "test:robustness": "node scripts/robustness.mjs",
+    "test:security": "node scripts/security-test.mjs",
+    "test:mcp-limits": "node scripts/mcp-limits-test.mjs",
     "start": "vite build && node server.js",
     "app": "vite",
     "build": "vite build",

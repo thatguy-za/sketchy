@@ -38,6 +38,7 @@ Detailed notes on how things work. New here? Start with the [README](../README.m
 | **3D Sketch** | Create menu (Solid and Surface). Picks points in 3D to make a path (optionally closed or smoothed) that Pipe, Sweep and other path-driven features can follow |
 | **Appearance and Render** | **Appearance** assigns a material (printing plastics, metals, glass) or custom colour to a body; the material's density drives the mass in Properties. **Render view** (Display menu) adds reflections, shadows and removes the grid, and **Save Image** exports a PNG at a chosen size and background |
 | **Print Check** | Utilities tab, Printer group. Checks whether each body (and all of them together, by shelf packing) fits the selected printer's bed; highlights overhangs steeper than a limit angle (default 45°) with the share of surface and steepest angle; and samples wall thickness against a minimum (default 1.2 mm), marking thin spots in red |
+| **Touch screens** | Tablets work for viewing and modelling: one finger orbits, two fingers pan and pinch-zoom, tap selects, double-tap picks a whole body, and a long press opens the context menu. While sketching, one finger draws and two fingers still move the view. A floating bar adds Multi-select, Undo, Cancel and Done in place of the keyboard. Controls grow to touch size, and panels become bottom sheets on narrow screens. Phones can view and measure, but precise sketching is best on a tablet or larger |
 | **Sketch: Mirror · Trim · Fit Point Spline · Project / Include** | **Mirror** copies shapes across a picked line or a sketch axis (rectangles stay rectangles for horizontal and vertical lines). **Trim** removes the part of a line, arc, circle or rectangle edge between its nearest intersections (previewed in red). **Fit Point Spline** draws a smooth curve through clicked points; click the first point to close it. **Include** copies a model edge, or with Shift every edge of that body, onto the sketch plane as a static copy |
 | **Offset Plane** (Construct) | A construction plane offset from XY/XZ/YZ or from another plane. Sketches can sit on it and follow it when you change the distance |
 | **Emboss** | Raise or engrave a sketch (text, SVG, shapes) on a face, to a depth |
@@ -85,9 +86,9 @@ Sketchy runs a [Model Context Protocol](https://modelcontextprotocol.io) server 
 
 1. Sign in, click your initial → **Account** → **AI assistants (MCP)** → **Create token**. Tokens belong to your account only, are shown once, and can be revoked there. (Admins can switch MCP off for the whole server under **Server settings**, or set `ALLOW_MCP=false`.)
 2. Open the **Set up your assistant** section on the same page. It has a collapsed, step-by-step guide for each assistant, with your token filled in once you have created one. **Claude** and **ChatGPT** come first, then Gemini CLI, Cursor, VS Code (GitHub Copilot) and a generic entry for any other MCP client.
-   * **Claude** (website or desktop app): Settings → Connectors → Add custom connector, name it Sketchy and paste the connector URL `https://your-host/mcp/<token>`. There is also a local option for the Claude desktop app that uses `mcp-remote` when Sketchy isn't on a public address.
-   * **ChatGPT**: Settings → Connectors → Advanced settings → Developer mode, then Create with that same URL and no authentication.
-   * Claude's website, ChatGPT and other web assistants call Sketchy from their own servers, so they need a publicly reachable **https** address (put Sketchy behind a reverse proxy; treat the URL like a password).
+   * **Claude** (desktop app): install Node.js, then merge the `mcp-remote` snippet from the guide into Settings → Developer → Edit Config. Claude's website connector screen can't send the `Authorization` header Sketchy requires, so it can't connect.
+   * **ChatGPT**: custom connectors don't offer a bearer header as far as we know, so they can't connect. If your plan lets you add an `Authorization` header, use the URL and header from the guide's *Any other MCP client* section.
+   * Tokens are accepted **only** in the `Authorization: Bearer` header (never in the address), a token that keeps hitting its rate limit or sending work that times out is paused until you resume it under Account, and browser pages are refused unless the admin lists their origin in `MCP_ALLOWED_ORIGINS`. See [SECURITY.md](SECURITY.md).
 3. Ask it to build something: *"Make a 60×30×8 mm bracket with two 10 mm holes, call it Bracket"*.
 
 Tools: `list_designs`, `create_design`, `get_design`, `describe_feature_types`, `add_feature`, `update_feature`, `delete_feature`, `set_parameters`, `inspect_design`, `export_stl`. The server replays the design with the same modelling kernel the app uses, so every call returns the real bodies, sizes, volumes and any errors, and a change that would break the model is rejected rather than saved. Designs show up in your sidebar like any other, and every assistant edit is a new revision in the version history. Limits: the transport is plain JSON over HTTP (no streaming), authentication is bearer tokens (no OAuth), and features that need picking edges or faces in the 3D view (fillet, chamfer, press/pull) can't be placed from here yet.
@@ -105,10 +106,18 @@ The interface chrome (menus, dialogs, sidebar, sign-up / login) targets **WCAG 2
 ## Accounts, storage and versions
 
 * Data lives in the `sketchy-data` volume (`/data`): `users.json` (scrypt-hashed passwords), `sessions.json`, `mcp-tokens.json` (hashed), `settings.json`, `projects/<user-id>/*.json`
-* Sessions are `HttpOnly` + `SameSite=Strict` cookies lasting a year (renewed whenever you use the app), and the API requires a custom header, which blocks cross-site requests. Sketchy itself serves plain HTTP, so put it behind HTTPS (a reverse proxy) if you expose it beyond your home network
+* Sessions are `HttpOnly` + `SameSite=Strict` cookies lasting a year (renewed whenever you use the app), and the API requires a custom header, which blocks cross-site requests. Sketchy itself serves plain HTTP, so put it behind HTTPS (a reverse proxy) if you expose it beyond your home network. See [SECURITY.md](SECURITY.md) for exposing it safely, the limits and the settings
 * **Version history:** every save keeps the previous revision under `projects/<user-id>/.versions/<design>/`. Click the **V3 ▾** badge on a design in the sidebar to open an older version or restore it as the newest (nothing is lost)
 * **Drafts:** an in-progress design is synced to the server so you can resume on another device, and Sketchy warns if the same design changed elsewhere
 * Sketchy is meant to run with its server (the Docker image, or `npm run dev`, which starts the same server). Saved designs, folders, version history and drafts all live there. If the server can't be reached, Save falls back to downloading a `.sketchy.json` file, and the last session is restored from browser storage.
+
+## Server settings and accounts
+
+Admins open **Server settings** from the avatar menu. It has three tabs: **Registration** (open sign-up, AI assistant access), **Security** (lock-out rules and who is locked out) and **Users** (add people, set the default and each person's storage limit, reset passwords, turn off someone's two-step sign-in, make admins, delete). Everyone can turn on optional **two-step sign-in** (authenticator app codes plus recovery codes) under Account → Security, and sees their storage use under Profile.
+
+## Editing earlier features
+
+Fillets, chamfers, holes, shells and sketches on faces remember what they were attached to, so changing an earlier dimension (a wider box, a taller extrusion) moves them with it. Edges are found again by their position, direction and the two faces they join; faces by their direction and nearest plane. When two candidates are about equally likely the feature reports an error and asks you to reselect, rather than guessing. `npm run test:robustness` checks these cases.
 
 ## Known limits
 
