@@ -199,3 +199,54 @@ export function fitSpline(pts, closed = false, per = 14) {
   if (!closed) out.push([pts[n - 1][0], pts[n - 1][1]]);
   return out;
 }
+
+// ---------------------------------------------------------------- patterns
+const rot2 = (x, y, cx, cy, c, sn) => [cx + (x - cx) * c - (y - cy) * sn, cy + (x - cx) * sn + (y - cy) * c];
+/** A copy of a shape moved by (dx, dy). Every shape type keeps its type. */
+export function moveShape(sh, dx, dy) {
+  switch (sh.t) {
+    case 'circle': case 'ellipse': case 'ngon': return { ...sh, cx: sh.cx + dx, cy: sh.cy + dy };
+    case 'slot': return { ...sh, x1: sh.x1 + dx, y1: sh.y1 + dy, x2: sh.x2 + dx, y2: sh.y2 + dy };
+    case 'rect': case 'rrect': return { ...sh, x: sh.x + dx, y: sh.y + dy };
+    case 'path': return { ...sh, pts: sh.pts.map((q) => (q.length > 2 ? [q[0] + dx, q[1] + dy, ...q.slice(2)] : [q[0] + dx, q[1] + dy])) };
+    default: return { t: 'path', pts: shapeToPolygon(sh).map(([x, y]) => [x + dx, y + dy]) };
+  }
+}
+/** A copy of a shape turned by `deg` degrees about (cx, cy). Rectangles turned off the axes become paths. */
+export function rotateShape(sh, cx, cy, deg) {
+  const a = (deg * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a), R = (x, y) => rot2(x, y, cx, cy, c, sn);
+  switch (sh.t) {
+    case 'circle': { const [x, y] = R(sh.cx, sh.cy); return { ...sh, cx: x, cy: y }; }
+    case 'ellipse': case 'ngon': { const [x, y] = R(sh.cx, sh.cy); return { ...sh, cx: x, cy: y, rot: (sh.rot || 0) + deg }; }
+    case 'slot': { const [x1, y1] = R(sh.x1, sh.y1), [x2, y2] = R(sh.x2, sh.y2); return { ...sh, x1, y1, x2, y2 }; }
+    case 'path': return { ...sh, pts: sh.pts.map((q) => { const [x, y] = R(q[0], q[1]); return q.length > 2 ? [x, y, ...q.slice(2)] : [x, y]; }) };
+    default: return { t: 'path', open: false, pts: shapeToPolygon(sh).map(([x, y]) => R(x, y)) };
+  }
+}
+/**
+ * Copies of the given shapes in a grid ({ kind: 'rect', nx, ny, dx, dy }) or around a centre
+ * ({ kind: 'circ', n, angle, cx, cy, turn }). The originals are not included.
+ */
+export function patternShapes(shapes, o) {
+  const out = [];
+  if (o.kind === 'rect') {
+    for (let j = 0; j < o.ny; j++) for (let i = 0; i < o.nx; i++) { if (!i && !j) continue; for (const sh of shapes) out.push(moveShape(sh, i * o.dx, j * o.dy)); }
+  } else {
+    const full = Math.abs(o.angle) >= 359.999, step = o.n > 1 ? o.angle / (full ? o.n : o.n - 1) : 0;
+    for (let k = 1; k < o.n; k++) for (const sh of shapes) {
+      const ang = step * k;
+      if (o.turn) out.push(rotateShape(sh, o.cx, o.cy, ang));
+      else { // keep each copy's own orientation: just move it round the circle
+        const c0 = shapeCentre(sh), [x, y] = rot2(c0[0], c0[1], o.cx, o.cy, Math.cos((ang * Math.PI) / 180), Math.sin((ang * Math.PI) / 180));
+        out.push(moveShape(sh, x - c0[0], y - c0[1]));
+      }
+    }
+  }
+  return out;
+}
+export function shapeCentre(sh) {
+  const pts = shapeToPolygon(sh);
+  let lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  for (const [x, y] of pts) { lo = [Math.min(lo[0], x), Math.min(lo[1], y)]; hi = [Math.max(hi[0], x), Math.max(hi[1], y)]; }
+  return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2];
+}

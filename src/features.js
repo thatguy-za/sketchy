@@ -27,6 +27,15 @@ export const FEATURES = {
   torus: { ...prim('torus', 'Torus', 'torus', { major: 12, minor: 3, pos: [0, 0, 3] }, [
     { key: 'major', label: 'Major radius', type: 'num', min: 0.02 }, { key: 'minor', label: 'Minor radius', type: 'num', min: 0.01 },
   ]), type: 'primitive' },
+  sketch3d: {
+    label: '3D Sketch', icon: 'path', type: 'sketch3d',
+    make: () => ({ points: [], closed: false, smooth: false }),
+    fields: [
+      { key: 'points', label: 'Points', type: 'points3d' },
+      { key: 'closed', label: 'Closed loop', type: 'bool' },
+      { key: 'smooth', label: 'Smooth curve', type: 'bool', show: (p) => !p.closed },
+    ],
+  },
   sketch: {
     label: 'Sketch', icon: 'sketch', type: 'sketch', make: () => ({ plane: 'XY', offset: 0, shapes: [] }),
     fields: [{ key: 'plane', label: 'Plane', type: 'select', options: PLANE_OPTS }, { key: 'offset', label: 'Offset', type: 'num' }],
@@ -59,14 +68,14 @@ export const FEATURES = {
       { key: 'profiles', label: 'Profiles', type: 'profiles' },
       { key: 'start', label: 'Start', type: 'static', text: 'Profile Plane', icon: 'start' },
       { key: 'symmetric', label: 'Direction', type: 'select', boolSelect: true, icon: 'dir', options: [[false, 'One Side'], [true, 'Symmetric']], show: (p) => p.extent === 'distance' },
-      { key: 'extent', label: 'Extent Type', type: 'select', icon: 'ext', options: EXTENT_OPTS },
+      { key: 'extent', label: 'Extent type', type: 'select', icon: 'ext', options: EXTENT_OPTS },
       { key: 'distance', label: 'Distance', type: 'num', show: (p) => p.extent === 'distance' },
       { key: 'toBody', label: 'To object', type: 'body', show: (p) => p.extent === 'object' },
       { key: 'flip', label: 'Flip direction', type: 'bool', show: (p) => p.extent !== 'distance' },
       { key: 'wall', label: 'Wall thickness', type: 'num', min: 0.01, step: 0.5, show: (p) => p.thin },
       { key: 'wallSide', label: 'Wall lies', type: 'select', options: [['inside', 'Inside the profile'], ['outside', 'Outside the profile'], ['center', 'Centred on the outline']], show: (p) => p.thin },
-      { key: 'taper', label: 'Taper Angle', type: 'num', unit: 'deg', step: 0.5, show: (p) => p.extent === 'distance' && !p.thin },
-      { key: 'twist', label: 'Twist (°)', type: 'num', adv: true, show: (p) => !p.taper },
+      { key: 'taper', label: 'Taper angle', type: 'num', unit: 'deg', step: 0.5, show: (p) => p.extent === 'distance' && !p.thin },
+      { key: 'twist', label: 'Twist', type: 'num', unit: 'deg', adv: true, show: (p) => !p.taper },
       { key: 'scaleTop', label: 'Top scale', type: 'num', adv: true, min: 0.01, step: 0.05, show: (p) => !p.taper },
       { key: 'op', label: 'Operation', type: 'ops', options: [...OP_OPTS, ['auto', 'Auto (cut or join)']] },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' && p.op !== 'auto' },
@@ -78,7 +87,7 @@ export const FEATURES = {
     fields: [
       { key: 'sketch', label: 'Sketch', type: 'sketch' },
       { key: 'profiles', label: 'Profiles', type: 'profiles' },
-      { key: 'angle', label: 'Angle (°)', type: 'num', min: 1, max: 360 },
+      { key: 'angle', label: 'Angle', type: 'num', unit: 'deg', min: 1, max: 360 },
       { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
     ],
@@ -115,7 +124,7 @@ export const FEATURES = {
     fields: [
       { key: 'body', label: 'Body', type: 'body' },
       { key: 'kind', label: 'Type', type: 'select', options: [['linear', 'Linear'], ['circular', 'Circular'], ['path', 'Along a path'], ['face', 'On a face']] },
-      { key: 'path', label: 'Path (sketch)', type: 'sketch', show: (p) => p.kind === 'path' },
+      { key: 'path', label: 'Path (sketch)', type: 'sketch', paths: true, show: (p) => p.kind === 'path' },
       { key: 'face', label: 'Face', type: 'face', bodyKey: 'body', show: (p) => p.kind === 'face' },
       { key: 'countU', label: 'Columns', type: 'num', min: 1, step: 1, show: (p) => p.kind === 'face' },
       { key: 'spacingU', label: 'Column spacing', type: 'num', show: (p) => p.kind === 'face' },
@@ -124,7 +133,7 @@ export const FEATURES = {
       { key: 'count', label: 'Quantity', type: 'num', min: 2, step: 1, show: (p) => p.kind !== 'face' },
       { key: 'spacing', label: 'Spacing', type: 'vec3', show: (p) => p.kind === 'linear' },
       { key: 'axis', label: 'Axis', type: 'select', options: [['X', 'X'], ['Y', 'Y'], ['Z', 'Z']], show: (p) => p.kind === 'circular' },
-      { key: 'angle', label: 'Total angle (°)', type: 'num', show: (p) => p.kind === 'circular' },
+      { key: 'angle', label: 'Total angle', type: 'num', unit: 'deg', show: (p) => p.kind === 'circular' },
     ],
   },
   fillet: {
@@ -171,7 +180,7 @@ export const FEATURES = {
     make: (ctx) => ({ profile: ctx.sketches.filter((k) => k !== ctx.pathSketch).at(-1) || ctx.sketches.at(-2) || '', path: ctx.pathSketch || ctx.sketches.at(-1) || '', smooth: true }),
     fields: [
       { key: 'profile', label: 'Profile (sketch)', type: 'sketch' },
-      { key: 'path', label: 'Path (sketch)', type: 'sketch' },
+      { key: 'path', label: 'Path (sketch)', type: 'sketch', paths: true },
       { key: 'smooth', label: 'Smooth path', type: 'bool' },
     ],
   },
@@ -184,7 +193,7 @@ export const FEATURES = {
     label: 'Pipe', icon: 'sweep', type: 'pipe',
     make: (ctx) => ({ path: ctx.pathSketch || ctx.lastSketch, diameter: 10, wall: 0, smooth: true, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
     fields: [
-      { key: 'path', label: 'Path (sketch)', type: 'sketch' },
+      { key: 'path', label: 'Path (sketch)', type: 'sketch', paths: true },
       { key: 'diameter', label: 'Outer diameter', type: 'num', min: 0.05, step: 1 },
       { key: 'wall', label: 'Wall thickness (0 = solid)', type: 'num', min: 0, step: 0.5 },
       { key: 'smooth', label: 'Smooth path', type: 'bool' },
@@ -201,7 +210,7 @@ export const FEATURES = {
     ],
   },
   sthicken: {
-    label: 'Thicken', icon: 'shell', type: 'sthicken',
+    label: 'Thicken Surface', icon: 'shell', type: 'sthicken',
     make: (ctx) => ({ surface: (ctx.surfaces || []).at(-1) || '', thickness: 2, both: false }),
     fields: [
       { key: 'surface', label: 'Surface', type: 'surface' },
@@ -261,7 +270,7 @@ export const FEATURES = {
     make: (ctx) => ({ profile: ctx.sketches.filter((k) => k !== ctx.pathSketch).at(-1) || ctx.sketches.at(-2) || '', path: ctx.pathSketch || ctx.sketches.at(-1) || '', smooth: true, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
     fields: [
       { key: 'profile', label: 'Profile (sketch)', type: 'sketch' },
-      { key: 'path', label: 'Path (sketch)', type: 'sketch' },
+      { key: 'path', label: 'Path (sketch)', type: 'sketch', paths: true },
       { key: 'smooth', label: 'Smooth path', type: 'bool' },
       { key: 'op', label: 'Operation', type: 'ops', options: OP_OPTS },
       { key: 'target', label: 'Target body', type: 'body', optional: 'Auto / all', show: (p) => p.op !== 'new' },
@@ -311,7 +320,7 @@ export const FEATURES = {
     label: 'Rib / Web', icon: 'rib', type: 'rib', manip: { key: 'height', sketch: 'sketch' },
     make: (ctx) => ({ sketch: ctx.pathSketch || ctx.lastSketch, thickness: 2, height: 10, symmetric: false, op: ctx.hasBodies ? 'join' : 'new', target: '' }),
     fields: [
-      { key: 'sketch', label: 'Path sketch', type: 'sketch' },
+      { key: 'sketch', label: 'Path (sketch)', type: 'sketch' },
       { key: 'thickness', label: 'Thickness', type: 'num', min: 0.05, step: 0.5 },
       { key: 'height', label: 'Height (±)', type: 'num' },
       { key: 'symmetric', label: 'Symmetric', type: 'bool' },
@@ -348,6 +357,15 @@ export const FEATURES = {
       { key: 'dir', label: 'Pull direction', type: 'select', options: [['+Z', '+Z (up)'], ['-Z', '-Z (down)'], ['+X', '+X'], ['-X', '-X'], ['+Y', '+Y'], ['-Y', '-Y']] },
       { key: 'neutral', label: 'Neutral plane at', type: 'select', options: [['start', 'Start of the body (base)'], ['end', 'End of the body (top)']] },
       { key: 'angle', label: 'Draft angle', type: 'num', unit: 'deg', step: 0.5 },
+    ],
+  },
+  mclean: {
+    label: 'Clean Mesh', icon: 'shell', type: 'mclean', needsBody: true,
+    make: (ctx) => ({ body: ctx.selected || '', tolerance: 0, minShell: 1 }),
+    fields: [
+      { key: 'body', label: 'Body', type: 'body' },
+      { key: 'tolerance', label: 'Join vertices closer than', type: 'num', min: 0, step: 0.01 },
+      { key: 'minShell', label: 'Remove pieces smaller than (%)', type: 'num', min: 0, max: 100, step: 0.5 },
     ],
   },
   mreduce: {
@@ -418,11 +436,11 @@ export const FEATURES = {
       { key: 'pointB', label: 'Point on anchor', type: 'point', centerOf: 'bodyB' },
       { key: 'axis', label: 'Axis', type: 'select', options: [['X', 'X'], ['Y', 'Y'], ['Z', 'Z']], show: (p) => p.jtype !== 'ball' },
       { key: 'flip', label: 'Flip 180°', type: 'bool', show: (p) => p.jtype === 'rigid' },
-      { key: 'value', label: 'Angle (°)', type: 'num', show: (p) => ['revolute', 'cylindrical'].includes(p.jtype) },
+      { key: 'value', label: 'Angle', type: 'num', unit: 'deg', show: (p) => ['revolute', 'cylindrical'].includes(p.jtype) },
       { key: 'value', label: 'Offset', type: 'num', show: (p) => ['slider', 'planar'].includes(p.jtype) },
       { key: 'value2', label: 'Slide', type: 'num', show: (p) => p.jtype === 'cylindrical' },
       { key: 'value2', label: 'Offset 2', type: 'num', show: (p) => p.jtype === 'planar' },
-      { key: 'value3', label: 'Rotate (°)', type: 'num', show: (p) => p.jtype === 'planar' },
+      { key: 'value3', label: 'Rotate', type: 'num', unit: 'deg', show: (p) => p.jtype === 'planar' },
       { key: 'rot', label: 'Rotation (°)', type: 'vec3', show: (p) => p.jtype === 'ball' },
     ],
   },
@@ -447,7 +465,7 @@ export function fieldKind(f, key) {
     if (key === 'value') return ['revolute', 'cylindrical'].includes(p.jtype) ? 'deg' : 'len';
     if (key === 'value3' || key === 'rot') return 'deg';
   }
-  if (['scaleTop', 'factor', 'keep', 's', 'count', 'turns', 'dir', 'countU', 'countV'].includes(key)) return 'num';
+  if (['scaleTop', 'factor', 'keep', 's', 'count', 'turns', 'dir', 'countU', 'countV', 'minShell'].includes(key)) return 'num';
   if (['taper', 'twist', 'angle', 'cskAngle'].includes(key)) return 'deg';
   return 'len';
 }

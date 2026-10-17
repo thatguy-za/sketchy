@@ -1,6 +1,5 @@
 // Account UI (sign in / register) and the "My Designs" browser. Talks to the /api in server.js.
 import { confirmBox, alertBox } from './files.js';
-import { icon } from './icons.js';
 import { uicon } from './ficons.js';
 
 export const acct = { server: false, user: null, admin: false, registration: true, setup: false, created: 0 };
@@ -67,7 +66,6 @@ export function modal(html, onClose) {
   return { el: back.firstChild, close };
 }
 
-const knownVisitor = () => /(?:^|;\s*)sketchy_known=1/.test(document.cookie);
 const LOGO = '<svg viewBox="0 0 64 64" width="34" height="34"><rect x="4" y="4" width="56" height="56" rx="14" fill="#169b62"/><path d="M40 22C36 17 24 18 24 26C24 34 40 30 40 39C40 47 27 48 22 42" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"/></svg>';
 
 /**
@@ -120,37 +118,6 @@ export async function ensureSignedIn() { if (acct.server && !acct.user) await sh
 
 export async function requireLogin() { return acct.user ? true : showAuth(); }
 
-/** "My Designs" browser: open or delete designs stored on the server for the signed-in user. */
-export async function showDesigns({ onOpen, current }) {
-  if (!(await requireLogin())) return;
-  const m = modal('<div class="modal-title">My Designs</div><div class="modal-body"><div class="design-list">Loading…</div></div>');
-  const host = m.el.querySelector('.design-list');
-  const load = async () => {
-    const r = await call('GET', '/projects');
-    if (!r.ok) { host.textContent = r.data?.error || 'Could not load designs.'; return; }
-    if (!r.data.length) { host.innerHTML = '<div class="hint">No designs yet. Use <b>Save to My Designs</b> to store the current model in your profile.</div>'; return; }
-    host.innerHTML = '';
-    for (const p of r.data) {
-      const row = document.createElement('div');
-      row.className = 'design-row' + (p.name === current ? ' current' : '');
-      row.innerHTML = `${icon('box', 18)}<div class="dn"><b>${esc(p.name)}</b><small>${new Date(p.modified).toLocaleString()} · ${(p.size / 1024).toFixed(p.size > 1e5 ? 0 : 1)} KB</small></div><button class="btn" data-o>Open</button><button class="icon-btn danger" data-d title="Delete">${icon('remove', 16)}</button>`;
-      row.querySelector('[data-o]').onclick = async () => {
-        const d = await call('GET', '/projects/' + encodeURIComponent(p.name));
-        if (!d.ok) return alertBox({ title: 'Could not open design', message: d.data?.error || 'The design could not be opened.' });
-        m.close();
-        onOpen(typeof d.data === 'string' ? d.data : JSON.stringify(d.data), p.name);
-      };
-      row.querySelector('[data-d]').onclick = async () => {
-        if (!(await confirmBox({ title: 'Delete design', message: `Delete "${p.name}" permanently?`, ok: 'Delete', danger: true }))) return;
-        await call('DELETE', '/projects/' + encodeURIComponent(p.name));
-        load();
-      };
-      host.appendChild(row);
-    }
-  };
-  load();
-}
-
 // ---------------------------------------------------------------- change password
 /** Popover under the avatar: who you are, shortcuts, theme switch, log out. */
 export function openUserMenu(anchor, { onAccount, onSettings, onTheme, isDark, onLogout }) {
@@ -199,7 +166,7 @@ export async function showAccount(startTab = 'profile') {
       <section class="ac-pane" role="tabpanel" id="pane-profile" aria-labelledby="tab-profile">
         <h3>Your account</h3>
         <dl class="ac-dl"><dt>Username</dt><dd>${esc(acct.user)}</dd><dt>Role</dt><dd>${acct.admin ? 'Administrator' : 'Member'}</dd><dt>Member since</dt><dd>${esc(since)}</dd><dt>Saved designs</dt><dd id="ac-n2">…</dd></dl>
-        <p class="hint">Your designs live on this server and are private to you. Every save keeps the previous version in the design's history.</p>
+        <p class="hint">Your designs live on this server and are private to you. Your changes are saved automatically. Saving a version (Ctrl+S) adds a restorable step to the design's history.</p>
       </section>
       <section class="ac-pane" role="tabpanel" id="pane-security" aria-labelledby="tab-security" hidden>
         <h3>Change password</h3>
@@ -329,30 +296,6 @@ export async function showAccount(startTab = 'profile') {
     loadTokens();
   };
   loadTokens();
-}
-
-export function showChangePassword() {
-  const m = modal(`<div class="modal-title">Change password</div>
-    <form class="modal-body" autocomplete="off">
-      <label>Current password<input name="current" type="password" autocomplete="current-password" required></label>
-      <label>New password<input name="next" type="password" autocomplete="new-password" required minlength="8"></label>
-      <label>Repeat new password<input name="again" type="password" autocomplete="new-password" required minlength="8"></label>
-      <div class="hint">At least 8 characters. Signing in on your other devices will be required again.</div>
-      <div class="form-err" role="alert"></div>
-      <div class="modal-foot"><button type="button" class="btn" data-x>Cancel</button><button class="btn primary" type="submit">Change password</button></div>
-    </form>`);
-  const form = m.el.querySelector('form');
-  form.querySelector('[data-x]').onclick = m.close;
-  form.current.focus();
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const err = form.querySelector('.form-err');
-    if (form.next.value !== form.again.value) { err.textContent = "The new passwords don't match."; return; }
-    const r = await call('POST', '/password', { current: form.current.value, next: form.next.value });
-    if (!r.ok) { err.textContent = r.data?.error || 'Could not change the password.'; return; }
-    m.close();
-    alertBox({ title: 'Password changed', message: 'Your password has been updated.' });
-  };
 }
 
 // ---------------------------------------------------------------- admin: users

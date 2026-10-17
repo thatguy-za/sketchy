@@ -8,8 +8,8 @@ import { shapeToPolygon, offsetPolygon } from './kernel.js';
 import { setDim, getDim } from './sketchdims.js';
 import { keyPoints, segOf, conAnchor, CON_GLYPH, CON_LABEL } from './sketchcons.js';
 import { filletVertex } from './sketchgeo.js';
-import { mirrorShape, trimAt, fitSpline, primitivesOf, ptAt, primPoints, nearestPrim } from './sketchedit.js';
-import { arcOf, bulgeFrom3, bulgeFromTangent, endTangent, bulgeFromRadius, segmentLength, pathPolygon } from './sketchgeo.js';
+import { mirrorShape, trimAt, fitSpline, primitivesOf, patternShapes, shapeCentre } from './sketchedit.js';
+import { arcOf, bulgeFrom3, bulgeFromTangent, endTangent, bulgeFromRadius, pathPolygon } from './sketchgeo.js';
 
 import { UNIT_TABLE, getUnits, lenF, dispStr } from './units.js';
 const fmt = (v) => (Math.abs(v) < 1e-9 ? '0' : String(+v.toFixed(3)));
@@ -672,6 +672,9 @@ export function createSketchUI(app) {
         vp.overlay.add(line3([s.mir.line.a, s.mir.line.b], 0x1d63b8));
         for (const m of mirrorCopies(s.mir.sel, s.mir.line.a, s.mir.line.b)) vp.overlay.add(line3(shapeToPolygon(m), 0xf08c00, !m.open, true));
       }
+    } else if ((s.tool === 'rpat' || s.tool === 'cpat') && s.pat) {
+      for (const i of s.pat.sel) { const sh = shapes()[i]; if (sh) vp.overlay.add(line3(shapeToPolygon(sh), 0xf08c00, !sh.open)); }
+      if (s.pat.preview) for (const m of s.pat.preview) vp.overlay.add(line3(shapeToPolygon(m), 0xf08c00, !m.open, true));
     } else if (s.tool === 'trim' && s.trimPrev) {
       for (const pl of s.trimPrev) if (pl.length > 1) vp.overlay.add(line3(pl, 0xe0453a));
     } else if (s.tool === 'spline' && s.pts?.length && cur) {
@@ -694,6 +697,21 @@ export function createSketchUI(app) {
     app.toast?.(`Mirrored ${sel.length} ${sel.length > 1 ? 'shapes' : 'shape'}. Pick more shapes, or press Esc.`);
     app.renderPanel(); redraw();
   }
+  /** Ask for the pattern settings (a dialog in the app), then add the copies. */
+  async function openPattern() {
+    const s = S(), sel = s.pat?.sel || [];
+    if (!sel.length || !app.askPattern) return;
+    const kind = s.tool === 'cpat' ? 'circ' : 'rect';
+    const centre = sel.length === 1 ? shapeCentre(shapes()[sel[0]]) : [0, 0];
+    const o = await app.askPattern(kind, { count: sel.length, centre, preview: (opts) => { s.pat.preview = opts ? patternShapes(sel.map((i) => shapes()[i]), opts) : null; redraw(); } });
+    s.pat.preview = null;
+    if (!o) { redraw(); return; }
+    const copies = patternShapes(sel.map((i) => shapes()[i]), o);
+    app.setShapes([...shapes(), ...copies]);
+    s.pat = { sel: [] };
+    app.toast?.(`Added ${copies.length} ${copies.length === 1 ? 'copy' : 'copies'}. They are plain shapes: change the originals and the copies don't follow.`);
+    app.renderPanel(); redraw();
+  }
   function editPointer(ev, kind, raw, px) {
     const s = S();
     const sn = snapPoint(ev, raw);
@@ -711,6 +729,15 @@ export function createSketchUI(app) {
       if (i < 0) return;
       s.mir.sel = s.mir.sel.includes(i) ? s.mir.sel.filter((x) => x !== i) : [...s.mir.sel, i];
       redraw(); return;
+    }
+    if (s.tool === 'rpat' || s.tool === 'cpat') {
+      s.pat ||= { sel: [] };
+      if (kind === 'move') { const i = hitShape(px); canvas.style.cursor = i >= 0 ? 'pointer' : ''; redraw(); return; }
+      if (kind !== 'down') return;
+      const i = hitShape(px);
+      if (i < 0) { if (s.pat.sel.length) openPattern(); else app.toast?.('Click the shapes to repeat, then press Enter.'); return; }
+      s.pat.sel = s.pat.sel.includes(i) ? s.pat.sel.filter((x) => x !== i) : [...s.pat.sel, i];
+      s.pat.preview = null; redraw(); return;
     }
     if (s.tool === 'trim') {
       const tol = 12 / ppmAt(raw), res = trimAt(shapes(), raw, tol);
@@ -793,7 +820,7 @@ export function createSketchUI(app) {
       return;
     }
 
-    if (['mirror', 'trim', 'spline', 'project'].includes(s.tool)) { editPointer(ev, kind, raw, px); return; }
+    if (['mirror', 'trim', 'spline', 'project', 'rpat', 'cpat'].includes(s.tool)) { editPointer(ev, kind, raw, px); return; }
     if (s.tool?.startsWith('con_')) {
       if (kind === 'down') conPick(px);
       else if (kind === 'move') { const type = CON[s.tool]; conStatus(type); }
@@ -861,6 +888,10 @@ export function createSketchUI(app) {
       if (e.key === 'Escape' && (s.mir.sel.length || s.mir.phase === 'line')) { s.mir = { sel: [], phase: 'pick' }; redraw(); return true; }
       if (e.key === 'Enter' && s.mir.sel.length && s.mir.phase === 'pick') { s.mir.phase = 'line'; app.toast?.('Now click the line to mirror across (or press X or Y).'); redraw(); return true; }
       if (s.mir.sel.length && /^[xyXY]$/.test(e.key) && !e.metaKey && !e.ctrlKey) { applyMirror(...(/x/i.test(e.key) ? [[0, 0], [1, 0]] : [[0, 0], [0, 1]])); return true; }
+    }
+    if ((s.tool === 'rpat' || s.tool === 'cpat') && s.pat) {
+      if (e.key === 'Enter' && s.pat.sel.length) { openPattern(); return true; }
+      if (e.key === 'Escape' && s.pat.sel.length) { s.pat = { sel: [] }; redraw(); return true; }
     }
     if (s.tool === 'spline' && e.key === 'Enter' && s.pts?.length) { finishSpline(false); return true; }
     if (e.key === 'Escape') {

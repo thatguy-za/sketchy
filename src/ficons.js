@@ -104,6 +104,7 @@ const U = {
   undo: '<path d="M9.5 6L4.5 10.5L9.5 15"/><path d="M4.5 10.5H14A5 5 0 0 1 14 20.5H10"/>',
   redo: '<path d="M14.5 6L19.5 10.5L14.5 15"/><path d="M19.5 10.5H10A5 5 0 0 0 10 20.5H14"/>',
   caret: '<path d="M7 10L12 15L17 10Z" fill="currentColor"/>',
+  fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   library: '<rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M9.5 4.5V19.5"/><path d="M5.8 8H7.4M5.8 11H7.4M5.8 14H7.4"/>',
   chevR: '<path d="M9 6L15 12L9 18"/>',
   trash: '<path d="M5 7h14M9.5 7V4.5h5V7M7 7l1 13h8l1-13M10.5 11v5.5M13.5 11v5.5"/>',

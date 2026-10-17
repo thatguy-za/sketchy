@@ -2,9 +2,10 @@ import './style.css';
 import * as THREE from 'three';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
-import { initKernel, rebuild, resolvePlanes, shapeToPolygon, PLANES, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
+import { initKernel, rebuild, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
-import { parseSTL, writeSTL } from './stl.js';
+import { writeSTL } from './stl.js';
+import { readModelFile } from './importers.js';
 import wasmUrl from 'manifold-3d/manifold.wasm?url';
 import { evaluate as evaluateDoc } from './headless.js';
 import { initA11y } from './a11y.js';
@@ -16,13 +17,16 @@ import { repairSoup, describeRepair } from './meshrepair.js';
 import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
 import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, planarFace, norm as vnorm } from './edges.js';
-import { acct, call, refreshAccount, ensureSignedIn, requireLogin, showAuth, showDesigns, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showChangePassword, showAccount, openUserMenu, showAdmin } from './account.js';
+import { acct, call, refreshAccount, ensureSignedIn, requireLogin, showAuth, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showAccount, openUserMenu, showAdmin } from './account.js';
 import { evalExpr, resolveParams, applyConfig, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
 import { saveDialog, askName, confirmBox, alertBox, chooseFolder, safeName as fileSafeName } from './files.js';
 import { UNIT_TABLE, UNIT_NAMES, setUnits, getUnits, lenF, dispStr, fmtLen, fmtArea, fmtVolume, niceStep } from './units.js';
 import { findEdgeChains as chainsOf } from './edges.js';
 import { ficon, uicon } from './ficons.js';
 import { createSketchUI } from './sketchui.js';
+import { smoothPath } from './solids.js';
+import { bedFit, overhangs, wallThickness } from './printcheck.js';
+import { MATERIALS, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
 import { resolveSketch } from './sketchdims.js';
 import { CON_GLYPH, CON_LABEL } from './sketchcons.js';
 import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR } from './commands.js';
@@ -91,7 +95,7 @@ const uniqueName = (base) => {
   return base + n;
 };
 const featureIndex = (id) => doc.features.findIndex((f) => f.id === id);
-const sketchesBefore = (i) => doc.features.slice(0, i).filter((f) => f.type === 'sketch');
+const sketchesBefore = (i, withPaths = false) => doc.features.slice(0, i).filter((f) => f.type === 'sketch' || (withPaths && f.type === 'sketch3d'));
 const limit = () => (sketch ? sketch.index : doc.marker);
 
 // ------------------------------------------------------------------ rebuild / refresh
@@ -365,10 +369,15 @@ const CUSTOM = {
   canvas: () => pickCanvasImage(),
   cfg1: () => showConfigurations(), cfg3: (ev) => showConfigMenu(ev?.currentTarget),
   importstl: () => $('#file-stl').click(),
+  repairimport: () => $('#file-repair').click(),
   measure: () => startMeasure('dist'), angle: () => startMeasure('angle'), edgelen: () => startMeasure('edge'), faces: () => startMeasure('faces'),
   properties: () => showInfo(),
+  printcheck: () => showPrintCheck(),
   interference: () => showInterference(),
   section: () => showSection(),
+  appearance: () => appearanceDialog(vp.selected.size ? [...vp.selected] : selFace ? [selFace.id] : result.bodies.length === 1 ? [result.bodies[0].id] : []),
+  render: () => toggleRender(),
+  saveimage: () => saveImageDialog(),
   drivejoints: () => showDriveJoints(),
   svg: () => pick2D('.svg,image/svg+xml'), dxf: () => pick2D('.dxf'), sk_text: () => showTextDialog(),
   asbuilt: () => startAsBuilt(),
@@ -380,7 +389,6 @@ const CUSTOM = {
 function runCommand(id, ev) {
   const c = CMD[id];
   if (!c) return;
-  if (c.off) return toast(c.why || `${c.label} isn't available in Sketchy yet.`);
   if (c.sk) { if (sketch && !sketch.picking) setSketchTool(c.sk); return; }
   if (c.skAction === 'delete') return sketchDeleteSelected();
   if (sketch && !['select', 'finishsketch', 'cancelpick', 'svg', 'dxf', 'sk_text'].includes(id)) return toast('Finish the sketch first.');
@@ -441,14 +449,13 @@ function renderRibbon() {
     for (const id of g.show) {
       const c = CMD[id];
       const b = document.createElement('button');
-      const off = c.off || g.allOff;
-      const active = (c.sk && sketch?.tool === c.sk) || (MEASURE_MODE[id] && measure?.mode === MEASURE_MODE[id]) || (id === 'buildvol' && vp.opts.bed);
-      b.className = 'fbtn' + (off ? ' off' : '') + (active ? ' active' : '') + (g.big ? ' sel-big' : '') + (g.finish ? ' finish' : '');
-      b.dataset.tip = JSON.stringify({ t: c.label, k: c.key || '', d: c.desc || (c.off ? 'Not available in Sketchy yet.' : '') });
+      const active = (c.sk && sketch?.tool === c.sk) || (MEASURE_MODE[id] && measure?.mode === MEASURE_MODE[id]) || (id === 'buildvol' && vp.opts.bed) || (id === 'render' && vp.opts.render);
+      b.className = 'fbtn' + (active ? ' active' : '') + (g.big ? ' sel-big' : '') + (g.finish ? ' finish' : '');
+      b.dataset.tip = JSON.stringify({ t: c.label, k: c.key || '', d: c.desc || '' });
       b.innerHTML = ficon(c.icon, g.big ? 40 : 30) + (g.finish ? '<span>FINISH SKETCH</span>' : '');
       b.disabled = !!dialog && !sketch;
       b.onclick = (ev) => runCommand(id, ev);
-      b.setAttribute('aria-label', c.label); if (off) b.setAttribute('aria-disabled', 'true');
+      b.setAttribute('aria-label', c.label);
       el.firstChild.appendChild(b);
     }
     const lab = el.lastChild;
@@ -497,7 +504,7 @@ function renderTree() {
       const anyVis = loose.some((b) => !hiddenBodies.has(b.id));
       folder(1, 'bodies', 'Bodies', 'folder', { eye: anyVis, onEye: () => { loose.forEach((b) => (anyVis ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } }, () => loose.forEach((b) => bodyRow(b, 2)));
     }
-    const sk = doc.features.map((f, i) => [f, i]).filter(([f, i]) => f.type === 'sketch' && i < limit() + (sketch ? 1 : 0));
+    const sk = doc.features.map((f, i) => [f, i]).filter(([f, i]) => (f.type === 'sketch' || f.type === 'sketch3d') && i < limit() + (sketch ? 1 : 0));
     if (sk.length) {
       const visOf = (f) => sketchVis[f.id] ?? !result.sketchUsed.has(f.id);
       folder(1, 'sketches', 'Sketches', 'folder', { eye: sk.some(([f]) => visOf(f)), onEye: () => { const v = !sk.some(([f]) => visOf(f)); sk.forEach(([f]) => (sketchVis[f.id] = v)); drawSketches(); renderTree(); } }, () => sk.forEach(([f]) => {
@@ -740,7 +747,6 @@ function featureMenu(ev, i) {
 }
 
 // ---- browser context menu (bodies, sketches, joints)
-const SWATCHES = ['#c3c7cd', '#e8b04a', '#d9534f', '#5cb85c', '#4a90d9', '#8e6bbf', '#2b2f36', '#f5f5f5'];
 function treeMenu(ev, c) {
   const bodies = result.bodies;
   if (c.kind === 'canvas') {
@@ -779,8 +785,7 @@ function treeMenu(ev, c) {
       { label: isolated ? 'Unisolate' : 'Isolate', run: () => { if (isolated) hiddenBodies.clear(); else bodies.forEach((x) => (x.id === c.id ? hiddenBodies.delete(x.id) : hiddenBodies.add(x.id))); refresh(); } },
       ...((doc.components || []).length || true ? [{ sep: true }, { head: 'COMPONENT' }, ...(doc.components || []).map((cp) => ({ label: cp.name, check: doc.bodyComp?.[c.id] === cp.id, run: () => moveToComponent(vp.selected.size > 1 ? [...vp.selected] : [c.id], cp.id) })), { label: 'New component with this body', run: () => newComponent() }, ...(doc.bodyComp?.[c.id] ? [{ label: 'Remove from component', run: () => moveToComponent([c.id], null) }] : [])] : []),
       { sep: true },
-      { head: 'APPEARANCE' },
-      ...SWATCHES.map((hex, k) => ({ label: ['Steel', 'Gold', 'Red', 'Green', 'Blue', 'Purple', 'Black', 'White'][k], swatch: hex, run: () => mutate(() => { doc.appearance = { ...(doc.appearance || {}), [c.id]: k === 0 ? undefined : hex }; if (k === 0) delete doc.appearance[c.id]; }) })),
+      { label: 'Appearance…', ficon: 'insertmesh', run: () => appearanceDialog(vp.selected.has(c.id) ? [...vp.selected] : [c.id]) },
       { sep: true },
       { label: 'Properties', uicon: 'help', run: showInfo },
       { label: 'Delete', hint: 'Del', run: deleteSelection },
@@ -793,7 +798,7 @@ function treeMenu(ev, c) {
     showMenu(ev.clientX, ev.clientY, [
       { label: f.type === 'sketch' ? 'Edit Sketch' : 'Edit Feature', run: () => editFeature(featureIndex(f.id)) },
       { label: 'Rename', hint: 'F2', run: () => renameFeature(f.id, timelineAnchor(f.id)) },
-      ...(f.type === 'sketch' ? [{ label: vis ? 'Hide' : 'Show', run: () => { sketchVis[f.id] = !vis; drawSketches(); renderTree(); } }] : []),
+      ...(f.type === 'sketch' || f.type === 'sketch3d' ? [{ label: vis ? 'Hide' : 'Show', run: () => { sketchVis[f.id] = !vis; drawSketches(); renderTree(); } }] : []),
       { label: f.suppressed ? 'Unsuppress' : 'Suppress', run: () => setSuppressed([f.id], !f.suppressed) },
       { sep: true },
       { label: 'Delete', run: () => deleteFeatures([f.id]) },
@@ -898,7 +903,7 @@ async function showInsertDesign(withConfig) {
   }
   void here;
   if (!sources.length) return toast(acct.server ? 'There are no other designs to insert yet. Save or open another design first.' : 'Open another design in a tab first, then insert it from here.', true);
-  const m = modal(`<div class="modal-title">${withConfig ? 'Insert Configured Design' : 'Insert Derive'}</div><div class="modal-body"><label>Design<select id="ins-src">${sources.map((x, i) => `<option value="${i}">${esc(x.label)}</option>`).join('')}</select></label>${withConfig ? '<label>Configuration<select id="ins-cfg"></select></label>' : ''}<div class="hint">Copies the design's bodies into this one as meshes. It is a snapshot: later changes to the other design are not carried over.</div><div class="form-err" id="ins-err"></div><div class="modal-foot"><button class="btn primary" id="ins-ok" type="button">Insert</button></div></div>`);
+  const m = modal(`<div class="modal-title">${withConfig ? 'Insert Configured Design' : 'Insert Design'}</div><div class="modal-body"><label>Design<select id="ins-src">${sources.map((x, i) => `<option value="${i}">${esc(x.label)}</option>`).join('')}</select></label>${withConfig ? '<label>Configuration<select id="ins-cfg"></select></label>' : ''}<div class="hint">Copies the design's bodies into this one as meshes. It is a snapshot: later changes to the other design are not carried over.</div><div class="form-err" id="ins-err"></div><div class="modal-foot"><button class="btn primary" id="ins-ok" type="button">Insert</button></div></div>`);
   const sel = m.el.querySelector('#ins-src'), cfgSel = m.el.querySelector('#ins-cfg'), err = m.el.querySelector('#ins-err');
   let cur = null;
   const load = async () => {
@@ -1254,6 +1259,17 @@ function renderDialog() {
       const list = fld.type === 'face' ? (val ? [val] : []) : val || [];
       ctl.innerHTML = `<span>${list.length ? `${list.length} face${list.length > 1 ? 's' : ''} selected` : 'None selected'}</span> <button class="btn sm" style="margin-left:6px">Clear</button><div class="note">${fld.type === 'face' ? 'Click a flat face, then drag it in the viewport or type a distance.' : (fld.note || 'Click flat faces in the viewport. Click again to deselect.')}</div>`;
       ctl.querySelector('button').onclick = () => { patchParams(idx, { [fld.key]: fld.type === 'face' ? null : [] }); renderDialog(); };
+    } else if (fld.type === 'points3d') {
+      const f2 = lenF(), pts = (val || []).map((q) => [...q]);
+      const active = dialog.pick?.kind === 'points3d';
+      ctl.innerHTML = `<div class="p3-bar"><button type="button" class="btn sm${active ? ' on' : ''}" id="p3-pick">${active ? 'Done picking' : 'Pick in viewport'}</button><button type="button" class="btn sm" id="p3-add">Add point</button><button type="button" class="btn sm" id="p3-clear" ${pts.length ? '' : 'disabled'}>Clear</button></div>
+        <div class="p3-rows">${pts.map((q, k) => `<div class="p3-row"><span class="p3-n">${k + 1}</span>${[0, 1, 2].map((a) => `<input type="number" step="any" inputmode="decimal" data-k="${k}" data-a="${a}" value="${+(q[a] / f2).toFixed(3)}" aria-label="Point ${k + 1} ${'XYZ'[a]} (${getUnits()})">`).join('')}<button type="button" class="p3-del" data-k="${k}" aria-label="Delete point ${k + 1}" title="Delete point">${uicon('close', 12, 2)}</button></div>`).join('')}</div>
+        <div class="note">${active ? 'Click the model to add a point on its surface, or in empty space to add one level with the last point. Click Done when finished.' : pts.length ? `${pts.length} point${pts.length > 1 ? 's' : ''} (${getUnits()}). Edit the numbers, or pick more.` : 'No points yet. Pick them in the viewport or add them by number.'}</div>`;
+      ctl.querySelector('#p3-pick').onclick = () => { dialog.pick = active ? null : { kind: 'points3d', key: fld.key }; renderDialog(); };
+      ctl.querySelector('#p3-add').onclick = () => { const last = pts[pts.length - 1] || [0, 0, 0]; set([...pts, [last[0] + 10, last[1], last[2]]]); renderDialog(); };
+      ctl.querySelector('#p3-clear').onclick = () => { set([]); renderDialog(); };
+      ctl.querySelectorAll('input[data-k]').forEach((inp) => (inp.onchange = () => { const k = +inp.dataset.k, a = +inp.dataset.a, n = [...pts]; n[k] = [...n[k]]; n[k][a] = (+inp.value || 0) * f2; set(n); }));
+      ctl.querySelectorAll('.p3-del').forEach((b2) => (b2.onclick = () => { set(pts.filter((_, k) => k !== +b2.dataset.k)); renderDialog(); }));
     } else if (fld.type === 'bool') {
       const c = document.createElement('input'); c.type = 'checkbox'; c.setAttribute('aria-label', fld.label); c.checked = !!val; c.onchange = () => { set(c.checked); if (['thread', 'through', 'internal'].includes(fld.key)) rerender(); }; ctl.appendChild(c);
     } else if (fld.type === 'sketchlist') {
@@ -1277,7 +1293,7 @@ function renderDialog() {
       else if (fld.type === 'planeref') opts = [['XY', 'XY (Top)'], ['XZ', 'XZ (Front)'], ['YZ', 'YZ (Right)'], ...doc.features.slice(0, idx).filter((q) => q.type === 'plane').map((q) => [q.id, q.name])];
       else if (fld.type === 'surface') opts = [['', 'Select surface…'], ...(result.surfSnaps?.[idx] || result.surfaces).map((q) => [q.id, q.name])];
       else if (fld.type === 'body') opts = [['', fld.optional || 'Select body…'], ...bodiesBefore(idx).map((b) => [b.id, b.name])];
-      else opts = [['', 'Select sketch…'], ...sketchesBefore(idx).map((k) => [k.id, k.name])];
+      else opts = [['', 'Select sketch…'], ...sketchesBefore(idx, fld.paths).map((k) => [k.id, k.name])];
       s.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
       if (fld.icon && fld.type === 'select') {
         ctl.appendChild(iconSelect(opts, val, (v) => { if (fld.boolSelect) { set(v === true || v === 'true'); return; } set(v); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype'].includes(fld.key)) rerender(); }, () => DLG_ICON[fld.icon]));
@@ -1327,6 +1343,15 @@ function dialogPick(e) {
     const cur = effectiveProfiles(f, sk);
     cur.has(id) ? cur.delete(id) : cur.add(id);
     patchParams(i, { profiles: [...cur] });
+    renderDialog();
+    return;
+  }
+  if (pk.kind === 'points3d') { // each click adds a point: on the model if there is one under the cursor, otherwise level with the last point
+    const cur = f.params[pk.key] || [];
+    const sn = vp.pickSnap(e);
+    const pt = sn ? sn.point : vp.pickHorizontal(e, cur.length ? cur[cur.length - 1][2] : 0);
+    if (!pt) return;
+    patchParams(i, { [pk.key]: [...cur, pt.map((v) => +v.toFixed(3))] });
     renderDialog();
     return;
   }
@@ -1639,6 +1664,16 @@ function drawSketches() {
   if (!vp) return;
   vp.sketchGroup.clear();
   doc.features.forEach((f, i) => {
+    if (f.type === 'sketch3d' && !f.suppressed && (i < limit() || (dialog && dialog.index === i)) && (sketchVis[f.id] ?? !result.sketchUsed.has(f.id) ?? true)) { // a 3D sketch: a line through points in space
+      const raw = (resolvedMap[f.id] || f.params).points || [];
+      let pts = raw.map((q) => new THREE.Vector3(+q[0] || 0, +q[1] || 0, +q[2] || 0));
+      if (pts.length >= 2) {
+        const path = f.params.smooth && !f.params.closed ? smoothPath(pts.map((q) => q.toArray()), 3).map((q) => new THREE.Vector3(...q)) : pts;
+        vp.sketchGroup.add(vp.fatLine(path, dialog && dialog.index === i ? sketchMatActive : sketchMat, !!f.params.closed && pts.length > 2));
+      }
+      if (pts.length) { const g = new THREE.BufferGeometry().setFromPoints(pts); const dots = new THREE.Points(g, new THREE.PointsMaterial({ color: 0x1d63b8, size: 7, sizeAttenuation: false, depthTest: false })); dots.renderOrder = 5; vp.sketchGroup.add(dots); }
+      return;
+    }
     if (f.type !== 'sketch' || f.suppressed) return;
     const active = sketch && sketch.index === i;
     if (!active && (i >= limit() || !(sketchVis[f.id] ?? !result.sketchUsed.has(f.id)))) return;
@@ -1844,6 +1879,73 @@ function showDriveJoints() {
   });
   $('#i-close').onclick = () => { wrap.classList.remove('open'); };
 }
+/** Appearance: choose a material (colour, shine, transparency and density for the mass) and/or a custom colour for bodies. */
+function appearanceDialog(ids) {
+  const bodies = result.bodies.filter((b) => ids.includes(b.id));
+  if (!bodies.length) return toast('Select a body first (click it in the Browser, or double-click it in the model).', true);
+  const cur = appearanceOf((doc.appearance || {})[bodies[0].id]);
+  let material = cur.material || '', customOn = !!cur.color, color = cur.color || '#c3c7cd';
+  const swatch = (m) => `background:radial-gradient(circle at 32% 28%, #fff 0, ${m.color} 32%, #000 140%);${m.opacity < 1 ? 'opacity:.7' : ''}`;
+  const groups = ['Printing', 'Metal', 'Other'];
+  const md = modal(`<div class="modal-title">Appearance</div>
+    <form class="modal-body ap">
+      <p class="rp-lead">${bodies.length === 1 ? `<b>${esc(bodies[0].name)}</b>` : `<b>${bodies.length} bodies</b>`}</p>
+      <div role="radiogroup" aria-label="Material" class="ap-mats">
+        <button type="button" class="ap-mat" role="radio" data-m="" aria-checked="${material === ''}"><i style="background:radial-gradient(circle at 32% 28%, #fff 0, #c3c7cd 32%, #000 140%)"></i><span>Default</span></button>
+        ${groups.map((g) => `<div class="ap-gh">${g}</div>` + MATERIALS.filter((m) => m.group === g).map((m) => `<button type="button" class="ap-mat" role="radio" data-m="${m.id}" aria-checked="${material === m.id}"><i style="${swatch(m)}"></i><span>${esc(m.name)}</span><small>${m.density} g/cm³</small></button>`).join('')).join('')}
+      </div>
+      <label class="ex-chk"><input type="checkbox" name="custom" ${customOn ? 'checked' : ''}><span>Custom colour</span><input type="color" name="color" value="${color}" aria-label="Colour"></label>
+      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="ap-c">Cancel</button><button type="submit" class="btn primary">Apply</button></div>
+    </form>`);
+  const form = md.el.querySelector('form'), mats = [...md.el.querySelectorAll('.ap-mat')];
+  const pick = (id) => { material = id; mats.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.m === id))); };
+  mats.forEach((b) => (b.onclick = () => pick(b.dataset.m)));
+  form.color.oninput = () => { form.custom.checked = true; };
+  md.el.querySelector('#ap-c').onclick = () => md.close();
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const val = { ...(material ? { material } : {}), ...(form.custom.checked ? { color: form.color.value } : {}) };
+    mutate(() => { const ap = { ...(doc.appearance || {}) }; for (const b of bodies) { if (val.material || val.color) ap[b.id] = val; else delete ap[b.id]; } doc.appearance = ap; });
+    md.close(); toast(val.material || val.color ? `Appearance applied to ${bodies.length} ${bodies.length > 1 ? 'bodies' : 'body'}` : 'Appearance reset');
+  };
+  setTimeout(() => md.el.querySelector('.ap-mat[aria-checked="true"]')?.focus(), 0);
+}
+/** Render view on or off (image-based lighting, soft shadows, tone mapping). */
+function toggleRender() {
+  vp.setRender(!vp.opts.render); renderRibbon();
+  toast(vp.opts.render ? 'Render view on: shadows, reflections and no grid. Use Save Image to export it.' : 'Render view off');
+}
+/** Save the current view as a PNG at a chosen size, optionally with the render look and a transparent background. */
+function saveImageDialog() {
+  const rect = $('#gl').getBoundingClientRect();
+  const sizes = [[Math.round(rect.width), Math.round(rect.height), 'Same size as the view'], [1280, 720, '1280 × 720'], [1920, 1080, '1920 × 1080 (full HD)'], [3840, 2160, '3840 × 2160 (4K)'], [2048, 2048, '2048 × 2048 (square)']];
+  const nm = doc.name === 'Untitled' ? 'design' : doc.name;
+  const md = modal(`<div class="modal-title">Save image</div>
+    <form class="modal-body ex">
+      <label>File name<input id="si-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
+      <label>Size<select name="size">${sizes.map(([w, h, l], i) => `<option value="${i}">${esc(l)}</option>`).join('')}</select></label>
+      <label>Background<select name="bg"><option value="transparent">Transparent</option><option value="#ffffff">White</option><option value="#eef1f4">Light grey</option><option value="#16181c">Dark</option></select></label>
+      <label class="ex-chk"><input type="checkbox" name="render" ${vp.opts.render ? 'checked' : 'checked'}><span>Render look (shadows and reflections)</span></label>
+      <div class="note" id="si-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
+      <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="si-c">Cancel</button><button type="submit" class="btn primary">Save PNG</button></div>
+    </form>`);
+  const form = md.el.querySelector('form');
+  md.el.querySelector('#si-c').onclick = () => md.close();
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const name = fileSafeName(md.el.querySelector('#si-name').value);
+    if (!name) { md.el.querySelector('#si-err').textContent = 'Enter a file name.'; return; }
+    const [w, h] = sizes[+form.size.value], wasRender = vp.opts.render, wantRender = form.render.checked;
+    md.close();
+    if (wantRender !== wasRender) vp.setRender(wantRender);
+    try {
+      const url = vp.snapshot({ width: w, height: h, background: form.bg.value === 'transparent' ? null : form.bg.value });
+      fetch(url).then((r) => r.blob()).then((blob) => { download(blob, `${name}.png`); toast(`Saved ${name}.png (${w} × ${h})`); });
+    } catch (x) { toast('Could not save the image: ' + x.message, true); }
+    if (wantRender !== wasRender) vp.setRender(wasRender);
+  };
+  setTimeout(() => md.el.querySelector('#si-name').select(), 0);
+}
 function showSection() {
   if (dialog || sketch) return;
   if (!result.bodies.length) return toast('Nothing to section yet.', true);
@@ -1886,6 +1988,40 @@ async function import2D(file) {
     addImportedShapes(svg ? parseSVG(text) : parseDXF(text), file.name);
   } catch (e) { toast('Import failed: ' + e.message, true); }
 }
+/** Settings for a sketch pattern, with a live preview in the sketch. Resolves { kind, ... } in millimetres, or null if cancelled. */
+function askPattern(kind, { count = 1, centre = [0, 0], preview = () => {} } = {}) {
+  return new Promise((resolve) => {
+    let done = false; const finish = (v) => { if (!done) { done = true; preview(null); resolve(v); } };
+    const u = getUnits(), f = lenF(), d = (v) => +(v / f).toFixed(4);
+    const rect = kind === 'rect';
+    const num = (name, label, val, extra = '') => `<label>${label}<input name="${name}" type="number" step="any" value="${val}" inputmode="decimal" ${extra}></label>`;
+    const m = modal(`<div class="modal-title">${rect ? 'Rectangular pattern' : 'Circular pattern'}</div>
+      <form class="modal-body pt">
+        <p class="rp-lead">Repeats ${count} selected shape${count > 1 ? 's' : ''}. The copies are plain shapes: they don't follow later changes to the originals.</p>
+        ${rect
+          ? `<div class="pt-grid">${num('nx', 'Count along X', 3, 'min="1" max="200" step="1"')}${num('dx', `Spacing X (${u})`, d(20))}${num('ny', 'Count along Y', 2, 'min="1" max="200" step="1"')}${num('dy', `Spacing Y (${u})`, d(20))}</div>`
+          : `<div class="pt-grid">${num('n', 'Count (with the original)', 6, 'min="2" max="500" step="1"')}${num('angle', 'Total angle (°)', 360)}${num('cx', `Centre X (${u})`, d(centre[0]))}${num('cy', `Centre Y (${u})`, d(centre[1]))}</div>
+             <label class="ex-chk"><input type="checkbox" name="turn" checked><span>Turn each copy with the pattern</span></label>`}
+        <div class="note" id="pt-err" role="alert" style="color:var(--danger);min-height:1.2em"></div>
+        <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="pt-c">Cancel</button><button type="submit" class="btn primary">Add copies</button></div>
+      </form>`, () => finish(null));
+    const form = m.el.querySelector('form'), err = m.el.querySelector('#pt-err');
+    const read = () => rect
+      ? { kind: 'rect', nx: Math.max(1, Math.round(+form.nx.value) || 1), ny: Math.max(1, Math.round(+form.ny.value) || 1), dx: (+form.dx.value || 0) * f, dy: (+form.dy.value || 0) * f }
+      : { kind: 'circ', n: Math.max(2, Math.round(+form.n.value) || 2), angle: +form.angle.value || 360, cx: (+form.cx.value || 0) * f, cy: (+form.cy.value || 0) * f, turn: form.turn.checked };
+    form.oninput = () => { const o = read(); err.textContent = ''; preview(o.kind === 'rect' && o.nx * o.ny * count > 2000 ? null : o); };
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const o = read();
+      if (o.kind === 'rect' && (o.nx * o.ny - 1) * count > 2000) { err.textContent = 'That is too many copies (the limit is 2000).'; return; }
+      if (o.kind === 'rect' && o.nx === 1 && o.ny === 1) { err.textContent = 'Use a count above 1 in at least one direction.'; return; }
+      finish(o); m.close();
+    };
+    m.el.querySelector('#pt-c').onclick = () => m.close();
+    form.oninput();
+    setTimeout(() => form.elements[0].focus(), 0);
+  });
+}
 function showTextDialog() {
   if (dialog) return;
   const m = modal(`<div class="modal-title">Text</div><div class="modal-body"><label>Text<textarea id="tx-s" rows="2" style="font:inherit">Sketchy</textarea></label><label>Height (${getUnits()})<input id="tx-h" type="number" value="${+(10 / lenF()).toFixed(3)}" step="any"></label><label style="flex-direction:row;align-items:center;gap:6px"><input id="tx-b" type="checkbox"> Bold</label></div><div class="foot" style="padding:10px 16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn" id="tx-c">Cancel</button><button class="btn primary" id="tx-ok">Insert</button></div>`);
@@ -1919,12 +2055,78 @@ function showInfo() {
       <div class="stat"><span>Size (${getUnits()})</span><b>${s.map((v) => dispStr(v, 3)).join(' × ')}</b></div>
       <div class="stat"><span>Volume</span><b>${fmtVolume(b.volume)}</b></div>
       <div class="stat"><span>Surface area</span><b>${fmtArea(b.area)}</b></div>
-      <div class="stat"><span>Mass (PLA, solid)</span><b>${(vol * 1.24).toFixed(1)} g</b></div>
+      <div class="stat"><span>Mass (${esc(materialNameOf((doc.appearance || {})[b.id]))}, solid)</span><b>${(vol * densityOf((doc.appearance || {})[b.id])).toFixed(1)} g</b></div>
       <div class="stat"><span>Fits ${esc(bedName.split(' (')[0])}</span><b class="${fits ? 'ok' : 'warn'}">${fits ? 'Yes' : 'No — too large'}</b></div>`;
   }).join('');
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('properties', 20)}PROPERTIES</div><div class="body">${bodies.length ? `<div class="stat"><span>Bodies</span><b>${bodies.length}</b></div>` + rows : 'No bodies to inspect.'}</div><div class="foot"><button class="btn primary" id="i-close">Close</button></div></div>`;
   wrap.classList.add('open');
   $('#i-close').onclick = () => { wrap.classList.remove('open'); };
+}
+
+
+// ------------------------------------------------------------------ print check
+const checkGroup = new THREE.Group();
+let pcancel = null;
+const pcOpts = { angle: 45, minWall: 1.2 };
+function clearCheck() { pcancel && (pcancel.stop = true); checkGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); }); checkGroup.clear(); }
+function closePrintCheck() { clearCheck(); $('#props-wrap').classList.remove('open'); }
+function showPrintCheck() {
+  if (dialog || sketch) return;
+  if (!checkGroup.parent) vp.scene.add(checkGroup);
+  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id));
+  const wrap = $('#props-wrap');
+  const [bx, by, bz] = vp.opts.bedSize, u = getUnits();
+  const fit = bedFit(bodies, vp.opts.bedSize);
+  const bedLine = !bodies.length ? 'No bodies to check.'
+    : fit.fitsAll ? `<b class="ok">All ${bodies.length} fit on one plate</b> (${Math.round(fit.usage * 100)}% of the bed used)`
+    : fit.tooBig.length ? `<b class="warn">${fit.tooBig.length} too large</b>: ${fit.tooBig.map((t) => `${esc(t.name)} (${t.size.map((v) => dispStr(v, 1)).join(' × ')}, ${t.why})`).join('; ')}`
+    : `<b class="warn">Needs ${fit.plates} plates</b> — each body fits, but not all together`;
+  wrap.innerHTML = `<div class="props"><div class="title">${ficon('properties', 20)}PRINT CHECK</div><div class="body">
+    <div class="stat"><span>Bed</span><b>${esc(bedName.split(' (')[0])} · ${bx} × ${by} × ${bz}</b></div>
+    <div class="pc-line">${bedLine}</div>
+    <div class="sep"></div>
+    <label class="pc-row"><span>Overhang limit</span><input id="pc-angle" type="number" min="1" max="89" value="${pcOpts.angle}"><span>°</span></label>
+    <div class="pc-line" id="pc-over"></div>
+    <div class="sep"></div>
+    <label class="pc-row"><span>Minimum wall (${u})</span><input id="pc-wall" type="number" min="0.1" step="0.1" value="${dispStr(pcOpts.minWall)}"></label>
+    <div class="pc-line" id="pc-wallres">Not checked yet.</div>
+    <button class="btn" id="pc-run" ${bodies.length ? '' : 'disabled'}>Check wall thickness</button>
+  </div><div class="foot"><button class="btn primary" id="pc-close">Close</button></div></div>`;
+  wrap.classList.add('open');
+  $('#pc-close').onclick = closePrintCheck;
+  const drawOver = () => {
+    clearCheck();
+    const a = Math.min(89, Math.max(1, +$('#pc-angle').value || 45)); pcOpts.angle = a;
+    const o = overhangs(bodies, a);
+    if (o.soup.length) {
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(o.soup, 3));
+      const col = new Float32Array(o.grade.length * 9);
+      o.grade.forEach((k, i) => { for (let v = 0; v < 3; v++) col.set([1, 0.75 - 0.6 * k, 0.1], i * 9 + v * 3); });
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide }));
+      checkGroup.add(m);
+    }
+    $('#pc-over').innerHTML = o.area ? `<b class="${o.fraction > 0.15 ? 'warn' : 'ok'}">${(o.fraction * 100).toFixed(1)}% of the surface overhangs</b> (${fmtArea(o.area)}), steepest ${o.worst.toFixed(0)}°. Shown in orange–red; flat on the plate is ignored.` : '<b class="ok">No overhangs</b> past this angle.';
+  };
+  drawOver();
+  $('#pc-angle').onchange = drawOver;
+  $('#pc-run').onclick = async () => {
+    pcOpts.minWall = Math.max(0.05, (+$('#pc-wall').value || 0) * lenF() || 1.2);
+    drawOver();
+    const btn = $('#pc-run'), out = $('#pc-wallres'); btn.disabled = true;
+    pcancel = { stop: false };
+    const r = await wallThickness(bodies, { minWall: pcOpts.minWall, cancel: pcancel, onProgress: (p) => { out.textContent = `Checking… ${Math.round(p * 100)}%`; } });
+    btn.disabled = false;
+    if (!r) return;
+    if (r.thin.length) {
+      const pos = new Float32Array(r.thin.length * 3); r.thin.forEach((s, i) => pos.set(s.p, i * 3));
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      checkGroup.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xe0453a, size: 7, sizeAttenuation: false, depthTest: false })));
+    }
+    out.innerHTML = r.min === Infinity ? 'No walls found.' : r.thin.length
+      ? `<b class="warn">${r.thin.length} of ${r.samples.length} sample points are thinner than ${dispStr(pcOpts.minWall)} ${u}</b> (thinnest ${dispStr(r.min, 2)} ${u}). Marked in red.`
+      : `<b class="ok">No thin walls found</b> (thinnest ${dispStr(r.min, 2)} ${u}, ${r.samples.length} samples).`;
+  };
 }
 
 // ------------------------------------------------------------------ files
@@ -1942,7 +2144,7 @@ const EXPORT_FORMATS = [
 ];
 function exportFile(fmt, name, selectedOnly) {
   if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
-  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: (doc.appearance || {})[b.id] }));
+  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: look((doc.appearance || {})[b.id]).color }));
   if (!bodies.length) return toast('Nothing to export.', true);
   const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
   download(w(bodies, name), `${name}.${fmt}`);
@@ -1982,28 +2184,79 @@ function exportDialog() {
     exportFile(fmt, name, m.el.querySelector('#ex-sel').checked && fmt !== 'sketchy');
   };
 }
-async function importSTL(file) {
-  try {
-    let soup = parseSTL(await file.arrayBuffer());
-    const name = file.name.replace(/\.stl$/i, '');
-    const attempt = (data) => {
-      const pre = snapshot();
-      const f = { id: 'f' + doc.nextId++, type: 'import', name, params: { data: encodeFloats(data), tris: data.length / 9 } };
-      doc.features.splice(doc.marker, 0, f); doc.marker++;
-      pushUndo(pre);
-      result = rebuild(doc.features, doc.marker);
-      if (result.errors[f.id]) { restore(pre); undoStack.pop(); return result.errors[f.id]; }
-      return null;
+/** Add one imported piece as a body: try it as it is, and repair it (weld, flip, fill holes) if that doesn't make a solid. */
+function importPart(part) {
+  let soup = part.soup;
+  const attempt = (data) => {
+    const pre = snapshot();
+    const f = { id: 'f' + doc.nextId++, type: 'import', name: part.name, params: { data: encodeFloats(data), tris: data.length / 9 } };
+    doc.features.splice(doc.marker, 0, f); doc.marker++;
+    pushUndo(pre);
+    result = rebuild(doc.features, doc.marker);
+    if (result.errors[f.id]) { restore(pre); undoStack.pop(); return { err: result.errors[f.id] }; }
+    if (part.color) doc.appearance = { ...(doc.appearance || {}), [f.id]: part.color };
+    return { id: f.id };
+  };
+  let r = attempt(soup), note = '';
+  if (r.err) {
+    const fixed = repairSoup(soup);
+    r = attempt(fixed.soup);
+    if (r.err) return { err: `${r.err}. Mesh repair could not make it a closed solid (${fixed.report.skippedHoles} unfillable holes)` };
+    soup = fixed.soup; note = describeRepair(fixed.report);
+  }
+  return { tris: soup.length / 9, note };
+}
+/**
+ * Mesh repair dialog: shows what is wrong with a mesh and lets you choose how hard to repair it (weld distance, which holes to
+ * fill, stray pieces to drop) before it becomes a body. Resolves the repaired triangle soup, or null if cancelled.
+ */
+function repairDialog(part, why = '') {
+  return new Promise((resolve) => {
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const raw = repairSoup(part.soup, { fillHoles: false }).report;
+    const m = modal(`<div class="modal-title">Repair mesh</div>
+      <form class="modal-body rp">
+        <p class="rp-lead">${why ? `<b>${esc(part.name)}</b> isn't a closed solid yet (${esc(why)}).` : `Choose how to repair <b>${esc(part.name)}</b>.`}</p>
+        <dl class="rp-dl"><dt>Triangles</dt><dd>${raw.triangles.toLocaleString()}</dd><dt>Separate pieces</dt><dd>${raw.shells.toLocaleString()}</dd><dt>Open edges</dt><dd>${raw.openEdges.toLocaleString()}</dd><dt>Degenerate or duplicate</dt><dd>${(raw.degenerate + raw.duplicates).toLocaleString()}</dd><dt>Shared by 3+ faces</dt><dd>${raw.nonManifold.toLocaleString()}</dd></dl>
+        <label>Join vertices closer than<span class="rp-row"><input name="tol" type="number" min="0" step="any" value="0" inputmode="decimal"><span>mm (0 = automatic)</span></span></label>
+        <label class="ex-chk"><input type="checkbox" name="fill" checked><span>Fill holes</span></label>
+        <label>Only holes with a rim shorter than<span class="rp-row"><input name="maxhole" type="number" min="0" step="any" value="0" inputmode="decimal"><span>mm (0 = any size)</span></span></label>
+        <label>Remove pieces smaller than<span class="rp-row"><input name="shell" type="number" min="0" max="100" step="any" value="0" inputmode="decimal"><span>% of the largest piece (0 = keep all)</span></span></label>
+        <div class="rp-result" id="rp-res" aria-live="polite"></div>
+        <div class="modal-foot" style="padding:0"><button type="button" class="btn" id="rp-c">Cancel</button><button type="submit" class="btn primary">Import repaired mesh</button></div>
+      </form>`, () => finish(null));
+    const form = m.el.querySelector('form'), res = m.el.querySelector('#rp-res');
+    let last = null;
+    const run = () => {
+      const o = { tolerance: +form.tol.value || 0, fillHoles: form.fill.checked, maxHolePerimeter: +form.maxhole.value || 0, minShell: +form.shell.value || 0 };
+      last = repairSoup(part.soup, o);
+      const r = last.report;
+      res.innerHTML = `<b>Result:</b> ${(last.soup.length / 9).toLocaleString()} triangles, ${r.holes} hole${r.holes === 1 ? '' : 's'} filled${r.skippedHoles ? `, <span class="warn">${r.skippedHoles} left open</span>` : ''}${r.removedShells ? `, ${r.removedShells} piece${r.removedShells > 1 ? 's' : ''} removed` : ''}${r.flipped ? `, ${r.flipped} faces turned` : ''}${r.openEdges && !o.fillHoles ? `, <span class="warn">${r.openEdges} open edges</span>` : ''}.`;
     };
-    let err = attempt(soup), note = '';
-    if (err) {
-      const fixed = repairSoup(soup);
-      err = attempt(fixed.soup);
-      if (err) { refresh(); return toast(`Import failed: ${err}. Mesh repair could not make it a closed solid (${fixed.report.skippedHoles} unfillable holes).`, true); }
-      soup = fixed.soup; note = ` - repaired: ${describeRepair(fixed.report)}`;
+    form.oninput = run; run();
+    m.el.querySelector('#rp-c').onclick = () => m.close();
+    form.onsubmit = (e) => { e.preventDefault(); finish(last.soup); m.close(); };
+    setTimeout(() => form.tol.focus(), 0);
+  });
+}
+async function importModel(file, { always = false } = {}) {
+  try {
+    const parts = await readModelFile(file);
+    let tris = 0, made = 0; const notes = new Set(), errs = [];
+    for (const part of parts) {
+      let r = always ? { err: '' } : importPart(part);
+      if (r.err !== undefined && (always || r.err)) { // won't make a solid by itself: let the user steer the repair
+        const fixed = await repairDialog(part, r.err);
+        if (!fixed) { errs.push(`${part.name}: cancelled`); continue; }
+        r = importPart({ ...part, soup: fixed });
+      }
+      if (r.err) errs.push(`${part.name}: ${r.err}`); else { made++; tris += r.tris; if (r.note) notes.add(`repaired: ${r.note}`); }
+      part.notes?.forEach((n) => notes.add(n));
     }
     vp.fitted = false; refresh();
-    toast(`Imported ${name} (${(soup.length / 9).toLocaleString()} triangles)${note}`);
+    if (!made) return toast(`Import failed: ${errs[0]}`, true);
+    const what = made > 1 ? `${made} bodies from ${file.name}` : parts[0].name;
+    toast(`Imported ${what} (${tris.toLocaleString()} triangles)${notes.size ? ' - ' + [...notes].join('; ') : ''}${errs.length ? `. Skipped: ${errs.join('; ')}` : ''}`, !!errs.length);
   } catch (e) { toast('Import failed: ' + e.message, true); }
 }
 function captureThumb() {
@@ -2137,7 +2390,6 @@ function startRemotePolling() {
   addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
   addEventListener('pagehide', () => { if (dirty) { try { localStorage.setItem('sketchy.autosave', projectJSON()); localStorage.setItem('sketchy.autosave.t', String(Date.now())); } catch { /* too large */ } } }); // keep a change made just before closing; the next start restores it
 }
-function openFromServer() { toggleDataPanel(true); }
 // ------------------------------------------------------------------ document tabs
 // The live design always sits in the module globals (doc, undoStack, ...). Inactive tabs keep a saved copy of that
 // state in tab.state; switching saves the active one and loads the other.
@@ -2309,7 +2561,7 @@ function renderDocTabs() {
       if (t.id !== activeTab) activateTab(t.id);
       showMenu(e.clientX, e.clientY, [
         { label: acct.server ? 'Save version' : 'Save (download)', uicon: 'save', hint: 'Ctrl+S', run: () => save(false) },
-        { label: 'Save As…', uicon: 'save', hint: 'Ctrl+Shift+S', run: () => save(true) },
+        { label: 'Save as…', uicon: 'save', hint: 'Ctrl+Shift+S', run: () => save(true) },
         { label: 'Export…', uicon: 'upload', run: exportDialog },
         { sep: true },
         { label: 'Close', uicon: 'close', run: () => closeTab(t.id) },
@@ -2507,7 +2759,7 @@ function buildNavBar() {
     nb.appendChild(el);
   };
   const sep = () => nb.insertAdjacentHTML('beforeend', '<span class="nsep"></span>');
-  b('orbit', 'Orbit (Shift + middle mouse)', () => setNavMode('orbit'), { caret: true });
+  b('orbit', 'Orbit (Shift + middle mouse)', () => setNavMode('orbit'));
   b('camera', 'Look At', lookAtNearest);
   b('hand', 'Pan (middle mouse)', () => setNavMode(navMode === 'pan' ? 'orbit' : 'pan'), { on: navMode === 'pan' });
   b('zoom', 'Zoom (mouse wheel)', () => setNavMode(navMode === 'zoom' ? 'orbit' : 'zoom'), { on: navMode === 'zoom', caret: false });
@@ -2540,6 +2792,7 @@ function buildNavBar() {
   b('grid2', 'Grid and Snaps', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(r.left - 20, r.top - 100, [
+      { label: 'Render view', check: vp.opts.render, run: toggleRender },
       { label: 'Show Grid', check: vp.opts.grid, run: () => { vp.opts.grid = !vp.opts.grid; vp.refreshMaterials(); } },
       { label: 'Build volume', check: vp.opts.bed, run: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); } },
       { label: 'Snap to Grid', check: !sketch || sketch.snapOn !== false, run: () => { if (sketch) sketch.snapOn = sketch.snapOn === false; } },
@@ -2712,7 +2965,7 @@ function openMarking(x, y) {
   const pills = [
     { dx: 0, dy: -62, label: last ? `Repeat ${last.label}` : 'Repeat', f: last?.icon, dim: !last, run: () => runCommand(lastCmd) },
     { dx: -108, dy: -32, label: 'Delete', u: 'close', red: true, dim: !vp.selected.size, run: deleteSelection },
-    { dx: 108, dy: -32, label: 'Press Pull', f: 'presspull', run: () => runCommand('presspull') },
+    { dx: 108, dy: -32, label: 'Press/Pull', f: 'presspull', run: () => runCommand('presspull') },
     { dx: -126, dy: 2, label: 'Undo', u: 'undo', dim: !undoStack.length, run: undo },
     { dx: 126, dy: 2, label: 'Redo', u: 'redo', dim: !redoStack.length, run: redo },
     { dx: -114, dy: 36, label: 'Move/Copy', f: 'move', run: () => runCommand('move') },
@@ -2841,7 +3094,7 @@ async function renderDataPanel() {
   host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-openfile" title="Open a project file from your computer" aria-label="Open a project file from your computer">${uicon('upload', 16)}</button><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
     <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16, 1.8)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
     <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
-    <div class="dp-actions"><button class="btn primary" id="dp-new">New Design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New Folder</button></div>`;
+    <div class="dp-actions"><button class="btn primary" id="dp-new">New design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New folder</button></div>`;
   $('#dp-close').onclick = () => toggleDataPanel(false);
   $('#dp-refresh').onclick = renderDataPanel;
   $('#dp-openfile').onclick = () => $('#file-proj').click();
@@ -3078,7 +3331,7 @@ async function boot() {
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
     setShapes: (sh) => setSketchShapes(sh), remapCons: (si, delta) => remapSketchCons(si, delta), projectHover: (e) => projectHover(e), projectPick: (e, all) => projectPick(e, all), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
     cons: () => curSketch().params.cons || [], setCons: (c) => setSketchCons(c),
-    toast: (m) => toast(m), evalExpr: (t, kind = 'len') => evalExpr(t, (n) => paramState.values[n], kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
+    toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, (n) => paramState.values[n], kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
   buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip();
   bindTooltips();
@@ -3108,10 +3361,11 @@ async function boot() {
   $('#cube-menu').dataset.menu = 1;
   $('#cube-menu').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 140, r.bottom + 4, [{ label: 'Go Home', uicon: 'home', run: () => vp.home(true) }, { sep: true }, { label: 'Orthographic', check: vp.opts.ortho, run: () => vp.setOrtho(true) }, { label: 'Perspective', check: !vp.opts.ortho, run: () => vp.setOrtho(false) }]); };
   $('#file-2d').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) import2D(f); };
-  $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importSTL(f); };
+  $('#file-repair').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importModel(f, { always: true }); };
+  $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importModel(f); };
   $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { const txt = await f.text(); if (!newTab({ reuseBlank: true })) return; loadProject(txt); renderDocTabs(); } catch (x) { toast(x.message, true); } };
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
-  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.stl$/i.test(f.name)) importSTL(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
+  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.(stl|obj|3mf|step|stp)$/i.test(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
   initA11y();
   const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x3d94ff : 0x1f5fa8); sketchMatActive.color.setHex(d ? 0x2f8cff : 0x0b6bcb); };
   paint(getTheme()); onTheme(paint);

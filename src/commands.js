@@ -2,11 +2,11 @@
 // dropdown menus, the marking menu and the quick-search palette.
 //   feature: id of a FEATURES entry started by startFeature()
 //   sk:      sketch tool id
-//   off:     placeholder for a common CAD command that isn't implemented here (shown disabled)
 const C = (label, icon, extra = {}) => ({ label, icon, ...extra });
 
 export const CMD = {
   // --- design / create ---
+  sketch3d: C('3D Sketch', 'path', { feature: 'sketch3d', desc: 'A line through points in space: click the model or type coordinates. Use it as the path for Sweep, Pipe and Pattern.' }),
   sketch: C('Create Sketch', 'sketch', { feature: 'sketch' }),
   extrude: C('Extrude', 'extrude', { feature: 'extrude', key: 'E' }),
   revolve: C('Revolve', 'revolve', { feature: 'revolve' }),
@@ -24,22 +24,22 @@ export const CMD = {
   pattern: C('Pattern', 'pattern', { feature: 'pattern' }),
   mirror: C('Mirror', 'mirror', { feature: 'mirror' }),
   // --- surfaces ---
-  sextrude: C('Extrude', 'extrude', { feature: 'sextrude', desc: 'Extrudes a sketch into an open surface.' }),
-  srevolve: C('Revolve', 'revolve', { feature: 'srevolve', desc: 'Revolves a sketch into an open surface.' }),
-  ssweep: C('Sweep', 'sweep', { feature: 'ssweep', desc: 'Sweeps a profile along a path into a surface.' }),
-  sloft: C('Loft', 'loft', { feature: 'sloft', desc: 'Blends between profiles to make a surface.' }),
+  sextrude: C('Extrude Surface', 'extrude', { feature: 'sextrude', desc: 'Extrudes a sketch into an open surface.' }),
+  srevolve: C('Revolve Surface', 'revolve', { feature: 'srevolve', desc: 'Revolves a sketch into an open surface.' }),
+  ssweep: C('Sweep Surface', 'sweep', { feature: 'ssweep', desc: 'Sweeps a profile along a path into a surface.' }),
+  sloft: C('Loft Surface', 'loft', { feature: 'sloft', desc: 'Blends between profiles to make a surface.' }),
   pipe: C('Pipe', 'sweep', { feature: 'pipe', desc: 'A solid or hollow tube along a path.' }),
   sstitch: C('Stitch', 'combine', { feature: 'sstitch', desc: 'Joins surfaces together. A closed shell becomes a solid.' }),
-  sthicken: C('Thicken', 'shell', { feature: 'sthicken', desc: 'Gives a surface thickness to make a solid.' }),
-  strim: C('Trim', 'split', { feature: 'strim', desc: 'Cuts a surface at a plane and keeps one side.' }),
-  sextend: C('Extend', 'scale', { feature: 'sextend', desc: 'Grows a surface outward from its open edges.' }),
+  sthicken: C('Thicken Surface', 'shell', { feature: 'sthicken', desc: 'Gives a surface thickness to make a solid.' }),
+  strim: C('Trim Surface', 'split', { feature: 'strim', desc: 'Cuts a surface at a plane and keeps one side.' }),
+  sextend: C('Extend Surface', 'scale', { feature: 'sextend', desc: 'Grows a surface outward from its open edges.' }),
   thickenface: C('Thicken Face', 'shell', { feature: 'thickenface', desc: 'Adds or removes a slab of material on flat faces.' }),
   replaceface: C('Replace Face', 'presspull', { feature: 'replaceface', desc: 'Moves a flat face onto a plane, growing or trimming the body.' }),
   boundaryfill: C('Boundary Fill', 'combine', { feature: 'boundaryfill', desc: 'Makes a solid from the space enclosed by, or shared between, tool bodies.' }),
   mreduce: C('Reduce', 'scale', { feature: 'mreduce', desc: 'Reduces the triangle count of a mesh body, within a deviation limit.' }),
   mseparate: C('Separate', 'split', { feature: 'mseparate', desc: 'Splits a body made of disconnected pieces into separate bodies.' }),
   // --- modify ---
-  presspull: C('Press Pull', 'presspull', { feature: 'presspull', key: 'Q' }),
+  presspull: C('Press/Pull', 'presspull', { feature: 'presspull', key: 'Q' }),
   fillet: C('Fillet', 'fillet', { feature: 'fillet', key: 'F' }),
   chamfer: C('Chamfer', 'chamfer', { feature: 'chamfer' }),
   shell: C('Shell', 'shell', { feature: 'shell' }),
@@ -56,15 +56,21 @@ export const CMD = {
   edgelen: C('Measure Edge Length', 'edge'),
   faces: C('Measure Between Faces', 'faces'),
   properties: C('Properties', 'properties'),
-  importstl: C('Insert Mesh (STL)', 'insertmesh'),
+  importstl: C('Insert Model', 'insertmesh'),
+  repairimport: C('Repair Mesh…', 'scale', { desc: 'Opens a model file and lets you choose how its mesh is repaired (join distance, holes to fill, stray pieces to drop) before it is added.' }),
+  mclean: C('Clean Mesh', 'shell', { feature: 'mclean', desc: 'Cleans up a mesh body: joins nearly coincident vertices and drops stray pieces.' }),
   select: C('Select', 'select'),
   cfg1: C('Configure Design', 'table'),
   cfg2: C('Insert Configured Design', 'table'),
   cfg3: C('Configure Settings', 'table'),
-  derive: C('Insert Derive', 'derive'),
+  derive: C('Insert Design', 'derive'),
   // --- 3D print / utilities ---
   printer: C('Printer…', 'printer', { desc: 'Chooses the printer whose build volume is shown and checked against.' }),
+  printcheck: C('Print Check', 'properties', { desc: 'Checks the bodies for printing: will they fit the bed, where do they need supports, and are any walls too thin.' }),
   buildvol: C('Show Build Volume', 'box', { desc: 'Shows the printer build volume as a box in the viewport.' }),
+  appearance: C('Appearance', 'insertmesh', { desc: 'Gives bodies a material (colour, shine, transparency and density for the mass) or a custom colour.' }),
+  render: C('Render View', 'sectionan', { desc: 'Shows the model with reflections, soft shadows and no grid. Toggle it off to go back to the working view.' }),
+  saveimage: C('Save Image', 'exportfile', { desc: 'Saves the current view as a PNG at a chosen size, optionally transparent.' }),
   export: C('Export', 'exportfile', { desc: 'Saves the design as STL, 3MF, OBJ, STEP or a Sketchy project file.' }),
   // --- sketch tools ---
   sk_line: C('Line', 'line', { sk: 'line', key: 'L' }),
@@ -79,7 +85,7 @@ export const CMD = {
   sk_select: C('Select (edit shapes)', 'select', { sk: 'select', key: 'Esc' }),
   sk_delete: C('Delete Shape', 'remove', { skAction: 'delete' }),
   finishsketch: C('Finish Sketch', 'finish', { key: '' }),
-  // --- placeholders for common CAD commands ---
+  // --- more commands ---
   offsetplane: C('Offset Plane', 'offsetplane', { feature: 'plane' }),
   newcomp: C('New Component', 'joint'),
   asbuilt: C('As-built Joint', 'joint'),
@@ -108,6 +114,8 @@ export const CMD = {
   sk_offset: C('Offset', 'offsetplane', { sk: 'offset' }),
   sk_mirror: C('Mirror', 'mirror', { sk: 'mirror' }),
   sk_project: C('Project / Include', 'select', { sk: 'project' }),
+  sk_rpat: C('Rectangular Pattern', 'pattern', { sk: 'rpat' }),
+  sk_cpat: C('Circular Pattern', 'pattern', { sk: 'cpat' }),
 };
 
 export const WORKSPACE_TABS = ['SOLID', 'SURFACE', 'MESH', 'MANAGE', 'UTILITIES'];
@@ -115,8 +123,8 @@ export const WORKSPACE_TABS = ['SOLID', 'SURFACE', 'MESH', 'MANAGE', 'UTILITIES'
 // show = buttons on the toolbar; menu = full dropdown ('|' = separator)
 export const TOOLBAR = {
   SOLID: [
-    { label: 'CREATE', show: ['sketch', 'extrude', 'revolve', 'hole'], menu: ['newcomp', 'sketch', '|', 'extrude', 'revolve', 'sweep', 'loft', 'rib', 'coil', 'emboss', '|', 'hole', 'thread', '|', 'box', 'cylinder', 'sphere', 'torus', 'cone', '|', 'pattern', 'mirror'] },
-    { label: 'MODIFY', show: ['presspull', 'fillet', 'combine'], menu: ['presspull', 'fillet', 'chamfer', 'shell', 'draft', 'scale', 'combine', '|', 'offsetface', 'thickenface', 'replaceface', 'split', 'boundaryfill', '|', 'move', 'remove', '|', 'parameters'] },
+    { label: 'CREATE', show: ['sketch', 'extrude', 'revolve', 'hole'], menu: ['newcomp', 'sketch', 'sketch3d', '|', 'extrude', 'revolve', 'sweep', 'loft', 'rib', 'coil', 'emboss', '|', 'hole', 'thread', '|', 'box', 'cylinder', 'sphere', 'torus', 'cone', '|', 'pattern', 'mirror'] },
+    { label: 'MODIFY', show: ['presspull', 'fillet', 'combine'], menu: ['presspull', 'fillet', 'chamfer', 'shell', 'draft', 'scale', 'combine', '|', 'offsetface', 'thickenface', 'replaceface', 'split', 'boundaryfill', '|', 'appearance', '|', 'move', 'remove', '|', 'parameters'] },
     { label: 'CONFIGURE', show: ['cfg1', 'cfg2', 'cfg3'], menu: ['cfg1', 'cfg2', 'cfg3'] },
     { label: 'CONSTRUCT', show: ['offsetplane'], menu: ['offsetplane'] },
     { label: 'INSPECT', show: ['measure', 'section'], menu: ['measure', 'angle', 'edgelen', 'faces', '|', 'properties', 'section', 'interference'] },
@@ -125,12 +133,12 @@ export const TOOLBAR = {
     { label: 'SELECT', show: ['select'], menu: ['select'], big: true },
   ],
   SURFACE: [
-    { label: 'CREATE', show: ['sketch', 'sextrude', 'srevolve', 'ssweep', 'sloft', 'pipe'], menu: ['sketch', '|', 'sextrude', 'srevolve', 'ssweep', 'sloft', '|', 'pipe'] },
+    { label: 'CREATE', show: ['sketch', 'sextrude', 'srevolve', 'ssweep', 'sloft', 'pipe'], menu: ['sketch', 'sketch3d', '|', 'sextrude', 'srevolve', 'ssweep', 'sloft', '|', 'pipe'] },
     { label: 'MODIFY', show: ['sstitch', 'sthicken', 'strim', 'sextend'], menu: ['sstitch', 'sthicken', '|', 'strim', 'sextend'] },
   ],
   MESH: [
-    { label: 'CREATE', show: ['importstl'], menu: ['importstl'] },
-    { label: 'MODIFY', show: ['shell', 'combine', 'mreduce', 'mseparate'], menu: ['shell', 'combine', '|', 'mreduce', 'mseparate'] },
+    { label: 'CREATE', show: ['importstl', 'repairimport'], menu: ['importstl', 'repairimport'] },
+    { label: 'MODIFY', show: ['shell', 'combine', 'mclean', 'mreduce', 'mseparate'], menu: ['shell', 'combine', '|', 'mclean', 'mreduce', 'mseparate'] },
   ],
   MANAGE: [
     { label: 'PARAMETERS', show: ['parameters'], menu: ['parameters'] },
@@ -138,13 +146,14 @@ export const TOOLBAR = {
   ],
   UTILITIES: [
     { label: 'EXPORT', show: ['export'], menu: [], big: true },
-    { label: 'PRINTER', show: ['printer', 'buildvol'], menu: [] },
+    { label: 'RENDER', show: ['render', 'saveimage'], menu: [] },
+    { label: 'PRINTER', show: ['printer', 'buildvol', 'printcheck'], menu: [] },
   ],
 };
 
 export const SKETCH_TOOLBAR = [
   { label: 'CREATE', show: ['sk_line', 'sk_rect', 'sk_circle', 'sk_arc', 'sk_ngon'], menu: ['sk_line', 'sk_path', '|', 'sk_rect', 'sk_crect', 'sk_rrect', '|', 'sk_circle', 'sk_ellipse', 'sk_arc', '|', 'sk_slot', 'sk_ngon', 'sk_spline', '|', 'sk_text', 'sk_mirror'] },
-  { label: 'MODIFY', show: ['sk_fillet', 'sk_trim', 'sk_delete'], menu: ['sk_fillet', 'sk_trim', 'sk_offset', '|', 'sk_delete'] },
+  { label: 'MODIFY', show: ['sk_fillet', 'sk_trim', 'sk_delete'], menu: ['sk_fillet', 'sk_trim', 'sk_offset', '|', 'sk_rpat', 'sk_cpat', '|', 'sk_delete'] },
   { label: 'CONSTRAINTS', show: ['sk_dim', 'con_coin', 'con_h', 'con_v', 'con_par'], menu: ['sk_dim', '|', 'con_coin', 'con_conc', 'con_h', 'con_v', 'con_par', 'con_perp', 'con_equal'] },
   { label: 'INSPECT', show: ['measure'], menu: ['measure'] },
   { label: 'INSERT', show: ['sk_project'], menu: ['sk_project', 'svg', 'dxf'] },
@@ -173,8 +182,10 @@ const DESC = {
   parameters: 'Defines named dimensions and expressions that drive the whole timeline.',
   joint: 'Positions one body against another with rigid, revolute, slider or ball joints.',
   measure: 'Measures distances, angles, edge lengths and face relationships.',
-  importstl: 'Inserts an STL mesh into the design.',
+  importstl: 'Inserts a model from an STL, OBJ, 3MF or STEP file. Meshes are repaired automatically.',
   select: 'Choose what a click selects: whole bodies or individual faces.',
+  sk_rpat: 'Repeats shapes in a grid. Click the shapes, press Enter, then set the counts and spacing.',
+  sk_cpat: 'Repeats shapes around a centre point. Click the shapes, press Enter, then set the count and angle.',
   sk_mirror: 'Copies shapes across a line. Pick the shapes, press Enter, then click a line (or press X / Y for a sketch axis).', sk_trim: 'Removes the part of a curve between its nearest intersections.', sk_spline: 'Draws a smooth curve through the points you click.', sk_project: 'Copies model edges onto the sketch plane. Shift-click copies every edge of a body.',
   sk_line: 'Draws connected line segments. Type a length and angle, press Enter. Press A for a tangent arc.',
   sk_arc: 'Draws an arc: click the start, the end, then a point on the arc. Type a radius for the last step.',

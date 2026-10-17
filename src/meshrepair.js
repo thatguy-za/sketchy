@@ -11,13 +11,13 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
  * @param {Float32Array} soup  9 floats per triangle
  * @returns {{verts: Float32Array, tris: Uint32Array, soup: Float32Array, report: object}}
  */
-export function repairSoup(soup, { fillHoles = true } = {}) {
-  const report = { triangles: soup.length / 9, welded: 0, degenerate: 0, duplicates: 0, nonManifold: 0, flipped: 0, holes: 0, holeTriangles: 0, skippedHoles: 0 };
+export function repairSoup(soup, { fillHoles = true, tolerance = 0, maxHolePerimeter = 0, minShell = 0 } = {}) {
+  const report = { triangles: soup.length / 9, welded: 0, degenerate: 0, duplicates: 0, nonManifold: 0, flipped: 0, holes: 0, holeTriangles: 0, skippedHoles: 0, shells: 0, removedShells: 0, removedTriangles: 0, openEdges: 0 };
   // ---- bounds + tolerance
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < soup.length; i += 3) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], soup[i + k]); hi[k] = Math.max(hi[k], soup[i + k]); }
   const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
-  const tol = Math.max(diag * 1e-6, 1e-5);
+  const tol = Math.max(tolerance > 0 ? tolerance : diag * 1e-6, 1e-5); // weld distance: automatic unless you give one
 
   // ---- weld
   const map = new Map(), pos = [];
@@ -81,6 +81,19 @@ export function repairSoup(soup, { fillHoles = true } = {}) {
   tris = tris.map((t, i) => (vol[comp[i]] < 0 ? [t[0], t[2], t[1]] : t));
   report.flipped += vol.reduce((n, v, c) => n + (v < 0 ? comp.filter((x) => x === c).length : 0), 0);
 
+  report.shells = nc;
+  // pieces much smaller than the biggest one (stray fragments) can be dropped
+  if (minShell > 0 && nc > 1) {
+    const big = Math.max(...vol.map(Math.abs));
+    const tiny = new Set(vol.map((v, c) => (Math.abs(v) < big * (minShell / 100) ? c : -1)).filter((c) => c >= 0));
+    if (tiny.size && tiny.size < nc) {
+      const before = tris.length;
+      tris = tris.filter((_, i) => !tiny.has(comp[i]));
+      report.removedShells = tiny.size; report.removedTriangles = before - tris.length;
+      rebuildEdges();
+    }
+  }
+
   // ---- fill holes: boundary half-edges (those without an opposite) form loops
   const openEdges = (() => { const hs = new Set(tris.flatMap((t) => [0, 1, 2].map((k) => `${t[k]}>${t[(k + 1) % 3]}`))); let n = 0; for (const h of hs) { const [a, b] = h.split('>'); if (!hs.has(`${b}>${a}`)) n++; } return n; })();
   report.openEdges = openEdges;
@@ -106,6 +119,7 @@ export function repairSoup(soup, { fillHoles = true } = {}) {
       }
       if (!ok || loop.length < 3) { report.skippedHoles++; continue; }
       if (loop.length > 5000) { report.skippedHoles++; continue; }
+      if (maxHolePerimeter > 0) { let per = 0; for (let i = 0; i < loop.length; i++) per += Math.hypot(...sub(pos[loop[i]], pos[loop[(i + 1) % loop.length]])); if (per > maxHolePerimeter) { report.skippedHoles++; continue; } }
       // fill with triangles whose edges run opposite to the boundary: use the loop reversed
       const poly = [...loop].reverse();
       let nrm = [0, 0, 0];
@@ -149,5 +163,6 @@ export function describeRepair(r) {
   if (r.degenerate) parts.push(`removed ${r.degenerate} degenerate`);
   if (r.duplicates) parts.push(`removed ${r.duplicates} duplicate`);
   if (r.nonManifold) parts.push(`removed ${r.nonManifold} non-manifold`);
+  if (r.removedShells) parts.push(`dropped ${r.removedShells} tiny piece${r.removedShells > 1 ? 's' : ''}`);
   return parts.join(', ') || 'welded vertices';
 }

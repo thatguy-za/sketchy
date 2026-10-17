@@ -39,9 +39,9 @@ volumes:
 ## Features
 
 * **Modelling:** extrude, revolve, sweep, loft, coil, rib, hole, thread, fillet, chamfer, draft, emboss, shell, press/pull, scale, split, combine, mirror, pipe, surfaces (stitch, thicken, trim, extend), thicken and replace face, boundary fill and patterns (linear, circular, along a path, on a face)
-* **Sketching:** lines, rectangles, circles, ellipses, slots, polygons, arcs, splines, text, SVG and DXF import, mirror, trim, include model edges, dimensions and constraints
+* **Sketching:** lines, rectangles, circles, ellipses, slots, polygons, arcs, splines, text, SVG and DXF import, rectangular and circular patterns, 3D sketch paths, mirror, trim, include model edges, dimensions and constraints
 * **Parametric:** timeline you can edit, roll back and suppress; named parameters and expressions; design configurations (variants such as Small and Large)
-* **3D printing:** STL import with automatic repair, mesh reduction and separating pieces; STL, 3MF, OBJ and STEP (flat faces) export; build-volume overlay; volume and mass; section view
+* **3D printing:** STL, OBJ, 3MF and STEP import with automatic repair, mesh reduction and separating pieces; STL, 3MF, OBJ and STEP (flat faces) export; build-volume overlay; print checks (bed fit across bodies, overhangs, wall thickness); materials, render view and image export; volume and mass; section view
 * **Organising:** folders for your saved designs, components, offset construction planes, reference-image canvases, and inserting one design into another
 * **Assemblies:** joints, drive sliders, interference check
 * **Accounts:** several users per server, version history you can restore, drafts that follow you between devices, tabs, dark mode

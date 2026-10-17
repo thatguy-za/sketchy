@@ -6,7 +6,9 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { PLANES, planeFrame } from './kernel.js';
+import { look } from './materials.js';
 import { planarFace } from './edges.js';
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -128,11 +130,13 @@ export class Viewport {
   buildOrigin() {
     const line = (a, b, c, o) => new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...a), new THREE.Vector3(...b)]), new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: o }));
     // long X (red) and Y (green) axis lines through the grid; short Z stub
-    this.scene.add(line([-600, 0, 0], [600, 0, 0], 0xe27d78, 0.75), line([0, -600, 0], [0, 600, 0], 0x7fcf92, 0.75), line([0, 0, 0], [0, 0, 60], 0x6f9be8, 0.9));
+    this.originMarks = new THREE.Group();
+    this.originMarks.add(line([-600, 0, 0], [600, 0, 0], 0xe27d78, 0.75), line([0, -600, 0], [0, 600, 0], 0x7fcf92, 0.75), line([0, 0, 0], [0, 0, 60], 0x6f9be8, 0.9));
     const ring = new THREE.Mesh(new THREE.RingGeometry(1.6, 2.4, 28), new THREE.MeshBasicMaterial({ color: 0x8b9096, side: THREE.DoubleSide, transparent: true, opacity: 0.8, depthWrite: false }));
     const dot = new THREE.Mesh(new THREE.CircleGeometry(0.7, 12), new THREE.MeshBasicMaterial({ color: 0x8b9096, side: THREE.DoubleSide }));
     ring.position.z = dot.position.z = 0.03;
-    this.scene.add(ring, dot);
+    this.originMarks.add(ring, dot);
+    this.scene.add(this.originMarks);
   }
 
   buildOriginPlanes() {
@@ -305,7 +309,7 @@ export class Viewport {
       geo.setIndex(new THREE.BufferAttribute(b.tris, 1));
       geo = toCreasedNormals(geo, (35 * Math.PI) / 180);
       const mesh = new THREE.Mesh(geo, this.mats.body);
-      mesh.userData.id = b.id; mesh.userData.surface = !!b.surface;
+      mesh.userData.id = b.id; mesh.userData.surface = !!b.surface; mesh.castShadow = true; mesh.receiveShadow = true;
       mesh.userData.src = { verts: b.verts, tris: b.tris };
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30), this.mats.edge);
       edges.raycast = () => {};
@@ -314,6 +318,7 @@ export class Viewport {
     }
     this.refreshMaterials();
     this.rebuildSection();
+    if (this.opts.render) this.fitRenderLights();
     if (!this.fitted && bodies.length) { this.fit(); this.fitted = true; }
   }
 
@@ -348,20 +353,72 @@ export class Viewport {
     this.sectionGroup = g; this.scene.add(g);
   }
 
-  // Per-body appearance colour (doc.appearance); falls back to the default steel material.
+  // Per-body appearance (doc.appearance): a material and/or a colour; falls back to the default grey material.
   bodyMat(id) {
-    const hex = this.bodyColors?.[id];
-    if (!hex) return this.mats.body;
+    const lk = look(this.bodyColors?.[id]);
+    if (!lk.custom) return this.mats.body;
     this.colorMats ||= {};
-    if (!this.colorMats[hex]) this.colorMats[hex] = new THREE.MeshStandardMaterial({ color: hex, metalness: 0.12, roughness: 0.5, side: THREE.DoubleSide });
-    return this.colorMats[hex];
+    const key = `${lk.color}|${lk.metalness}|${lk.roughness}|${lk.opacity}`;
+    if (!this.colorMats[key]) this.colorMats[key] = new THREE.MeshStandardMaterial({ color: lk.color, metalness: lk.metalness, roughness: lk.roughness, transparent: lk.opacity < 1, opacity: lk.opacity, side: THREE.DoubleSide, depthWrite: lk.opacity >= 1 });
+    return this.colorMats[key];
+  }
+  /**
+   * Render mode: image-based lighting, a fixed sun with soft shadows on a ground plane, filmic tone mapping, and no grid,
+   * edges or origin marks. Off is the normal working view.
+   */
+  setRender(on) {
+    this.opts.render = !!on;
+    if (on && !this.envTex) { const pm = new THREE.PMREMGenerator(this.renderer); this.envTex = pm.fromScene(new RoomEnvironment(), 0.04).texture; pm.dispose(); }
+    this.scene.environment = on ? this.envTex : null;
+    this.renderer.toneMapping = on ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.shadowMap.enabled = !!on; this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    if (!this.renderSun) {
+      this.renderSun = new THREE.DirectionalLight(0xfff4e8, 2.4);
+      this.renderSun.castShadow = true; this.renderSun.shadow.mapSize.set(2048, 2048); this.renderSun.shadow.bias = -0.0004; this.renderSun.shadow.radius = 4;
+      this.scene.add(this.renderSun, this.renderSun.target);
+      this.ground = new THREE.Mesh(new THREE.PlaneGeometry(6000, 6000), new THREE.ShadowMaterial({ opacity: 0.3 }));
+      this.ground.receiveShadow = true; this.scene.add(this.ground);
+    }
+    this.renderSun.visible = !!on; this.ground.visible = !!on;
+    this.camLight.intensity = on ? 0.35 : 1.7;
+    this.fitRenderLights();
+    this.scene.traverse((o) => { if (o.material) [].concat(o.material).forEach((m) => { m.needsUpdate = true; }); });
+    this.refreshMaterials();
+  }
+  /** Aim the shadow-casting sun at the model and size its shadow map to it. */
+  fitRenderLights() {
+    if (!this.renderSun) return;
+    const b = this.bounds(), c = b.getCenter(new THREE.Vector3()), r = Math.max(b.getSize(new THREE.Vector3()).length() / 2, 10);
+    this.renderSun.target.position.copy(c);
+    this.renderSun.position.copy(c).add(new THREE.Vector3(0.55, -0.45, 0.85).normalize().multiplyScalar(r * 4));
+    const sc = this.renderSun.shadow.camera; sc.left = -r * 1.5; sc.right = r * 1.5; sc.top = r * 1.5; sc.bottom = -r * 1.5; sc.near = r * 0.5; sc.far = r * 9; sc.updateProjectionMatrix();
+    this.ground.position.set(c.x, c.y, b.isEmpty() ? 0 : b.min.z - 0.01);
+  }
+  /** A PNG data URL of the current view at the given size. background: a CSS colour, or null for transparent. */
+  snapshot({ width = 1920, height = 1080, background = null, clean = true } = {}) {
+    const r = this.renderer, size = r.getSize(new THREE.Vector2()), pr = r.getPixelRatio(), cam = this.camera;
+    const hide = clean ? [this.sketchGroup, this.overlay, this.planeHandles, this.originGroup, this.faceHL, this.edgeSelGroup, this.measureGroup, this.manipGroup, this.profileGroup, this.previewGroup, this.gizmo.getHelper(), ...(this.opts.render ? [this.grid, this.originMarks] : [])] : [];
+    const was = hide.map((o) => o?.visible); hide.forEach((o) => o && (o.visible = false));
+    const aspect0 = this.persp.aspect;
+    r.setPixelRatio(1); r.setSize(width, height, false);
+    this.persp.aspect = width / height; this.persp.updateProjectionMatrix(); this.updateOrtho();
+    if (background) r.setClearColor(background, 1); else r.setClearColor(0x000000, 0);
+    r.setScissorTest(false); r.setViewport(0, 0, width, height);
+    cam.updateMatrixWorld(); r.render(this.scene, cam);
+    const url = r.domElement.toDataURL('image/png');
+    r.setClearColor(0x000000, 0);
+    hide.forEach((o, i) => o && (o.visible = was[i]));
+    r.setPixelRatio(pr); r.setSize(size.x, size.y, false);
+    this.persp.aspect = aspect0; this.persp.updateProjectionMatrix(); this.updateOrtho();
+    return url;
   }
   refreshMaterials() {
     for (const m of this.bodyGroup.children) {
       const sel = this.selected.has(m.userData.id);
       m.material = sel ? this.mats.sel : m.userData.id === this.hover ? this.mats.hover : m.userData.surface ? this.mats.surface : this.bodyMat(m.userData.id);
       const e = m.children[0];
-      e.visible = this.opts.edges;
+      e.visible = this.opts.edges && !this.opts.render;
       e.material = sel ? this.mats.edgeSel : this.mats.edge;
     }
     const clip = this.section ? [this.section.plane] : null;
@@ -371,7 +428,8 @@ export class Viewport {
     }
     this.mats.body.wireframe = this.mats.sel.wireframe = this.mats.hover.wireframe = this.opts.wire;
     for (const mm of Object.values(this.colorMats || {})) mm.wireframe = this.opts.wire;
-    this.grid.visible = this.opts.grid && !this.hideGround;
+    this.grid.visible = this.opts.grid && !this.hideGround && !this.opts.render;
+    if (this.originMarks) this.originMarks.visible = !this.opts.render;
     if (this.bedObj) this.bedObj.visible = this.opts.bed;
   }
 
@@ -394,6 +452,12 @@ export class Viewport {
     return { face: true, id, point: hit.point.toArray().map(r4), normal: n, tris: face.tris, mesh: hit.object };
   }
   // Closest mesh vertex to the cursor (within `px` pixels) or the surface hit: {point, vertex, id}
+  /** Where the mouse ray meets the horizontal plane z = `z` (for picking in empty space): [x, y, z] or null. */
+  pickHorizontal(ev, z = 0) {
+    this.setRay(ev);
+    const p = new THREE.Vector3();
+    return this.ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -z), p) ? p.toArray() : null;
+  }
   pickSnap(ev, px = 12) {
     this.setRay(ev);
     const hit = this.ray.intersectObjects(this.bodyGroup.children, false)[0];

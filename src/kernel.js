@@ -385,6 +385,12 @@ function sketchOutline3D(sk, t) {
   return pl.map(([u, v]) => [o[0] + x[0] * u + y[0] * v, o[1] + x[1] * u + y[1] * v, o[2] + x[2] * u + y[2] * v]);
 }
 function sketchPath3D(sk) {
+  if (sk.type === 'sketch3d') { // a 3D sketch is a polyline through points in space
+    const pts = (sk.params.points || []).map((q) => [+q[0] || 0, +q[1] || 0, +q[2] || 0]);
+    if (pts.length < 2) throw new Error(`${sk.name} needs at least two points`);
+    const closed = !!sk.params.closed && pts.length > 2;
+    return { closed, pts: sk.params.smooth && !closed ? smoothPath(pts, 3) : pts };
+  }
   const sh = sk.params.shapes.find((s) => s.t === 'path' && s.open) || sk.params.shapes.find((s) => s.t === 'path' || s.t === 'circle' || s.t === 'rect' || s.t === 'ngon');
   if (!sh) throw new Error(`${sk.name} has no path (draw a Path or any shape)`);
   const closed = !sh.open;
@@ -717,6 +723,7 @@ export function rebuild(features, count, opts = {}) {
       switch (f.type) {
         case 'primitive': addBody(f.id, makePrimitive(p, t), f.name); break;
         case 'sketch': sketches[f.id] = f; break;
+        case 'sketch3d': sketches[f.id] = f; break; // used as a path by Sweep, Pipe and Pattern
         case 'plane': break; // construction geometry only (see resolvePlanes)
         case 'extrude': {
           let { cs, sk } = solidFromSketch(f);
@@ -1109,6 +1116,17 @@ export function rebuild(features, count, opts = {}) {
           }
           if (best.isEmpty()) throw new Error('Reducing removed the whole body; lower the deviation');
           b.m = best;
+          break;
+        }
+        case 'mclean': {
+          // clean a mesh body: weld nearly coincident vertices and drop stray fragments, then rebuild the solid
+          const b = getBody(p.body);
+          const me = b.m.getMesh(), np = me.numProp, soup = new Float32Array(me.triVerts.length * 3);
+          for (let i = 0; i < me.triVerts.length; i++) for (let k = 0; k < 3; k++) soup[i * 3 + k] = me.vertProperties[me.triVerts[i] * np + k];
+          const fixed = repairSoup(soup, { tolerance: Math.max(0, +p.tolerance || 0), minShell: Math.max(0, +p.minShell || 0) });
+          const m2 = manifoldFromSoup(fixed.soup, t);
+          if (m2.isEmpty()) throw new Error('Cleaning left nothing: lower the piece size limit');
+          b.m = m2;
           break;
         }
         case 'mseparate': {
