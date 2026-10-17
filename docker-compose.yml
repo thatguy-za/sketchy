@@ -6,9 +6,6 @@ services:
     ports:
       - "8080:8080" # exposing this to the internet? bind it to 127.0.0.1 and use an HTTPS reverse proxy: see docs/SECURITY.md
     # environment:
-    #   # create the first administrator before anyone can open the page (see docs/SECURITY.md); remove the password afterwards
-    #   ADMIN_USER: "admin"
-    #   ADMIN_PASSWORD: "choose-a-long-password"
     #   TRUST_PROXY: "false"   # only when the port is published directly rather than behind a proxy
     #   # the user and group the server runs as (and that own the saved designs). Defaults to 1000:1000; set them to the
     #   # output of `id -u` and `id -g` if you store the data in a folder on your computer

@@ -14,7 +14,7 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 
    A Cloudflare Tunnel or Traefik works too. The proxy should pass `X-Forwarded-Proto` and the client address (`X-Forwarded-For` or `CF-Connecting-IP`). Caddy and Cloudflare do.
 2. **Only the proxy reaches the container.** Bind the port to the loopback address in `docker-compose.yml`: `"127.0.0.1:8080:8080"`.
-3. **Create the first admin yourself.** On a fresh install whoever opens the page first becomes the administrator. Set `ADMIN_USER` and `ADMIN_PASSWORD` in the compose file (see below) so the account exists before the page is reachable, or create it with `docker exec sketchy node server.js create-user NAME --admin`. Remove `ADMIN_PASSWORD` from the file afterwards.
+3. **Create the first account straight away.** On a fresh install whoever opens the page first becomes the administrator, so open it and sign up yourself before you share the address or publish the port. (If you prefer, create it from the command line instead: `docker exec sketchy node server.js create-user NAME --admin`.)
 4. **Keep sign-up closed** (the default) unless you want strangers to have accounts.
 5. **Update regularly:** `docker compose pull && docker compose up -d`.
 
@@ -22,7 +22,6 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ADMIN_USER`, `ADMIN_PASSWORD` | none | Creates the first administrator on a fresh install. Ignored once any account exists. |
 | `TRUST_PROXY` | trust private addresses | Set `false` if the container port is reachable directly. Forwarded addresses are then ignored, so a client can't pretend to be someone else to dodge limits. Leave it unset behind a proxy, or every visitor looks like the proxy. |
 | `MAX_DESIGN_MB` | `64` | Largest single design (or draft) the server accepts. `0` turns the limit off. |
 | `USER_QUOTA_MB` | `2048` | Starting value for the default storage per account (`0` = no limit). Admins change the default, and each person's own limit, under Server settings → Users. |
