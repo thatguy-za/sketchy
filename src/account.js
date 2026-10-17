@@ -142,6 +142,39 @@ function secondStep(page, ticket, back) {
   });
 }
 
+/**
+ * The page an assistant (Claude, ChatGPT...) sends you to when you add Sketchy as a connector: shows who is asking and lets you allow
+ * or refuse. Needs you signed in first (ensureSignedIn has run). Ends by sending the browser back to the assistant.
+ */
+export async function oauthConsent() {
+  const q = new URLSearchParams(location.search);
+  const params = { client_id: q.get('client_id') || '', redirect_uri: q.get('redirect_uri') || '', code_challenge: q.get('code_challenge') || '', code_challenge_method: q.get('code_challenge_method') || '', state: q.get('state') || '' };
+  const page = document.createElement('div');
+  page.className = 'auth-page';
+  document.body.appendChild(page);
+  const card = (inner) => (page.innerHTML = `<div class="auth-card" role="dialog" aria-label="Connect an assistant"><div class="auth-brand">${LOGO}<b>Sketchy</b></div>${inner}</div>`);
+  const info = await call('GET', `/oauth/client?client_id=${encodeURIComponent(params.client_id)}&redirect_uri=${encodeURIComponent(params.redirect_uri)}`);
+  if (!info.ok || q.get('response_type') !== 'code') {
+    card(`<h1>Can't connect</h1><p class="auth-sub">${esc(info.data?.error || 'This connection request is not valid. Start again from the assistant.')}</p><div class="switch"><a href="/">Open Sketchy</a></div>`);
+    return;
+  }
+  card(`<h1>Connect ${esc(info.data.name)}?</h1>
+    <p class="auth-sub"><b>${esc(info.data.name)}</b> wants to view and change your designs in Sketchy, signed in as <b>${esc(acct.user)}</b>. It can create designs, edit them and export them, but it can't see your password or other people's designs.</p>
+    <p class="auth-sub">You will be sent back to <b>${esc(info.data.host)}</b>. Only allow this if you just started it from there.</p>
+    <div class="form-err" role="alert"></div>
+    <div class="oauth-actions"><button class="btn primary" id="oa-allow" type="button">Allow</button><button class="btn" id="oa-deny" type="button">Cancel</button></div>
+    <div class="switch">You can disconnect it any time under Account, then AI assistants.</div>`);
+  const go = async (deny) => {
+    page.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    const r = await call('POST', '/oauth/approve', { ...params, deny });
+    if (!r.ok) { page.querySelector('.form-err').textContent = r.data?.error || 'Something went wrong.'; page.querySelectorAll('button').forEach((b) => (b.disabled = false)); return; }
+    location.assign(r.data.redirect);
+  };
+  page.querySelector('#oa-allow').onclick = () => go(false);
+  page.querySelector('#oa-deny').onclick = () => go(true);
+  page.querySelector('#oa-allow').focus();
+}
+
 /** When the server needs accounts and nobody is signed in, show the sign-up / login page and wait for it. */
 export async function ensureSignedIn() { if (acct.server && !acct.user) await showAuth(); }
 
@@ -214,7 +247,7 @@ export async function showAccount(startTab = 'profile') {
       </section>
       <section class="ac-pane" role="tabpanel" id="pane-ai" aria-labelledby="tab-ai" hidden>
         <h3>AI assistants (MCP)</h3>
-        <p class="hint">Let Claude, ChatGPT or any MCP-capable assistant build designs in <b>your</b> account. Each token only works for you, can be revoked at any time, and every change becomes a new version you can roll back.</p>
+        <p class="hint">Let Claude, ChatGPT or any MCP-capable assistant build designs in <b>your</b> account. Claude and ChatGPT connect by themselves (steps below, no token needed); other tools use a token. Everything is private to you, can be disconnected at any time, and every change becomes a new version you can roll back.</p>
         <div class="mcp-url"><span>Server URL</span><code>${esc(mcpUrl)}</code><button class="btn sm" id="mc-copyurl" type="button">Copy</button></div>
         <div id="mc-off" class="ac-warn" hidden>MCP access is turned off on this server by the administrator.</div>
         <div id="mc-list" class="mcp-list">Loading…</div>
@@ -317,15 +350,30 @@ export async function showAccount(startTab = 'profile') {
     const note = tok ? '' : '<p class="hint">Create a token above first and these steps fill in your token. Until then <b>YOUR_TOKEN</b> stands in for it.</p>';
     const needHttps = secure ? '' : `<p class="ac-warn">You are on <b>${esc(location.origin)}</b>, which isn't a public https address. Claude's website, ChatGPT and other web assistants call Sketchy from their own servers, so they can't reach it. Either <a href="https://github.com/thatguy-za/sketchy/blob/main/docs/HTTPS.md" target="_blank" rel="noopener">put Sketchy behind https</a> or use the local option below.</p>`;
     const sections = [
-      ['Claude', `<p>Use the Claude desktop app. Tokens are accepted only in the <code>Authorization</code> header (never in the address), and Claude's website connector screen has no place to put a header, so it can't connect.</p>${note}
+      ['Claude', `<p>Works in Claude on the web and in the Claude desktop app. You don't need a token: Claude signs in to Sketchy itself.</p>${needHttps}
         <ol>
-          <li>Install <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> if you don't have it, and create a token above (name it <em>Claude</em>).</li>
-          <li>In the Claude desktop app open <b>Settings</b>, then <b>Developer</b>, then <b>Edit Config</b>.</li>
-          <li>Merge this into the file that opens, then save it:${code(json({ mcpServers: { sketchy: { command: 'npx', args: ['-y', 'mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${t}`] } } }))}</li>
-          <li>Quit Claude completely and open it again. Sketchy appears in the tools list of a new chat.</li>
+          <li>In Claude open <b>Settings</b>, then <b>Connectors</b>.</li>
+          <li>Choose <b>Add custom connector</b>.</li>
+          <li>Name it <em>Sketchy</em> and paste this into <b>Remote MCP server URL</b>:${code(mcpUrl)}</li>
+          <li>Click <b>Add</b>, then <b>Connect</b>. Sketchy opens: sign in if asked, then click <b>Allow</b>.</li>
+          <li>Start a new chat, open the connectors menu (the <b>+</b> button by the message box) and switch <b>Sketchy</b> on.</li>
           <li>Ask for something: <em>“Make a 60×30×8 mm bracket with two 10 mm holes and call it Bracket.”</em> Then open <b>Bracket</b> in your library.</li>
-        </ol>${secure ? '' : needHttps}`],
-      ['ChatGPT', `<p>ChatGPT's custom connector screen offers no-sign-in or OAuth, as far as we know, and Sketchy no longer takes a token in the address, so it can't connect that way. If your plan lets you add an <code>Authorization</code> header to a custom connector, use the URL and header under <b>Any other MCP client</b>. Otherwise use Claude desktop, Cursor, VS Code or Gemini CLI below.</p>${note}`],
+        </ol>
+        <details class="mcp-sub"><summary>Sketchy only on this computer (no https address)? Use the desktop app with a token</summary>
+          <ol>
+            <li>Install <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a>, then create a token above (name it <em>Claude</em>).</li>
+            <li>In the Claude desktop app open <b>Settings</b>, then <b>Developer</b>, then <b>Edit Config</b>, and merge this in:${code(json({ mcpServers: { sketchy: { command: 'npx', args: ['-y', 'mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${t}`] } } }))}</li>
+            <li>Quit Claude completely and open it again.</li>
+          </ol>${note}
+        </details>`],
+      ['ChatGPT', `<p>Needs a public https address and a ChatGPT plan that offers custom connectors. Menu names change between releases, so look for the closest match. No token needed.</p>${needHttps}
+        <ol>
+          <li>In ChatGPT open <b>Settings</b>, then <b>Connectors</b> (or <b>Apps</b>), then <b>Advanced settings</b>, and turn on <b>Developer mode</b>.</li>
+          <li>Back in Connectors choose <b>Create</b>.</li>
+          <li>Name it <em>Sketchy</em>, paste this as the <b>MCP server URL</b>, and set authentication to <b>OAuth</b>:${code(mcpUrl)}</li>
+          <li>Tick the box confirming you trust the server, then click <b>Create</b>. Sketchy opens: sign in if asked, then click <b>Allow</b>.</li>
+          <li>In a new chat, add <b>Sketchy</b> from the tools menu under the message box, then ask for a part to be built.</li>
+        </ol>`],
       ['Gemini CLI', `<ol><li>Create a token above.</li><li>Open <code>~/.gemini/settings.json</code> and add:${code(json({ mcpServers: { sketchy: { httpUrl: mcpUrl, headers: hdr } } }))}</li><li>Start <code>gemini</code> and run <code>/mcp</code> to check that <b>sketchy</b> is connected.</li></ol>${note}`],
       ['Cursor', `<ol><li>Create a token above.</li><li>Open <b>Settings</b>, then <b>MCP</b>, then <b>Add new MCP server</b> (this edits <code>~/.cursor/mcp.json</code>), and add:${code(json({ mcpServers: { sketchy: { url: mcpUrl, headers: hdr } } }))}</li><li>Turn <b>sketchy</b> on in the MCP list, then ask the agent to build a part.</li></ol>${note}`],
       ['VS Code (GitHub Copilot)', `<ol><li>Create a token above.</li><li>Run <b>MCP: Open User Configuration</b> from the command palette and add:${code(json({ servers: { sketchy: { type: 'http', url: mcpUrl, headers: hdr } } }))}</li><li>Open Copilot chat in <b>Agent</b> mode, check <b>sketchy</b> under the tools button, and ask for a part.</li></ol>${note}`],
@@ -340,14 +388,14 @@ export async function showAccount(startTab = 'profile') {
     if (!t.ok) { list.textContent = t.data?.error || 'Could not load tokens.'; return; }
     m.el.querySelector('#mc-off').hidden = t.data.enabled;
     form.hidden = !t.data.enabled;
-    list.innerHTML = t.data.tokens.length ? '' : '<div class="ac-empty">No tokens yet. Create one to connect an assistant.</div>';
+    list.innerHTML = t.data.tokens.length ? '' : '<div class="ac-empty">No connected apps or tokens yet. Claude and ChatGPT connect with the steps below; create a token for other tools.</div>';
     for (const k of t.data.tokens) {
       const row = document.createElement('div');
       row.className = 'mcp-row';
-      row.innerHTML = `<span class="mcp-ico">${uicon('key', 16, 1.6)}</span><div class="mcp-info"><b>${esc(k.name)}</b>${k.paused ? ` <em class="adm warnb">paused</em>` : ''}<span>Created ${when(k.created)} · Last used ${when(k.lastUsed)}${k.paused ? ` · Paused ${when(k.paused.at)} after repeated problems (${esc(k.paused.reason)})` : ''}</span></div>${k.paused ? '<button class="btn sm" type="button" data-resume>Resume</button>' : ''}<button class="btn sm danger" type="button" data-revoke>Revoke</button>`;
+      row.innerHTML = `<span class="mcp-ico">${uicon('key', 16, 1.6)}</span><div class="mcp-info"><b>${esc(k.name)}</b>${k.paused ? ` <em class="adm warnb">paused</em>` : ''}<span>${k.app ? 'Connected app · ' : ''}Created ${when(k.created)} · Last used ${when(k.lastUsed)}${k.paused ? ` · Paused ${when(k.paused.at)} after repeated problems (${esc(k.paused.reason)})` : ''}</span></div>${k.paused ? '<button class="btn sm" type="button" data-resume>Resume</button>' : ''}<button class="btn sm danger" type="button" data-revoke>Revoke</button>`;
       row.querySelector('[data-resume]')?.addEventListener('click', async () => { await call('POST', '/mcp/tokens/' + encodeURIComponent(k.id) + '/resume', {}); loadTokens(); });
       row.querySelector('[data-revoke]').onclick = async () => {
-        if (!(await confirmBox({ title: 'Revoke token', message: `Revoke "${k.name}"? Assistants using it will lose access immediately.`, ok: 'Revoke', danger: true }))) return;
+        if (!(await confirmBox({ title: k.app ? 'Disconnect app' : 'Revoke token', message: `${k.app ? 'Disconnect' : 'Revoke'} "${k.name}"? It will lose access immediately.`, ok: k.app ? 'Disconnect' : 'Revoke', danger: true }))) return;
         await call('DELETE', '/mcp/tokens/' + encodeURIComponent(k.id)); out.innerHTML = ''; loadTokens();
       };
       list.appendChild(row);

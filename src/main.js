@@ -17,7 +17,7 @@ import { repairSoup, describeRepair } from './meshrepair.js';
 import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
 import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, edgeRef, planarFace, norm as vnorm } from './edges.js';
-import { acct, call, refreshAccount, ensureSignedIn, requireLogin, showAuth, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showAccount, openUserMenu, showAdmin } from './account.js';
+import { acct, call, refreshAccount, ensureSignedIn, oauthConsent, requireLogin, showAuth, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showAccount, openUserMenu, showAdmin } from './account.js';
 import { evalExpr, resolveParams, applyConfig, resolveFeature, isPlainNumber, NAME_RE, RESERVED } from './params.js';
 import { saveDialog, askName, confirmBox, alertBox, chooseFolder, safeName as fileSafeName } from './files.js';
 import { UNIT_TABLE, UNIT_NAMES, setUnits, getUnits, lenF, dispStr, fmtLen, fmtArea, fmtVolume, niceStep } from './units.js';
@@ -3365,6 +3365,7 @@ function bindKeys() {
 
 // ------------------------------------------------------------------ boot
 async function boot() {
+  if (location.pathname === '/oauth/authorize') { await refreshAccount(); await ensureSignedIn(); await oauthConsent(); return; } // an assistant is asking to connect: just the approval page
   const caret = uicon('caret', 7, 0).replace('class="ui"', 'class="ui caret"');
   const set = (id, html) => { $('#' + id).innerHTML = html; };
   set('btn-data', uicon('library', 18, 1.5));

@@ -178,9 +178,6 @@ try {
   check('the owner sees it as paused', !!listed?.paused);
   check('the owner can resume it', (await call('POST', `/api/mcp/tokens/${tok2.id}/resume`, {})).status === 200 && !(await call('GET', '/api/mcp/tokens')).json.tokens.find((t) => t.id === tok2.id).paused);
 
-  let limited = false;
-  for (let i = 0; i < 25; i++) if ((await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: 'Bearer nope' + i, 'content-type': 'application/json' }, body: '{}' })).status === 429) limited = true;
-  check('repeated bad tokens get rate limited', limited);
 
   console.log('Sessions and cookies');
   cookie = '';
@@ -201,6 +198,60 @@ try {
   check('a device can be signed out one by one', (await fetch(base + `/api/sessions/${other.id}`, { method: 'DELETE', headers: { 'x-sketchy': '1', cookie: cookies.at(-1) } })).status === 200 && (await sessList(cookies.at(-1))).length === 2);
   check('"sign out other devices" leaves only this one', (await fetch(base + '/api/sessions/others', { method: 'POST', headers: { 'x-sketchy': '1', cookie: cookies.at(-1) } })).status === 200 && (await sessList(cookies.at(-1))).length === 1);
   cookie = cookies.at(-1);
+
+
+  console.log('OAuth for connectors');
+  const meta = await (await fetch(`${base}/.well-known/oauth-protected-resource`)).json();
+  check('protected-resource metadata points at /mcp and this server', meta.resource === `${base}/mcp` && meta.authorization_servers[0] === base, JSON.stringify(meta));
+  const asm = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json();
+  check('authorization-server metadata: PKCE S256, public clients, registration', asm.code_challenge_methods_supported?.[0] === 'S256' && asm.token_endpoint_auth_methods_supported?.[0] === 'none' && asm.registration_endpoint === `${base}/oauth/register`);
+  const noauth = await fetch(`${base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  check('an unauthenticated /mcp request points the client at the metadata', noauth.status === 401 && /resource_metadata="[^"]+\/\.well-known\/oauth-protected-resource"/.test(noauth.headers.get('www-authenticate') || ''));
+  let probesOk = true; for (let i = 0; i < 30; i++) if ((await fetch(`${base}/mcp`, { method: 'POST', body: '{}' })).status !== 401) probesOk = false;
+  check('token-less discovery requests are never rate limited as failures', probesOk);
+  const regPost = (body) => fetch(`${base}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  for (const bad of ['javascript:alert(1)', 'http://evil.example/cb', 'https://x.example/cb#frag', 'data:text/html,hi']) check(`registration refuses redirect ${bad}`, (await regPost({ client_name: 'X', redirect_uris: [bad] })).status === 400);
+  const reg = await (await regPost({ client_name: '<b>Claude</b>', redirect_uris: ['https://claude.example/callback'] })).json();
+  check('a client registers (name is cleaned)', /^skc_/.test(reg.client_id) && !/[<>]/.test(reg.client_name) && reg.token_endpoint_auth_method === 'none');
+  check('the approval page is served by the app', /<div id="app"|<script/.test(await (await fetch(`${base}/oauth/authorize?client_id=x`)).text()));
+  // sign in again (the lock-out section comes later)
+  cookie = ''; await call('POST', '/api/login', { username: 'boss', password: 'correct-horse-battery' });
+  const verifier = crypto.randomBytes(48).toString('base64url'), challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  const approve = (o) => call('POST', '/api/oauth/approve', { client_id: reg.client_id, redirect_uri: 'https://claude.example/callback', code_challenge: challenge, code_challenge_method: 'S256', state: 'st8', ...o });
+  check('the consent page can look the client up', (await call('GET', `/api/oauth/client?client_id=${reg.client_id}&redirect_uri=${encodeURIComponent('https://claude.example/callback')}`)).json.host === 'claude.example');
+  check('an unregistered redirect address is refused', (await approve({ redirect_uri: 'https://evil.example/cb' })).status === 400);
+  check('a request without PKCE is refused', (await approve({ code_challenge: undefined })).status === 400 && (await approve({ code_challenge_method: 'plain' })).status === 400);
+  check('an unknown client is refused', (await approve({ client_id: 'skc_nope' })).status === 400);
+  const denied = new URL((await approve({ deny: true })).json.redirect);
+  check('"Cancel" returns access_denied with the state', denied.searchParams.get('error') === 'access_denied' && denied.searchParams.get('state') === 'st8' && !denied.searchParams.get('code'));
+  const ok = new URL((await approve({})).json.redirect);
+  const code = ok.searchParams.get('code');
+  check('"Allow" returns a code with the state, to the registered address', !!code && ok.searchParams.get('state') === 'st8' && ok.origin === 'https://claude.example');
+  const tokenPost = (o) => fetch(`${base}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(o) });
+  const base2 = { grant_type: 'authorization_code', client_id: reg.client_id, redirect_uri: 'https://claude.example/callback' };
+  check('a wrong PKCE verifier is refused', (await tokenPost({ ...base2, code, code_verifier: 'x'.repeat(50) })).status === 400);
+  check('and that spent the code', (await tokenPost({ ...base2, code, code_verifier: verifier })).status === 400);
+  const code2 = new URL((await approve({})).json.redirect).searchParams.get('code');
+  check('a different redirect address at the token step is refused', (await tokenPost({ ...base2, redirect_uri: 'https://claude.example/other', code: code2, code_verifier: verifier })).status === 400);
+  const code3 = new URL((await approve({})).json.redirect).searchParams.get('code');
+  const tr = await tokenPost({ ...base2, code: code3, code_verifier: verifier });
+  const t1 = await tr.json();
+  check('the right code and verifier give tokens', tr.status === 200 && /^skm_/.test(t1.access_token) && /^skr_/.test(t1.refresh_token) && t1.expires_in === 3600 && tr.headers.get('cache-control') === 'no-store');
+  const mcpPing = (tk) => fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${tk}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) });
+  check('the access token works on /mcp', (await mcpPing(t1.access_token)).status === 200);
+  const listApps = (await call('GET', '/api/mcp/tokens')).json.tokens.filter((t) => t.app);
+  check('it shows up as a connected app the owner can revoke', listApps.length === 1 && /connected app/.test(listApps[0].name));
+  const r1 = await (await tokenPost({ grant_type: 'refresh_token', refresh_token: t1.refresh_token, client_id: reg.client_id })).json();
+  check('a refresh token gives a new pair', /^skm_/.test(r1.access_token) && r1.access_token !== t1.access_token);
+  check('the old access token stops working', (await mcpPing(t1.access_token)).status === 401);
+  check('the new one works', (await mcpPing(r1.access_token)).status === 200);
+  const replay = await tokenPost({ grant_type: 'refresh_token', refresh_token: t1.refresh_token, client_id: reg.client_id });
+  check('replaying an old refresh token is refused', replay.status === 400);
+  check('and it ends the whole connection', (await mcpPing(r1.access_token)).status === 401 && (await call('GET', '/api/mcp/tokens')).json.tokens.filter((t) => t.app).length === 0);
+
+  let limited = false;
+  for (let i = 0; i < 25; i++) if ((await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: 'Bearer nope' + i, 'content-type': 'application/json' }, body: '{}' })).status === 429) limited = true;
+  check('repeated bad tokens get rate limited', limited);
 
   console.log('Lock-out');
   cookie = '';

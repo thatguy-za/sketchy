@@ -24,7 +24,7 @@ ENV NODE_ENV=production DATA_DIR=/data PORT=8080 SKETCHY_DROP_ROOT=1
 COPY package*.json ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY server.js mcp.js mcp-tools.js mcp-validate.js mcp-pool.js mcp-worker.js ./
+COPY server.js oauth.js mcp.js mcp-tools.js mcp-validate.js mcp-pool.js mcp-worker.js ./
 COPY src ./src
 COPY --from=build --chown=node:node /data-empty /data
 VOLUME /data

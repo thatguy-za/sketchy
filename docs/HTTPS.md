@@ -103,4 +103,4 @@ Your MCP address is now `https://sketchy.example.com/mcp`. To lock Sketchy to th
 
 ## Connect your assistant
 
-Once you can open Sketchy over `https`, click your initial (top right) → **Account** → **AI assistants**. The server URL shown there is now your public address. Create a token and copy the snippet for your assistant. Tokens go in the `Authorization: Bearer` header only; Sketchy no longer accepts them in the address, so assistants that can't send a header (Claude's website, ChatGPT) can't connect. Use the Claude desktop app, Cursor, VS Code or Gemini CLI.
+Once you can open Sketchy over `https`, click your initial (top right) → **Account** → **AI assistants**. The server URL shown there is now your public address. Claude and ChatGPT connect without a token: add a custom connector with `https://sketchy.example.com/mcp` and approve it in Sketchy (the guide on that page has the steps). For other tools, create a token and copy the snippet; tokens go in the `Authorization: Bearer` header only. If Sketchy sits behind a proxy that rewrites the host name, set `PUBLIC_URL=https://sketchy.example.com` so the sign-in addresses it advertises are right.

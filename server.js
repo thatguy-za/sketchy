@@ -6,6 +6,7 @@
 //   node server.js make-admin <user>
 import { createMcp } from './mcp.js';
 import { createPool } from './mcp-pool.js';
+import { createOAuth } from './oauth.js';
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -358,11 +359,13 @@ const mcpHandle = createMcp({ storage: mcpStorage, pool: mcpPool, device: 'Claud
 const MCP_RATE = Math.max(1, +process.env.MCP_RATE_PER_MIN || 60);         // calls per minute for one token
 const MCP_STRIKES = 5, STRIKE_WINDOW = 10 * 60e3;                          // this many strikes in ten minutes pauses the token
 const mcpOrigins = (process.env.MCP_ALLOWED_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean); // browser origins allowed to call /mcp; none by default
+// OAuth, so assistants with an "Add custom connector" screen (Claude, ChatGPT) can connect: see oauth.js. PUBLIC_URL pins the address the metadata advertises.
+const oauth = await createOAuth({ dataDir, mcpTokens, saveMcp, users, send, readBody, readJSONBody, rate, log, sha, clientIp, isHttps, publicUrl: (process.env.PUBLIC_URL || '').replace(/\/+$/, '') });
 const mcpUser = (req) => {
   const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
   if (!m) return null;
   const h = sha(m[1]), id = Object.keys(mcpTokens).find((k) => mcpTokens[k].hash === h), ent = id && mcpTokens[id];
-  if (!ent || !users[ent.user]) return null;
+  if (!ent || !users[ent.user] || oauth.expired(ent)) return null; // an expired app token is refused so the app asks for a new one
   if (Date.now() - (ent.lastUsed || 0) > 60e3) { ent.lastUsed = Date.now(); saveMcp(); }
   return { user: ent.user, id, ent };
 };
@@ -389,11 +392,14 @@ async function mcpEndpoint(req, res, url) {
   if (!settings.allowMcp) return send(res, 403, { error: 'MCP access is turned off on this server.' });
   const ip = clientIp(req), who = url.pathname === '/mcp' ? mcpUser(req) : null;
   if (!who) {
-    const wait = rate('mcpfail:' + ip, 20, 15 * 60e3);
-    log('mcp_auth_failed', ip);
-    if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many attempts. Try again later.' }); }
-    res.setHeader('www-authenticate', 'Bearer realm="sketchy"');
-    return send(res, 401, { error: 'Missing or invalid MCP token. Create one under Account in Sketchy and send it as "Authorization: Bearer <token>".' });
+    const presented = !!req.headers.authorization; // a request with no token at all is just a connector discovering how to sign in: not counted as a failure
+    if (presented) {
+      const wait = rate('mcpfail:' + ip, 20, 15 * 60e3);
+      log('mcp_auth_failed', ip);
+      if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many attempts. Try again later.' }); }
+    }
+    res.setHeader('www-authenticate', `Bearer realm="sketchy", resource_metadata="${oauth.base(req)}/.well-known/oauth-protected-resource"${presented ? ', error="invalid_token"' : ''}`);
+    return send(res, 401, { error: 'Sign in needed. Add Sketchy as a connector in your assistant, or send an access token as "Authorization: Bearer <token>" (create one under Account in Sketchy).' });
   }
   if (who.ent.paused) return send(res, 403, { error: 'This token was paused after repeated problems (' + who.ent.paused.reason + '). Resume it under Account, then AI assistants.' });
   if (req.method !== 'POST') { res.setHeader('allow', 'POST'); return send(res, 405, { error: 'Use POST with a JSON-RPC body.' }); }
@@ -489,6 +495,7 @@ async function api(req, res, url) {
   }
 
   if (!user) return send(res, 401, { error: 'Sign in to continue.' });
+  if (p.startsWith('/api/oauth/') && await oauth.api(req, res, url, user)) return;
 
   // ---- change own password
   if (p === '/api/password') {
@@ -566,12 +573,12 @@ async function api(req, res, url) {
 
   // ---- MCP access tokens (own tokens only)
   if (p === '/api/mcp/tokens') {
-    if (req.method === 'GET') return send(res, 200, { enabled: settings.allowMcp, tokens: Object.entries(mcpTokens).filter(([, t]) => t.user === user).map(([id, t]) => ({ id, name: t.name, created: t.created, lastUsed: t.lastUsed || 0, paused: t.paused || null })) });
+    if (req.method === 'GET') return send(res, 200, { enabled: settings.allowMcp, tokens: Object.entries(mcpTokens).filter(([, t]) => t.user === user).map(([id, t]) => ({ id, name: t.name, created: t.created, lastUsed: t.lastUsed || 0, paused: t.paused || null, app: !!t.oauth })) });
     if (req.method === 'POST') {
       if (!settings.allowMcp) return send(res, 403, { error: 'MCP access is turned off on this server.' });
       const b = await readJSONBody(req, 1024);
       const nm = String(b?.name || '').trim().slice(0, 60) || 'Assistant';
-      if (Object.values(mcpTokens).filter((t) => t.user === user).length >= 10) return send(res, 400, { error: 'You can have up to 10 tokens. Revoke one first.' });
+      if (Object.values(mcpTokens).filter((t) => t.user === user && !t.oauth).length >= 10) return send(res, 400, { error: 'You can have up to 10 tokens. Revoke one first.' });
       const token = 'skm_' + crypto.randomBytes(32).toString('base64url');
       const id = crypto.randomUUID();
       mcpTokens[id] = { hash: sha(token), user, name: nm, created: Date.now(), lastUsed: 0 };
@@ -867,14 +874,15 @@ function harden(req, res, api) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://x');
-    const isMcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'), isApi = url.pathname.startsWith('/api/');
+    const isMcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'), isOauth = url.pathname.startsWith('/.well-known/oauth-') || url.pathname === '/oauth/register' || url.pathname === '/oauth/token', isApi = url.pathname.startsWith('/api/') || isOauth;
     harden(req, res, isMcp || isApi);
     const ip = clientIp(req), wait = rate((isMcp ? 'mcp:' : isApi ? 'api:' : 'static:') + ip, isMcp ? 600 : isApi ? 1500 : 900, 60e3);
     if (wait) { log('rate_limited', ip, url.pathname.slice(0, 40)); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
     if (isMcp) return await mcpEndpoint(req, res, url);
+    if (isOauth && await oauth.handle(req, res, url)) return;
     if (isApi) return await api(req, res, url);
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.setHeader('allow', 'GET, HEAD'); res.statusCode = 405; return res.end(); }
-    const p = path.normalize(path.join(root, url.pathname === '/' ? 'index.html' : url.pathname));
+    const p = path.normalize(path.join(root, url.pathname === '/' || url.pathname === '/oauth/authorize' ? 'index.html' : url.pathname)); // the approval page is part of the app
     if (p !== root && !p.startsWith(root + path.sep)) { res.statusCode = 403; return res.end(); }
     const body = await fs.readFile(p).catch(() => null);
     if (!body) { res.statusCode = 404; return res.end('not found'); }

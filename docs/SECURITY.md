@@ -29,6 +29,7 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 | `SESSION_MAX_DAYS` | `90` | The longest any sign-in can last, however often it is used. |
 | `MAX_SESSIONS_PER_USER` | `10` | Devices one person can be signed in on at once. The one unused longest is signed out. |
 | `AUTH_ATTEMPTS_PER_15MIN` | `20` | Sign-in, sign-up, password and code attempts one address may make in 15 minutes. |
+| `PUBLIC_URL` | from the request | The public address (`https://sketchy.example.com`) that the sign-in metadata for assistants advertises. Set it if a proxy changes the host name. |
 | `MCP_ALLOWED_ORIGINS` | none | Comma-separated browser origins (or `*`) allowed to call `/mcp` from a web page. By default no web page may; command-line and desktop assistants are unaffected. |
 | `MCP_RATE_PER_MIN` | `60` | Calls per minute for one AI assistant token (one person's tokens together get twice this). |
 | `MCP_WORKERS` | `2` | Worker threads that rebuild designs for assistants. |
@@ -45,7 +46,7 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 - Changing a password signs out every other device.
 - State-changing requests need a custom header, so other websites can't drive your session.
 - A strict Content-Security-Policy allows scripts and styles from the server's own files only (no inline scripts, no `style` attributes or tags), forbids framing, and sends no referrer. This limits the damage if a malicious design file ever puts markup on the page.
-- **AI assistants (MCP).** Tokens belong to one account, are shown once, and only their hash is kept. They are accepted only in the `Authorization` header, never in the address (addresses end up in logs and history). Design names are checked before any file is touched, and every tool argument is validated against its schema with limits on size, nesting and field names.
+- **AI assistants (MCP).** Tokens belong to one account, are shown once, and only their hash is kept. They are accepted only in the `Authorization` header, never in the address (addresses end up in logs and history). Assistants with a connector screen (Claude, ChatGPT) sign in with OAuth 2.1: dynamic registration for public clients only, authorization code with mandatory PKCE (S256), single-use codes that expire in 5 minutes, redirect addresses matched exactly against the registered ones, access tokens that last an hour, and refresh tokens that rotate (an old one used again ends the connection). Design names are checked before any file is touched, and every tool argument is validated against its schema with limits on size, nesting and field names.
 - **Heavy designs can't stall the server.** Everything an assistant asks that rebuilds a design runs in a worker thread with a time and memory limit; a runaway rebuild is stopped and its worker replaced, and each person can have only a few running at once.
 - **Misbehaving tokens are paused.** A token that keeps exceeding its rate limit, or keeps sending work that times out or runs out of memory, is paused after five strikes in ten minutes. Its owner sees "paused" under Account, then AI assistants, and can resume or revoke it.
 - **Sessions.** Sign-ins last 30 days of inactivity and never more than 90 days. Each person sees their signed-in devices under Account, then Security, and can sign any of them out. Over HTTPS the cookie uses the `__Host-` prefix, so a sibling subdomain or insecure page can't plant it.
@@ -54,7 +55,7 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 ## Things to know
 
 - **A lock-out can be used against you.** Anyone who knows a username can lock that account for a few minutes by guessing wrong passwords. Admins can clear lock-outs in Server settings. This is the price of stopping password guessing that comes from many addresses.
-- **Web assistants can't connect.** Claude's website connector screen and ChatGPT's custom connectors can't send a bearer header, and Sketchy no longer accepts a token in the address, so use the Claude desktop app (via `mcp-remote`), Cursor, VS Code, Gemini CLI or any client that sends headers. Revoke tokens you no longer use.
+- **Connecting an assistant means approving it.** Claude and ChatGPT register themselves (OAuth with PKCE) and send you to an approval page in Sketchy; anyone can register a client name, so the page shows the address you will be sent back to. Only approve a request you just started. Revoke connections and tokens you no longer use.
 - **Two-step sign-in can't be made mandatory yet**, and there is no single sign-on. If you need either, put an authenticating proxy (Authelia, Cloudflare Access, Tailscale) in front. AI assistant tokens skip the second step by design.
 - **Back up the `/data` volume.** It holds every design, account and token.
 
