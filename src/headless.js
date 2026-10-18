@@ -15,12 +15,13 @@ const round = (v, n = 3) => +Number(v).toFixed(n);
 export function evaluate(doc) {
   const ps = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
   const evalErr = {};
+  const scope = Object.assign((n) => ps.values[n], { names: () => Object.keys(ps.values) });
   const feats = doc.features.map((f) => {
-    const r = resolveFeature(f, (n) => ps.values[n], (ff, path) => (fieldKind(ff, path.split('.')[0]) === 'len' ? 'len' : 'num'));
+    const r = resolveFeature(f, scope, (ff, path) => (fieldKind(ff, path.split('.')[0]) === 'len' ? 'len' : 'num'));
     if (r.error) evalErr[f.id] = r.error;
     let ff = r.params === f.params ? f : { ...f, params: r.params };
     if (f.type === 'sketch') {
-      const rs = resolveSketch(ff, (n) => ps.values[n]);
+      const rs = resolveSketch(ff, scope);
       if (rs.error) evalErr[f.id] ||= rs.error;
       if (rs.params !== ff.params) ff = { ...ff, params: rs.params };
     }

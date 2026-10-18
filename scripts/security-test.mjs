@@ -5,10 +5,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import http from 'node:http';
+import net from 'node:net';
 
 const port = 8300 + Math.floor(Math.random() * 500), base = `http://127.0.0.1:${port}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sketchy-sec-'));
 const env = { ...process.env, PORT: String(port), DATA_DIR: dir, ADMIN_USER: 'boss', ADMIN_PASSWORD: 'correct-horse-battery', MAX_DESIGN_MB: '1', TRUST_PROXY: 'false', MCP_RATE_PER_MIN: '40', AUTH_ATTEMPTS_PER_15MIN: '300', MAX_SESSIONS_PER_USER: '3', MCP_ALLOWED_ORIGINS: 'https://allowed.example' };
+// A stand-in for the Have I Been Pwned range API: one known leaked password, and one prefix on which the "service" is down
+const sha1 = (t) => crypto.createHash('sha1').update(t).digest('hex').toUpperCase();
+const LEAKED = 'leaked-password-123', OFFLINE = 'offline-pass-1234';
+const seen = [];
+const fake = http.createServer((req, res) => {
+  const prefix = req.url.split('/').pop(); seen.push(prefix);
+  if (prefix === sha1(OFFLINE).slice(0, 5)) { res.statusCode = 500; return res.end('down'); }
+  res.end(`${sha1(LEAKED).slice(5)}:41\r\n0123456789ABCDEF0123456789ABCDEF012:0\r\n`);
+});
+await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+env.HIBP_URL = `http://127.0.0.1:${fake.address().port}/range/`;
 const srv = spawn(process.execPath, [process.env.SERVER_FILE || 'server.js'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let out = ''; srv.stdout.on('data', (d) => (out += d)); srv.stderr.on('data', (d) => (out += d));
 for (let i = 0; i < 50 && !out.includes('Sketchy on'); i++) await new Promise((r) => setTimeout(r, 100));
@@ -130,9 +143,88 @@ try {
   await call('PUT', '/api/projects/Noted', { features: [], v: 2 }, { 'x-note': encodeURIComponent('x'.repeat(500)) });
   const vers = (await call('GET', '/api/projects/Noted/versions')).json;
   check('the older version keeps its description in the history', vers[0].rev === 1 && vers[0].note === 'First pass with "quotes" <b>', JSON.stringify(vers[0]));
+  const v1 = (await call('GET', '/api/projects/Noted/versions/1')).json;
+  check('a kept version holds what was saved, not the autosaves made after it', v1 && v1.v === 1 && v1.x === undefined, JSON.stringify(v1));
   check('descriptions are capped at 200 characters', (await call('GET', '/api/projects')).json.find((x) => x.name === 'Noted').note.length === 200);
   await call('PUT', '/api/projects/Noted', { features: [], v: 3 });
+  await call('PUT', '/api/projects/Noted', { features: [], v: 4 }, { 'x-milestone': encodeURIComponent('Release') });
+  check('a milestone name is stored with the version', (await call('GET', '/api/projects')).json.find((x) => x.name === 'Noted').milestone === 'Release');
   check('a save without a description has none', (await call('GET', '/api/projects')).json.find((x) => x.name === 'Noted').note === '');
+
+  console.log('Design structure limits');
+  const put = (name, obj, raw) => call('PUT', '/api/projects/' + encodeURIComponent(name), raw ?? obj, {}, !!raw);
+  const feat = (i, extra = {}) => ({ id: 'f' + i, type: 'primitive', name: 'F' + i, params: { shape: 'box', ...extra } });
+  const many = await put('Many', { format: 'sketchy', features: Array.from({ length: 2500 }, (_, i) => feat(i)) });
+  check('too many features are refused with a reason', many.status === 400 && /2500 features/.test(many.json?.error || ''), many.text);
+  const pat = await put('Pat', { features: [{ id: 'p', type: 'pattern', name: 'P', params: { count: 1e9 } }] });
+  check('a pattern of a billion copies is refused', pat.status === 400 && /count/.test(pat.json?.error || ''), pat.text);
+  check('the reserved key __proto__ is refused', (await put('Proto', null, '{"features":[],"a":{"__proto__":{"x":1}}}')).status === 400);
+  let deep = {}; for (let i = 0; i < 40; i++) deep = { a: deep };
+  check('deep nesting is refused', (await put('Deep', { features: [], x: deep })).status === 400);
+  check('a feature list that is not a list is refused', (await put('Notlist', { features: { a: 1 } })).status === 400);
+  check('a feature with no id or type is refused', (await put('Noid', { features: [{ name: 'x' }] })).status === 400);
+  check('an expression that is far too long is refused', (await put('Longexpr', { features: [{ ...feat(1), exprs: { distance: 'a+'.repeat(2000) } }] })).status === 400);
+  const imp = await put('Imp', { features: [{ id: 'i', type: 'import', name: 'Part', params: { tris: 1, data: 'A'.repeat(5000) } }] });
+  check('an imported mesh that carries more data than it claims is refused', imp.status === 400 && /more data/.test(imp.json?.error || ''), imp.text);
+  const bigMesh = await put('Bigmesh', { features: [{ id: 'i', type: 'import', name: 'Part', params: { tris: 9e6, data: 'A' } }] });
+  check('too many imported triangles are refused', bigMesh.status === 400 && /triangles/.test(bigMesh.json?.error || ''), bigMesh.text);
+  check('an ordinary design with expressions and an import is accepted', (await put('Fine', { format: 'sketchy', features: [feat(1), { id: 'i', type: 'import', name: 'Part', params: { tris: 2, data: 'A'.repeat(96) } }, { ...feat(2), exprs: { sx: 'width*2' } }], params: [{ name: 'width', expr: '10', unit: 'length' }] })).status === 200);
+  check('autosave drafts are checked too', (await call('PUT', '/api/drafts/Many', { features: Array.from({ length: 2500 }, (_, i) => feat(i)) })).status === 400);
+  // a design that is already on disk (saved by an older version, or put there by hand) must not be handed to the replay workers either.
+  // This uses its own account so the calls do not count against the other MCP tests' rate limits.
+  await call('POST', '/api/admin/users', { username: 'viewer', password: 'quiet-purple-walrus-9912' });
+  const adminCookie = cookie; cookie = '';
+  await call('POST', '/api/login', { username: 'viewer', password: 'quiet-purple-walrus-9912' });
+  const tok0 = (await call('POST', '/api/mcp/tokens', { name: 'limits' })).json.token;
+  cookie = adminCookie;
+  const uid = JSON.parse(fs.readFileSync(path.join(dir, 'users.json'), 'utf8')).viewer.id;
+  fs.mkdirSync(path.join(dir, 'projects', uid), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'projects', uid, 'Crafty.json'), JSON.stringify({ format: 'sketchy', features: Array.from({ length: 2500 }, (_, i) => feat(i)) }));
+  const g0 = await (await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${tok0}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_design', arguments: { design: 'Crafty' } } }) })).json();
+  check('an assistant is not handed a crafted design on disk to replay', /cannot be opened by an assistant/.test(JSON.stringify(g0)), JSON.stringify(g0).slice(0, 200));
+
+  console.log('Host header');
+  const withHost = (h, port0 = port) => new Promise((resolve, reject) => { const r = http.request({ host: '127.0.0.1', port: port0, path: '/api/me', headers: { host: h } }, (rs) => { rs.resume(); rs.on('end', () => resolve(rs.statusCode)); }); r.on('error', reject); r.end(); });
+  check('a public-looking name is refused (DNS rebinding)', (await withHost('evil.example.com')) === 421);
+  check('localhost, an IP address and a one-word name are accepted', (await withHost('localhost')) === 200 && (await withHost('192.168.1.5:8080')) === 200 && (await withHost('nas')) === 200 && (await withHost('printer.local')) === 200 && (await withHost('[::1]:8080')) === 200);
+  const rawStatus = (reqText) => new Promise((resolve) => { const c = net.connect(port, '127.0.0.1', () => c.write(reqText)); let d = ''; c.on('data', (x) => { d += x; if (d.includes('\r\n')) { c.destroy(); resolve(+d.split(' ')[1]); } }); c.on('error', () => resolve(0)); });
+  check('a request with an empty or missing Host is refused', (await rawStatus('GET /api/me HTTP/1.1\r\nHost:\r\nConnection: close\r\n\r\n')) === 421);
+  const port2 = port + 700, dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'sketchy-host-'));
+  const srv2 = spawn(process.execPath, ['server.js'], { env: { ...env, PORT: String(port2), DATA_DIR: dir2, PUBLIC_URL: 'https://sketchy.example.com', ALLOWED_HOSTS: 'extra.example.org, Other.Example.Net' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out2 = ''; srv2.stdout.on('data', (d) => (out2 += d)); srv2.stderr.on('data', (d) => (out2 += d));
+  for (let i = 0; i < 50 && !out2.includes('Sketchy on'); i++) await new Promise((r) => setTimeout(r, 100));
+  try {
+    check('with PUBLIC_URL set, that name is accepted', (await withHost('sketchy.example.com', port2)) === 200 && (await withHost('SKETCHY.example.com:443', port2)) === 200);
+    check('ALLOWED_HOSTS adds more names', (await withHost('extra.example.org', port2)) === 200 && (await withHost('other.example.net', port2)) === 200);
+    check('localhost still works for the health check', (await withHost('127.0.0.1:8080', port2)) === 200 && (await withHost('localhost', port2)) === 200);
+    check('any other name or IP is refused', (await withHost('evil.example.com', port2)) === 421 && (await withHost('192.168.1.5', port2)) === 421 && (await withHost('nas', port2)) === 421);
+  } finally { srv2.kill(); }
+
+  console.log('Password hygiene');
+  cookie = ''; await call('POST', '/api/login', { username: 'boss', password: 'correct-horse-battery' });
+  const mk = (u, pw) => call('POST', '/api/admin/users', { username: u, password: pw });
+  check('breach checking is off by default', (await call('GET', '/api/admin/settings')).json.breachCheck === false && (await mk('pwoff', LEAKED)).status === 200);
+  check('an admin can turn it on', (await call('PUT', '/api/admin/settings', { breachCheck: true })).json.breachCheck === true);
+  const b1 = await mk('pwon', LEAKED);
+  check('a leaked password is refused, with a reason', b1.status === 400 && /data breach/.test(b1.json?.error || ''), b1.text);
+  check('a password that has not leaked is accepted', (await mk('pwfine', 'quiet-purple-walrus-7731')).status === 200);
+  check('a generated password is not sent for checking', (await call('POST', '/api/admin/users', { username: 'pwgen' })).status === 200);
+  check('choosing a leaked password when changing it is refused', (await call('POST', '/api/password', { current: 'correct-horse-battery', next: LEAKED })).status === 400);
+  check('if the service is down the password is accepted', (await mk('pwdown', OFFLINE)).status === 200);
+  check('the check only sends the first five characters of the hash', seen.length > 0 && seen.every((x) => /^[0-9A-F]{5}$/.test(x)), JSON.stringify(seen));
+  await call('PUT', '/api/admin/settings', { breachCheck: false });
+
+  console.log('Idle sign-out');
+  check('a bad idle time is refused', (await call('PUT', '/api/admin/settings', { idleMinutes: -3 })).status === 400 && (await call('PUT', '/api/admin/settings', { idleMinutes: 'x' })).status === 400);
+  check('the idle time can be set', (await call('PUT', '/api/admin/settings', { idleMinutes: 0.02 })).json.idleMinutes === 0.02);
+  cookie = ''; await call('POST', '/api/login', { username: 'boss', password: 'correct-horse-battery' });
+  check('a device in use stays signed in', !!(await call('GET', '/api/me')).json.user);
+  await new Promise((r) => setTimeout(r, 700));
+  check('still signed in while active', !!(await call('GET', '/api/me')).json.user);
+  await new Promise((r) => setTimeout(r, 1700));
+  check('a device left alone is signed out', !(await call('GET', '/api/me')).json.user);
+  cookie = ''; await call('POST', '/api/login', { username: 'boss', password: 'correct-horse-battery' });
+  check('and the admin can switch the timeout off again', (await call('PUT', '/api/admin/settings', { idleMinutes: 0 })).json.idleMinutes === 0);
 
   console.log('MCP');
   const tok = (await call('POST', '/api/mcp/tokens', { name: 'test' })).json.token;
@@ -276,7 +368,7 @@ try {
   const spoof = await call('POST', '/api/login', { username: 'friend', password: 'a-fine-password-1' }, { 'x-forwarded-for': '203.0.113.9' });
   check('a spoofed X-Forwarded-For does not escape the lock-out (TRUST_PROXY=false)', spoof.status === 429, String(spoof.status));
 } finally {
-  srv.kill();
+  srv.kill(); fake.close();
   fs.rmSync(dir, { recursive: true, force: true });
 }
 console.log(`\n${passed} passed, ${failed} failed`);

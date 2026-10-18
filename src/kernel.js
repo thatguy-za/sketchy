@@ -629,6 +629,25 @@ export function interference(bodies) {
   ms.forEach((m) => m && m.delete());
   return out;
 }
+/**
+ * What changed between two versions of a design: the volume only the new one has (added), only the old one has (removed) and
+ * what both have (kept). Each part comes back as a mesh { verts, tris, volume } or null when empty.
+ */
+export function compareBodies(oldBodies, newBodies) {
+  const own = [];
+  const keep = (m) => { own.push(m); return m; };
+  const toM = (b) => { try { return keep(new K.Manifold(new K.Mesh({ numProp: 3, vertProperties: b.verts, triVerts: b.tris }))); } catch { return null; } };
+  const union = (list) => { const ms = list.map(toM).filter((m) => m && !m.isEmpty()); return ms.length ? keep(K.Manifold.union(ms)) : null; };
+  const A = union(oldBodies), B = union(newBodies);
+  const out = (m) => { if (!m || m.isEmpty()) return null; const me = m.getMesh(); return { verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts), volume: m.volume() }; };
+  let added = null, removed = null, kept = null;
+  try {
+    added = out(B && (A ? keep(B.subtract(A)) : B));
+    removed = out(A && (B ? keep(A.subtract(B)) : A));
+    kept = out(A && B ? keep(A.intersect(B)) : null);
+  } finally { own.forEach((m) => { try { m.delete(); } catch { /* shared handle */ } }); }
+  return { added, removed, kept };
+}
 export function bboxOf(m) {
   const b = m.boundingBox();
   return { min: b.min, max: b.max };
@@ -669,6 +688,7 @@ export function rebuild(features, count, opts = {}) {
   const t = (o) => { garbage.push(o); return o; };
   const live = new Map(); // id -> {id,name,m}
   const errors = {};
+  const warnings = {}, notes = {}, lost = {}; // per feature: something worth knowing, what it did to which bodies, and which picked edges were not found
   const snaps = [];
   const sketchUsed = new Set();
   let captured = null;
@@ -703,6 +723,7 @@ export function rebuild(features, count, opts = {}) {
     return { cs, sk };
   };
   const overlaps = (a, b, pad = 1e-3) => a.min.every((v, k) => v <= b.max[k] + pad && a.max[k] >= b.min[k] - pad);
+  const names = (list) => list.map((b) => `"${b.name}"`).join(', ');
   const applyOp = (f, solid, op, target) => {
     if (opts.previewId && opts.previewId === f.id) {
       const me = solid.getMesh();
@@ -711,25 +732,39 @@ export function rebuild(features, count, opts = {}) {
     if (op === 'auto') {
       let best = null, bv = 0;
       for (const b of live.values()) { const v = t(b.m.intersect(solid)).volume(); if (v > bv) { bv = v; best = b; } }
-      if (best && bv > 1e-6 * Math.max(solid.volume(), 1e-9)) { if (preview && curF === f) preview.op = 'cut'; best.m = t(best.m.subtract(solid)); if (best.m.isEmpty()) live.delete(best.id); return; }
+      if (best && bv > 1e-6 * Math.max(solid.volume(), 1e-9)) {
+        if (preview && curF === f) preview.op = 'cut';
+        best.m = t(best.m.subtract(solid)); notes[f.id] = { op: 'cut', bodies: [best.id], text: `Automatic: cuts from ${names([best])}` };
+        if (best.m.isEmpty()) live.delete(best.id);
+        return;
+      }
       const sb = bboxOf(solid);
       const touch = [...live.values()].find((b) => overlaps(bboxOf(b.m), sb));
       if (preview && curF === f) preview.op = 'join';
-      if (touch) touch.m = t(touch.m.add(solid)); else addBody(f.id, solid, f.name);
+      if (touch) { touch.m = t(touch.m.add(solid)); notes[f.id] = { op: 'join', bodies: [touch.id], text: `Automatic: joins ${names([touch])}` }; }
+      else { addBody(f.id, solid, f.name); notes[f.id] = { op: 'new', bodies: [], text: 'Automatic: makes a new body (it does not touch anything)' }; }
       return;
     }
     if (op === 'cut') {
       const ids = !target || target === 'all' ? [...live.keys()] : [target];
+      const hit = [];
       for (const id of ids) {
-        const b = getBody(id);
+        const b = getBody(id), before = b.m.volume();
         b.m = t(b.m.subtract(solid));
+        if (Math.abs(before - (b.m.isEmpty() ? 0 : b.m.volume())) > 1e-9 * Math.max(before, 1)) hit.push(b);
         if (b.m.isEmpty()) live.delete(id);
       }
+      const all = ids.map((id) => live.get(id) || { name: 'a removed body' });
+      notes[f.id] = { op: 'cut', bodies: hit.map((b) => b.id), text: hit.length ? `Cuts from ${names(hit)}` : `Cuts from ${!target || target === 'all' ? 'all bodies' : names(all)}` };
+      if (!hit.length) warnings[f.id] = [{ text: 'The cut does not touch any body, so nothing was removed. Move or extend it so it overlaps the body.' }];
     } else if (op === 'join' || op === 'intersect') {
       const b = (target && live.get(target)) || [...live.values()][0];
-      if (!b) addBody(f.id, solid, f.name);
-      else b.m = t(op === 'join' ? b.m.add(solid) : b.m.intersect(solid));
-    } else addBody(f.id, solid, f.name);
+      if (!b) { addBody(f.id, solid, f.name); notes[f.id] = { op: 'new', bodies: [], text: 'No body to join, so this makes a new body' }; }
+      else {
+        b.m = t(op === 'join' ? b.m.add(solid) : b.m.intersect(solid));
+        notes[f.id] = { op, bodies: [b.id], text: `${op === 'join' ? 'Joins' : 'Intersects'} ${names([b])}${target && live.get(target) ? '' : ' (the first body, since none was chosen)'}` };
+      }
+    } else { addBody(f.id, solid, f.name); notes[f.id] = { op: 'new', bodies: [], text: 'Makes a new body' }; }
   };
 
   for (let i = 0; i < Math.min(count, features.length); i++) {
@@ -908,7 +943,7 @@ export function rebuild(features, count, opts = {}) {
             const todo = [];
             for (const e of edges) {
               const ch = matchChainNear(chains, e.pts, e.nrm);
-              if (!ch) throw new Error('An edge could not be found again after an earlier change — reselect the edges');
+              if (!ch) { (lost[f.id] ||= []).push(p.edges.indexOf(e)); continue; }
               for (const c of p.tangent ? connectedChains(chains, ch) : [ch]) if (!todo.includes(c)) todo.push(c);
             }
             for (const ch of todo) {
@@ -916,6 +951,11 @@ export function rebuild(features, count, opts = {}) {
               if (cut.m.isEmpty()) throw new Error('Size too large for this edge');
               b.m = t(cut.convex ? b.m.subtract(cut.m) : b.m.add(cut.m));
             }
+          }
+          if (lost[f.id]) {
+            const n = lost[f.id].length, tot = p.edges.length;
+            if (n === tot) throw new Error(`None of the ${tot} picked edge${tot > 1 ? 's' : ''} could be found any more, because an earlier feature changed the shape. Pick the edges again.`);
+            warnings[f.id] = [{ text: `${n} of ${tot} picked edges could not be found after an earlier change, so they were skipped.`, action: 'repick' }];
           }
           break;
         }
@@ -1386,5 +1426,5 @@ export function rebuild(features, count, opts = {}) {
   });
   garbage.forEach((o) => { try { o.delete(); } catch { /* shared handle */ } });
   const surfList = [...surfaces.values()].map((q) => { let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity; for (let i = 0; i < q.verts.length; i += 3) { x0 = Math.min(x0, q.verts[i]); x1 = Math.max(x1, q.verts[i]); y0 = Math.min(y0, q.verts[i + 1]); y1 = Math.max(y1, q.verts[i + 1]); z0 = Math.min(z0, q.verts[i + 2]); z1 = Math.max(z1, q.verts[i + 2]); } return { ...q, surface: true, bbox: { min: [x0, y0, z0], max: [x1, y1, z1] } }; });
-  return { bodies, surfaces: surfList, surfSnaps, errors, snaps, sketchUsed, captured, preview, shifted };
+  return { bodies, surfaces: surfList, surfSnaps, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted };
 }

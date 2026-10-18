@@ -442,6 +442,11 @@ export async function showAdmin(startTab = 'registration') {
         <h3>Sign-in protection</h3>
         <div class="ad-lock"><label>Lock out after<input type="number" id="ad-max" min="0" max="1000" step="1" inputmode="numeric"></label><span>failed sign-ins within</span><label><span class="sr-only">Minutes counted</span><input type="number" id="ad-win" min="1" max="10080" step="1" inputmode="numeric"></label><span>minutes, for</span><label><span class="sr-only">Lock-out minutes</span><input type="number" id="ad-lockmin" min="1" max="10080" step="1" inputmode="numeric"></label><span>minutes.</span></div>
         <div class="hint">Counted per address and per username. Use 0 failed sign-ins to turn lock-outs off. Behind a reverse proxy the real address is read from its forwarding header.</div>
+        <h3 class="mh3">Passwords and sessions</h3>
+        <label class="chk"><input type="checkbox" id="ad-breach"> Refuse passwords found in known data breaches</label>
+        <div class="hint">When someone picks a password, the first five characters of its SHA-1 hash are sent to the Have I Been Pwned service to see whether it has leaked. The password itself never leaves this server. If the service cannot be reached the password is accepted. Needs internet access from the server.</div>
+        <div class="ad-lock"><label>Sign people out after<input type="number" id="ad-idle" min="0" max="525600" step="1" inputmode="numeric"></label><span>minutes without use (0 = never)</span></div>
+        <div class="hint">Applies to each signed-in device. Connected AI assistants are not affected.</div>
         <h3 class="mh3">Locked out now</h3>
         <div id="ad-locks" class="ad-locks" role="status"><span class="hint">Nobody is locked out.</span></div>
         <div id="ad-msg-sec" class="hint" role="status"></div>
@@ -481,6 +486,13 @@ export async function showAdmin(startTab = 'registration') {
     msgSec.textContent = r.ok ? 'Sign-in protection saved.' : r.data?.error || 'Could not save.';
   };
   Object.values(lim).forEach((el) => (el.onchange = saveLimits));
+  const breach = $m('#ad-breach'), idle = $m('#ad-idle');
+  breach.checked = !!st.data?.breachCheck; idle.value = st.data?.idleMinutes ?? 0;
+  const savePolicy = async () => {
+    const r = await call('PUT', '/admin/settings', { breachCheck: breach.checked, idleMinutes: Math.max(0, +idle.value || 0) });
+    msgSec.textContent = r.ok ? 'Saved.' : r.data?.error || 'Could not save.';
+  };
+  breach.onchange = idle.onchange = savePolicy;
   const locks = $m('#ad-locks');
   const loadLocks = async () => {
     const r = await call('GET', '/admin/lockouts');

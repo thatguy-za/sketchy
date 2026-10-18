@@ -6,6 +6,10 @@ services:
     ports:
       - "8080:8080" # exposing this to the internet? bind it to 127.0.0.1 and use an HTTPS reverse proxy: see docs/SECURITY.md
     # environment:
+    #   PUBLIC_URL: "https://sketchy.example.com"   # the address people type. Set this when you use a domain name: a request for any other name is refused
+    #   ALLOWED_HOSTS: "nas.lan"                      # optional extra names, comma-separated
+    #   BREACH_CHECK: "true"                          # refuse passwords found in known data breaches (needs internet access)
+    #   IDLE_MINUTES: "0"                              # sign devices out after this many idle minutes (0 = never)
     #   TRUST_PROXY: "false"   # only when the port is published directly rather than behind a proxy
     #   # the user and group the server runs as (and that own the saved designs). Defaults to 1000:1000; set them to the
     #   # output of `id -u` and `id -g` if you store the data in a folder on your computer

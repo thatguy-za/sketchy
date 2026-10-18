@@ -4,6 +4,7 @@
 //   node server.js list-users
 //   node server.js reset-password <user> [new-password]   (generates one if omitted)
 //   node server.js make-admin <user>
+import { validateDesign } from './design-validate.js';
 import { createMcp } from './mcp.js';
 import { createPool } from './mcp-pool.js';
 import { createOAuth } from './oauth.js';
@@ -27,6 +28,27 @@ const DEFAULT_QUOTA_MB = process.env.USER_QUOTA_MB === undefined ? 2048 : +proce
 // TRUST_PROXY=false stops the server believing X-Forwarded-For / CF-Connecting-IP. Leave it unset behind a reverse proxy; set it
 // when the container's port is published straight to the internet (a client could then pretend to be any address).
 const TRUST_PROXY = !/^(0|false|no|off)$/i.test(process.env.TRUST_PROXY || '');
+
+// Host header allow-list. A web page on another site can make a visitor's browser talk to this server under the attacker's own name
+// (DNS rebinding), and a forged Host can poison the addresses the server hands out. So the Host must be one we expect:
+//   * with PUBLIC_URL or ALLOWED_HOSTS set, only those names, plus localhost / 127.0.0.1 / [::1] (the container health check);
+//   * with neither set (a home server reached by IP or a local name), any IP address, "localhost", names ending .local .lan .home.arpa
+//     .internal or .localdomain, and one-word names such as "nas". A public-looking name like evil.example.com is refused.
+// ALLOWED_HOSTS is a comma-separated list of extra names (host names only, no port).
+const hostOnly = (h) => { h = String(h || '').trim().toLowerCase(); if (h.startsWith('[')) { const e = h.indexOf(']'); return e > 0 ? h.slice(1, e) : ''; } return h.replace(/:\d*$/, '').replace(/\.$/, ''); };
+const publicHost = (() => { try { return process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).hostname.toLowerCase().replace(/^\[|\]$/g, '') : ''; } catch { return ''; } })();
+const extraHosts = String(process.env.ALLOWED_HOSTS || '').split(',').map((x) => hostOnly(x)).filter(Boolean);
+const STRICT_HOSTS = !!(publicHost || extraHosts.length);
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+const ANY_HOST = extraHosts.includes('*'); // ALLOWED_HOSTS=* switches the check off
+function hostOk(req) {
+  const h = hostOnly(req.headers.host);
+  if (!h) return false;
+  if (ANY_HOST) return true;
+  if (LOCAL_HOSTS.has(h) || h === publicHost || extraHosts.includes(h)) return true;
+  if (STRICT_HOSTS) return false;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':') /* an IPv6 address */ || !h.includes('.') || /\.(local|lan|home\.arpa|internal|localdomain)$/.test(h);
+}
 const log = (event, ip = '', extra = '') => console.log(`${new Date().toISOString()} ${event}${ip ? ' ip=' + ip : ''}${extra ? ' ' + extra : ''}`); // one line per security event, easy to feed to fail2ban
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png' };
 
@@ -64,6 +86,10 @@ let settings = await readJSON(settingsFile, {});
 // Open sign-up is a Server settings option (admins change it in the app). Until an admin has set it, sign-up is closed; an
 // ALLOW_REGISTRATION environment variable from an older setup is honoured once, as the starting value.
 if (settings.allowRegistration === undefined) { settings.allowRegistration = process.env.ALLOW_REGISTRATION === 'true'; await writeJSON(settingsFile, settings); }
+// Two sign-in policies an admin can change in Server settings. Both start off: a self-hosted server may have no route to the internet,
+// and an idle timeout is a matter of taste. BREACH_CHECK=true / IDLE_MINUTES=60 set the starting values from the environment.
+if (settings.breachCheck === undefined) settings.breachCheck = /^(1|true|yes|on)$/i.test(process.env.BREACH_CHECK || '');
+if (settings.idleMinutes === undefined) settings.idleMinutes = Math.max(0, +process.env.IDLE_MINUTES || 0);
 for (const [k, v] of Object.entries(sessions)) { // sessions made by an older version: give them the new limits
   v.created ||= Date.now(); v.last ||= v.created;
   v.exp = Math.min(v.exp, v.created + SESSION_MAX_MS, Date.now() + SESSION_MS);
@@ -117,6 +143,24 @@ const userRe = /^[a-z0-9_-]{3,32}$/;
 const COMMON_PW = new Set(['password', 'password1', 'password123', '12345678', '123456789', '1234567890', 'qwertyui', 'qwerty123', 'qwertyuiop', 'iloveyou', 'letmein1', 'admin123', 'welcome1', 'abc12345', '11111111', '00000000', 'changeme', 'sketchy123', 'sketchy1']);
 const pwOk = (p, username = '') => typeof p === 'string' && p.length >= 8 && p.length <= 200 && !COMMON_PW.has(p.toLowerCase()) && p.toLowerCase() !== String(username).toLowerCase();
 const pwMsg = 'Password must be at least 8 characters and not an obvious one (such as "password" or your username).';
+
+/**
+ * Has this password appeared in a known data breach? Uses the Have I Been Pwned range API: only the first five characters of the
+ * password's SHA-1 leave the server, never the password. Off unless an admin turns it on. If the service cannot be reached the
+ * password is accepted (a down service must not stop anyone signing up). Returns how many times it was seen, 0 if never or unknown.
+ */
+const HIBP_URL = process.env.HIBP_URL || 'https://api.pwnedpasswords.com/range/';
+async function breachedCount(pw) {
+  if (!settings.breachCheck) return 0;
+  const h = crypto.createHash('sha1').update(String(pw)).digest('hex').toUpperCase(), prefix = h.slice(0, 5), suffix = h.slice(5);
+  try {
+    const r = await fetch(HIBP_URL + prefix, { headers: { 'add-padding': 'true', 'user-agent': 'Sketchy password check' }, signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return 0;
+    for (const row of (await r.text()).split(/\r?\n/)) { const [sfx, n] = row.trim().split(':'); if (sfx === suffix) return +n || 0; }
+  } catch { /* offline or slow: accept */ }
+  return 0;
+}
+const breachMsg = 'That password has appeared in a known data breach. Choose a different one.';
 
 // Setting ADMIN_USER and ADMIN_PASSWORD creates the first account (an admin) on a fresh install, so nobody can claim it by
 // being first to open the page. Ignored once any account exists.
@@ -235,7 +279,9 @@ function currentUser(req) {
   if (!tok) return null;
   const k = sha(tok), s = sessions[k];
   if (!s || gone(s) || !users[s.user]) return null;
-  if (Date.now() - (s.last || 0) > 5 * 60e3) { s.last = Date.now(); saveSessions(); } // "last active", for the list of signed-in devices
+  const now = Date.now(), idle = (settings.idleMinutes || 0) * 60e3;
+  if (idle && now - (s.last || s.created || 0) > idle) { delete sessions[k]; saveSessions(); return null; } // nobody used this device for too long: sign it out
+  if (now - (s.last || 0) > Math.min(5 * 60e3, idle ? idle / 4 : Infinity)) { s.last = now; saveSessions(); } // "last active", for the list of signed-in devices
   return s.user;
 }
 /** Starts (or, with `keep`, renews) a session and puts it in an HttpOnly cookie. */
@@ -281,7 +327,7 @@ async function snapshotVersion(D, name, cur) { // keep the file about to be over
   if (!st) return;
   await fs.mkdir(dir, { recursive: true });
   await fs.copyFile(src, path.join(dir, `${cur.rev || 1}.json`));
-  await writeJSON(path.join(dir, `${cur.rev || 1}.meta`), { rev: cur.rev || 1, modified: cur.modified || st.mtimeMs, device: cur.device || '', size: st.size, note: cur.note || '' });
+  await writeJSON(path.join(dir, `${cur.rev || 1}.meta`), { rev: cur.rev || 1, modified: cur.modified || st.mtimeMs, device: cur.device || '', size: st.size, note: cur.note || '', milestone: cur.milestone || '' });
   const revs = (await fs.readdir(dir)).filter((f) => f.endsWith('.json')).map((f) => parseInt(f, 10)).sort((a, b) => b - a);
   for (const r of revs.slice(MAX_VERSIONS)) for (const e of ['.json', '.meta']) await fs.rm(path.join(dir, r + e), { force: true });
 }
@@ -310,6 +356,11 @@ async function checkQuota(username, incoming, replacing = 0) {
 }
 
 // ---------------------------------------------------------------- project storage (shared by the REST API and MCP)
+/** Parse a design and check its structure (see design-validate.js). Returns a message, or null when it is fine. */
+function checkDesign(text) {
+  let d; try { d = JSON.parse(text); } catch { return 'Invalid JSON'; }
+  return validateDesign(d);
+}
 class Conflict extends Error { constructor(seq) { super('conflict'); this.seq = seq; } }
 /**
  * Write a design. `seq` counts every write and is what concurrent editors compare; `rev` counts saved versions: an autosave
@@ -318,15 +369,18 @@ class Conflict extends Error { constructor(seq) { super('conflict'); this.seq = 
  */
 async function writeProject(username, name, objStr, device, ifSeq, opts = {}) {
   const D = dirs(username), file = path.join(D.proj, name + '.json');
+  const bad = checkDesign(objStr);
+  if (bad) throw Object.assign(new Error(bad), { code: 400, msg: bad });
   await fs.mkdir(D.proj, { recursive: true }); await fs.mkdir(D.draft, { recursive: true });
   const exists = await fs.stat(file).catch(() => null);
   await checkQuota(username, Buffer.byteLength(objStr), exists?.size || 0);
   const cur = await readMeta(D.proj, name);
   if (exists && ifSeq !== undefined && ifSeq !== '*' && +ifSeq !== cur.seq) throw Object.assign(new Conflict(cur.seq), { rev: cur.rev, modified: exists.mtimeMs, device: cur.device || '' });
   const rev = opts.auto && exists ? cur.rev || 1 : (cur.rev || 0) + 1, seq = (cur.seq || 0) + 1;
-  if (exists && !opts.auto) await snapshotVersion(D, name, { ...cur, modified: cur.modified || exists.mtimeMs });
+  // The file on disk is the saved version until an autosave first changes it, so keep it then (once); a later save finds it already kept.
+  if (exists && !cur.autosaved) await snapshotVersion(D, name, { ...cur, modified: cur.modified || exists.mtimeMs });
   await fs.writeFile(file, objStr);
-  await writeJSON(path.join(D.proj, name + '.meta'), { rev, seq, modified: Date.now(), device, note: opts.auto && exists ? cur.note || '' : opts.note || '' }); // a description belongs to the version that was saved with it
+  await writeJSON(path.join(D.proj, name + '.meta'), { rev, seq, modified: Date.now(), device, note: opts.auto && exists ? cur.note || '' : opts.note || '', milestone: opts.auto && exists ? cur.milestone || '' : opts.milestone || '', ...(opts.auto && exists ? { autosaved: true } : {}) }); // a description belongs to the version that was saved with it
   await fs.writeFile(path.join(D.proj, name + '.ver'), String(rev));
   await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
   return { rev, seq };
@@ -341,7 +395,9 @@ const mcpStorage = {
     if (!nameOk(name)) return null; // never build a file path from an unchecked name
     const D = dirs(u), raw = await fs.readFile(path.join(D.proj, name + '.json'), 'utf8').catch(() => null);
     if (raw === null) return null;
-    return { obj: JSON.parse(raw), rev: (await readMeta(D.proj, name)).seq };
+    const obj = JSON.parse(raw), bad = validateDesign(obj);
+    if (bad) throw new Error('This design cannot be opened by an assistant: ' + bad);
+    return { obj, rev: (await readMeta(D.proj, name)).seq };
   },
   async write(u, name, obj, device, rev) {
     if (!nameOk(name)) throw new Error('Invalid design name.');
@@ -443,6 +499,7 @@ async function api(req, res, url) {
       if (!settings.allowRegistration && !first) return send(res, 403, { error: 'Registration is disabled on this server.' });
       if (!userRe.test(username) || RESERVED.has(username)) return send(res, 400, { error: 'Username: 3–32 chars, a–z, 0–9, _ or -.' });
       if (!pwOk(password, username)) return send(res, 400, { error: pwMsg });
+      if (await breachedCount(password)) return send(res, 400, { error: breachMsg });
       if (users[username]) return send(res, 409, { error: 'That username is taken.' });
       users[username] = { id: crypto.randomUUID(), ...(await newHash(password)), created: Date.now(), lastLogin: Date.now(), admin: first };
       await saveUsers();
@@ -510,6 +567,7 @@ async function api(req, res, url) {
     const hash = await scrypt(String(b.current || ''), u.salt);
     if (!crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(u.hash))) return send(res, 401, { error: 'Current password is wrong.' });
     if (!pwOk(b.next, user)) return send(res, 400, { error: pwMsg });
+    if (await breachedCount(b.next)) return send(res, 400, { error: breachMsg });
     Object.assign(u, await newHash(b.next));
     log('password_changed', ip, `user=${user}`);
     dropSessions(user, tokenOf(req)); // sign out other devices
@@ -613,6 +671,8 @@ async function api(req, res, url) {
         const b = await readJSONBody(req, 1024);
         if (typeof b?.allowRegistration === 'boolean') settings.allowRegistration = b.allowRegistration;
         if (typeof b?.allowMcp === 'boolean') settings.allowMcp = b.allowMcp;
+        if (typeof b?.breachCheck === 'boolean') settings.breachCheck = b.breachCheck;
+        if (b && 'idleMinutes' in b) { const n = Number(b.idleMinutes); if (!Number.isFinite(n) || (n !== 0 && (n < 0.02 || n > 525600))) return send(res, 400, { error: 'Idle time must be 0 (never sign out) or a number of minutes up to 525600.' }); settings.idleMinutes = n; }
         if (b && 'defaultQuotaMb' in b) { const n = Number(b.defaultQuotaMb); if (!Number.isInteger(n) || n < 0 || n > 1e7) return send(res, 400, { error: 'Storage must be a whole number of megabytes from 0 (no limit) to 10000000.' }); settings.defaultQuotaMb = n; usageCache.clear(); }
         const lim = { maxFailedLogins: [0, 1000], failWindowMinutes: [1, 10080], lockoutMinutes: [1, 10080] };
         for (const [k, [lo, hi]] of Object.entries(lim)) if (b && k in b) {
@@ -634,6 +694,7 @@ async function api(req, res, url) {
       if (users[username]) return send(res, 409, { error: 'That username is taken.' });
       const generated = !b?.password, pw = generated ? crypto.randomBytes(9).toString('base64url') : String(b.password);
       if (!pwOk(pw, username)) return send(res, 400, { error: pwMsg });
+      if (!generated && await breachedCount(pw)) return send(res, 400, { error: breachMsg });
       users[username] = { id: crypto.randomUUID(), ...(await newHash(pw)), created: Date.now(), lastLogin: 0, admin: !!b?.admin };
       await saveUsers();
       return send(res, 200, { user: username, admin: !!b?.admin, ...(generated ? { password: pw } : {}) });
@@ -655,6 +716,7 @@ async function api(req, res, url) {
       const b = await readJSONBody(req, 1024);
       const pw = b?.password || crypto.randomBytes(9).toString('base64url');
       if (!pwOk(pw, target)) return send(res, 400, { error: pwMsg });
+      if (b?.password && await breachedCount(pw)) return send(res, 400, { error: breachMsg });
       Object.assign(users[target], await newHash(pw));
       dropSessions(target);
       await saveUsers(); await saveSessions();
@@ -718,7 +780,7 @@ async function api(req, res, url) {
     if (req.method === 'DELETE') { await fs.rm(f, { force: true }); await fs.rm(mf, { force: true }); return send(res, 200, {}); }
     if (req.method === 'PUT') {
       const body = await readBody(req, MAX_DESIGN_BYTES || 200e6);
-      try { JSON.parse(body.toString()); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
+      { const bad = checkDesign(body.toString()); if (bad) return send(res, 400, { error: bad }); }
       await checkQuota(user, body.length, (await fs.stat(f).catch(() => ({ size: 0 }))).size);
       await fs.writeFile(f, body);
       await writeJSON(mf, { device, base: +req.headers['x-base-rev'] || 0 });
@@ -752,7 +814,7 @@ async function api(req, res, url) {
       const list = await Promise.all(files.map(async (f) => {
         const n = f.slice(0, -5), st = await fs.stat(path.join(D.proj, f));
         const m = await readMeta(D.proj, n);
-        return { name: n, modified: st.mtimeMs, size: st.size, ver: m.rev || 1, seq: m.seq || 1, device: m.device || '', note: m.note || '', thumb: thumbs.has(n + '.jpg'), folder: fmap[n] || '' };
+        return { name: n, modified: st.mtimeMs, size: st.size, ver: m.rev || 1, seq: m.seq || 1, device: m.device || '', note: m.note || '', milestone: m.milestone || '', thumb: thumbs.has(n + '.jpg'), folder: fmap[n] || '' };
       }));
       return send(res, 200, list.sort((a, b) => b.modified - a.modified));
     }
@@ -815,7 +877,7 @@ async function api(req, res, url) {
       const thumb = typeof obj.thumb === 'string' && /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(obj.thumb);
       delete obj.thumb;
       let res2;
-      try { res2 = await writeProject(user, name, JSON.stringify(obj), device, req.headers['if-match'], { auto: req.headers['x-autosave'] === '1', note: cleanNote(req.headers['x-note']) }); }
+      try { res2 = await writeProject(user, name, JSON.stringify(obj), device, req.headers['if-match'], { auto: req.headers['x-autosave'] === '1', note: cleanNote(req.headers['x-note']), milestone: cleanNote(req.headers['x-milestone']) }); }
       catch (e) { if (e instanceof Conflict) return send(res, 409, { error: 'conflict', rev: e.rev, seq: e.seq, modified: e.modified, device: e.device }); throw e; }
       if (thumb && thumb[1].length < 400000) await fs.writeFile(path.join(D.proj, name + '.jpg'), Buffer.from(thumb[1], 'base64'));
       if (folderHdr !== null) { const F = await readFolders(D); if (folderHdr) { addFolder(F, folderHdr); F.map[name] = folderHdr; } else delete F.map[name]; await writeFolders(D, F); }
@@ -878,6 +940,7 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const isMcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'), isOauth = url.pathname.startsWith('/.well-known/oauth-') || url.pathname === '/oauth/register' || url.pathname === '/oauth/token', isApi = url.pathname.startsWith('/api/') || isOauth;
     harden(req, res, isMcp || isApi);
+    if (!hostOk(req)) { log('bad_host', clientIp(req), String(req.headers.host || '').slice(0, 60)); res.setHeader('content-type', 'text/plain'); res.statusCode = 421; return res.end('This address is not one this server answers to. Set PUBLIC_URL or ALLOWED_HOSTS to the address you use.'); }
     const ip = clientIp(req), wait = rate((isMcp ? 'mcp:' : isApi ? 'api:' : 'static:') + ip, isMcp ? 600 : isApi ? 1500 : 900, 60e3);
     if (wait) { log('rate_limited', ip, url.pathname.slice(0, 40)); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
     if (isMcp) return await mcpEndpoint(req, res, url);
@@ -892,8 +955,8 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith(path.join(root, 'assets') + path.sep)) res.setHeader('cache-control', 'public, max-age=31536000, immutable');
     else res.setHeader('cache-control', 'no-cache'); // the page itself is re-checked on every visit, so an upgrade shows up straight away
     res.end(body);
-  } catch (e) { if (e.code === 413) res.setHeader('connection', 'close'); /* the unread upload makes the connection unusable */ if (e.code !== 413) console.error(`${new Date().toISOString()} server_error ${e.stack || e}`); send(res, e.code === 413 ? 413 : 500, { error: e.code === 413 ? e.msg || 'File too large' : 'Server error' }); }
+  } catch (e) { if (e.code === 413) res.setHeader('connection', 'close'); /* the unread upload makes the connection unusable */ if (e.code !== 413) console.error(`${new Date().toISOString()} server_error ${e.stack || e}`); const known = e.code === 413 || (e.code === 400 && e.msg); send(res, known ? e.code : 500, { error: known ? e.msg || 'File too large' : 'Server error' }); }
 });
 server.requestTimeout = 5 * 60e3; server.headersTimeout = 30e3; server.keepAliveTimeout = 5e3; server.maxHeadersCount = 100;
-server.listen(port, () => console.log(`Sketchy on :${port}, data in ${dataDir}, registration ${settings.allowRegistration ? 'open' : 'closed'}${TRUST_PROXY ? '' : ', proxy headers ignored'}`));
+server.listen(port, () => { if (!STRICT_HOSTS) console.log('Host check: only IP addresses, localhost and local names are accepted. If you reach Sketchy by a public name, set PUBLIC_URL (or ALLOWED_HOSTS) to it.'); console.log(`Sketchy on :${port}, data in ${dataDir}, registration ${settings.allowRegistration ? 'open' : 'closed'}${TRUST_PROXY ? '' : ', proxy headers ignored'}`); });
 process.on('unhandledRejection', (e) => console.error(`${new Date().toISOString()} unhandled_rejection ${e?.stack || e}`));

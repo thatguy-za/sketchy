@@ -2,7 +2,7 @@ import './style.css';
 import * as THREE from 'three';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
-import { initKernel, rebuild, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference } from './kernel.js';
+import { initKernel, rebuild, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference, compareBodies } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { writeSTL } from './stl.js';
 import { readModelFile } from './importers.js';
@@ -28,7 +28,7 @@ import { smoothPath } from './solids.js';
 import { bedFit, overhangs, wallThickness } from './printcheck.js';
 import { MATERIALS, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
 import { resolveSketch } from './sketchdims.js';
-import { CON_GLYPH, CON_LABEL } from './sketchcons.js';
+import { CON_GLYPH, CON_LABEL, definedState } from './sketchcons.js';
 import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR } from './commands.js';
 
 const $ = (s) => document.querySelector(s);
@@ -101,16 +101,19 @@ const limit = () => (sketch ? sketch.index : doc.marker);
 // ------------------------------------------------------------------ rebuild / refresh
 let pending = false;
 function refresh() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; refreshNow(); }); } }
+const paramScope = Object.assign((n) => paramState.values[n], { names: () => Object.keys(paramState?.values || {}) });
+function refreshParamsNow() { paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig)); }
 function refreshNow() {
+  if (vp?.compareGroup && !/COMPARE/.test($('#props-wrap .title')?.textContent || '')) vp.setCompare(null); // a compare view never outlives its panel
   const pickF = dialog && defOf(doc.features[dialog.index])?.pickEdges;
   paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
   const evalErr = {};
   let feats = doc.features.map((f) => {
-    const r = resolveFeature(f, (n) => paramState.values[n], (ff, path) => (fieldKind(ff, path.split('.')[0]) === 'len' ? 'len' : 'num'));
+    const r = resolveFeature(f, paramScope, (ff, path) => (fieldKind(ff, path.split('.')[0]) === 'len' ? 'len' : 'num'));
     if (r.error) evalErr[f.id] = r.error;
     let ff = r.params === f.params ? f : { ...f, params: r.params };
     if (f.type === 'sketch') {
-      const rs = resolveSketch(ff, (n) => paramState.values[n]);
+      const rs = resolveSketch(ff, paramScope);
       if (rs.error) evalErr[f.id] ||= rs.error;
       if (rs.params !== ff.params) ff = { ...ff, params: rs.params };
     }
@@ -208,7 +211,7 @@ function resolveSelEdges() {
 }
 function updateEdgeView() {
   if (!vp) return;
-  if (dialog || sketch || measure) { vp.showEdges([], null); return; }
+  if (dialog || sketch || measure) { vp.showEdges(dialog ? LOSTCHAINS() : [], null); return; }
   const chains = resolveSelEdges();
   vp.showEdges(chains, edgeHover?.chain || null);
   if (chains.length) $('#hud').innerHTML = `<b>${chains.length} edge${chains.length > 1 ? 's' : ''} selected</b> — press F to fillet · use Chamfer in MODIFY · Esc to clear`;
@@ -565,8 +568,8 @@ function renderTimeline() {
   doc.features.forEach((f, i) => {
     if (i === shownMarker && !sketch) host.appendChild(mk());
     const el = document.createElement('div');
-    el.className = 'tl-item' + (i >= shownMarker ? ' off' : '') + (result.errors[f.id] ? ' err' : '') + (selSet.has(f.id) ? ' sel' : '') + (f.suppressed ? ' supp' : '');
-    el.title = f.name + (result.errors[f.id] ? ` — ${result.errors[f.id]}` : '');
+    el.className = 'tl-item' + (i >= shownMarker ? ' off' : '') + (result.errors[f.id] ? ' err' : result.warnings?.[f.id] ? ' warn' : '') + (selSet.has(f.id) ? ' sel' : '') + (f.suppressed ? ' supp' : '');
+    el.title = f.name + (result.errors[f.id] ? ` — ${result.errors[f.id]}` : '') + (result.warnings?.[f.id] ? ` — ${result.warnings[f.id].map((w) => w.text).join(' ')}` : '') + (result.notes?.[f.id] && !result.errors[f.id] ? ` — ${result.notes[f.id].text}` : '');
     el.innerHTML = ficon(fiName(f), 24);
     el.onclick = (e) => { if (tlDragged) { tlDragged = false; return; } selectFeature(f.id, e); };
     el.ondblclick = () => editFeature(i);
@@ -1105,7 +1108,7 @@ function commitNumber(i, path, text, fld) {
     if (fld.min !== undefined) val = Math.max(fld.min, val);
     if (fld.max !== undefined) val = Math.min(fld.max, val);
   } else {
-    try { val = evalExpr(text, (n) => paramState.values[n], isLen ? 'len' : 'num'); expr = text.trim(); }
+    try { val = evalExpr(text, paramScope, isLen ? 'len' : 'num'); expr = text.trim(); }
     catch (e) { return { ok: false, err: e.message }; }
   }
   const [k2, idx] = path.split('.');
@@ -1203,6 +1206,23 @@ function renderDialog() {
         n.title = r.ok ? '' : r.err;
         calc.textContent = r.ok && r.expr ? `= ${show(r.value)}` : r.ok ? '' : r.err;
         if (r.ok && (fld.key === 'kind' || def.gizmo)) setupGizmo();
+      };
+      n.oncontextmenu = (e) => {
+        e.preventDefault();
+        showMenu(e.clientX, e.clientY, [{ label: 'Make this a parameter…', run: async () => {
+          const cur = n.value.trim();
+          const used = new Set((doc.params || []).map((q) => q.name));
+          let k = 1; while (used.has('d' + k)) k++;
+          const unit = isLen ? 'length' : (fld.unit === 'deg' || /angle|deg/i.test(fld.label)) ? 'angle' : 'number';
+          const name = await askName({ title: 'Make a parameter', label: 'Parameter name', value: 'd' + k, ok: 'Create', raw: true, hint: `It starts at ${cur}. Change it later under Manage, Change Parameters, and every field that uses it follows.`,
+            validate: (t) => (!NAME_RE.test(t) ? 'Use letters, digits and _, starting with a letter.' : RESERVED.has(t) ? 'That name is already used for a function or unit.' : used.has(t) ? 'A parameter with that name exists.' : '') });
+          if (!name) return;
+          const plain = isPlainNumber(cur) ? cur : String(+((resolvedAt(f, path) ?? 0) / (isLen ? lenF() : 1)).toFixed(6));
+          doc.params = [...(doc.params || []), { name, expr: plain, unit, comment: '' }];
+          markDirty(); refreshParamsNow();
+          n.value = name; n.oninput();
+          toast(`Created parameter ${name} = ${plain}`);
+        } }]);
       };
       n.onkeydown = (e) => {
         if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
@@ -1415,11 +1435,39 @@ function bodyFieldPick(e) {
   renderDialog(); setupGizmo();
 }
 
+/** A short "what to do next" for the failures people hit most. */
+function errorHelp(msg) {
+  const rules = [
+    [/no closed profile/i, 'Close the shape in the sketch, or draw a rectangle or circle, then try again.'],
+    [/too large for this edge|size too large/i, 'Use a smaller radius or distance. It cannot be bigger than the faces next to the edge.'],
+    [/too thick|too large for this body/i, 'Use a thinner wall so it fits inside the shape.'],
+    [/behind the profile/i, 'Switch the direction with the flip option.'],
+    [/Taper/i, 'Turn off the other option, or use a smaller taper angle.'],
+    [/no longer exists|pick (them|it) again|reselect/i, 'Something this feature used was changed by an earlier step. Pick it again.'],
+  ];
+  return (rules.find(([re]) => re.test(msg)) || [])[1] || '';
+}
+const LOSTCHAINS = () => {
+  const f = dialog && doc.features[dialog.index], l = f && result.lost?.[f.id];
+  return l?.length ? l.map((i) => f.params.edges?.[i]).filter(Boolean).map((e) => ({ pts: e.pts, closed: false })) : [];
+};
 function renderDialogErrors() {
   const host = $('#d-err');
   if (!host || !dialog) return;
-  const e = result.errors[doc.features[dialog.index]?.id];
-  host.innerHTML = e ? `<div class="row err-row">${icon('warn', 14)} ${esc(e)}</div>` : '';
+  const f = doc.features[dialog.index];
+  const e = result.errors[f?.id], note = result.notes?.[f?.id], warns = result.warnings?.[f?.id] || [];
+  const help = e ? errorHelp(e) : '';
+  host.innerHTML = (e ? `<div class="row err-row">${icon('warn', 14)} <div>${esc(e)}${help ? `<div class="err-help">${esc(help)}</div>` : ''}</div></div>` : '')
+    + warns.map((w) => `<div class="row warn-row">${icon('warn', 14)} <div>${esc(w.text)}${w.action === 'repick' ? ' <button type="button" class="btn small" data-act="repick">Remove them and pick again</button>' : ''}</div></div>`).join('')
+    + (note && !e ? `<div class="row note-row"><div>${esc(note.text)}</div></div>` : '');
+  host.querySelector('[data-act=repick]')?.addEventListener('click', () => {
+    const lost = new Set(result.lost?.[f.id] || []);
+    updateParam(dialog.index, 'edges', f.params.edges.filter((_, i) => !lost.has(i)));
+    renderDialog();
+    toast('Missing edges removed. Click the edges you want in the viewport.');
+  });
+  vp.showEdges(LOSTCHAINS(), null);
+  vp.setNoteBodies?.(note?.bodies || []);
 }
 function printerMenu(anchor) {
   const r = anchor.getBoundingClientRect();
@@ -1440,7 +1488,7 @@ function closeDialog(ok, force = false) {
     return;
   }
   const { pre } = dialog;
-  vp.hideGizmo();
+  vp.hideGizmo(); vp.setNoteBodies([]);
   vp.showFaces([], null);
   profileHover = null;
   if (ok) {
@@ -1455,7 +1503,7 @@ function closeDialog(ok, force = false) {
 
 // move gizmo wiring
 function setupGizmo() {
-  vp.hideGizmo();
+  vp.hideGizmo(); vp.setNoteBodies([]);
   if (!dialog) return;
   const f = doc.features[dialog.index];
   if (!defOf(f).gizmo) return;
@@ -1505,14 +1553,14 @@ function setSketchCons(cons) {
   const f = curSketch();
   const nf = { ...f, params: { ...f.params, cons } };
   doc.features[sketch.index] = nf;
-  resolvedMap[nf.id] = resolveSketch(nf, (n) => paramState.values[n]).params;
+  resolvedMap[nf.id] = resolveSketch(nf, paramScope).params;
   refresh(); SU?.redraw(); renderSketchPanel(); drawSketches();
 }
 function setSketchShapes(shapes, push = true) {
   const f = curSketch();
   const nf = { ...f, params: { ...f.params, shapes } };
   doc.features[sketch.index] = nf;
-  resolvedMap[nf.id] = resolveSketch(nf, (n) => paramState.values[n]).params;
+  resolvedMap[nf.id] = resolveSketch(nf, paramScope).params;
   refresh();
   SU?.redraw();
 }
@@ -1539,6 +1587,14 @@ function setSketchTool(t) {
   drawSketches();
   renderRibbon(); renderSketchPanel();
 }
+/** A small status line: how many of the sketch's sizes and directions are locked, with the unlocked ones in the tooltip. */
+function sketchStateChip(shapes, cons) {
+  const d = definedState(shapes, cons);
+  if (d.state === 'empty') return '';
+  const label = { defined: 'Fully defined', partial: 'Partly defined', free: 'Not defined yet' }[d.state];
+  const tip = d.state === 'defined' ? 'Every size and direction is locked by a dimension expression or a constraint.' : `Not locked yet: ${d.free.slice(0, 12).join(', ')}${d.free.length > 12 ? '…' : ''}. Lock a size by typing a parameter in its dimension, or add a constraint. The sketch's position is not counted.`;
+  return `<div class="sk-state sk-${d.state}" title="${esc(tip)}"><span class="dot"></span>${label} <small>${d.locked} of ${d.total} locked</small></div>`;
+}
 function renderSketchPanel() {
   if (!sketch || sketch.picking) return;
   const p = curSketch().params;
@@ -1555,7 +1611,7 @@ function renderSketchPanel() {
     <label class="chk"><input type="checkbox" id="sp-showprof" ${sketch.showProfile === false ? '' : 'checked'}> Show Profile</label>
     <label class="chk"><input type="checkbox" id="sp-snapon" ${sketch.snapOn === false ? '' : 'checked'}> Snap</label>
     <div class="my6"><button class="btn" id="sp-lookat">Look At</button></div>
-    <div class="sep"></div>${(p.cons || []).length ? `<div class="mh strong mb4">Constraints (${p.cons.length})</div><div id="sp-cons"></div><div class="sep"></div>` : ''}<div class="mh strong mb4">Shapes (${sh.length})</div><div id="sp-list"></div>
+    <div class="sep"></div>${(p.cons || []).length ? `<div class="mh strong mb4">Constraints (${p.cons.length})</div><div id="sp-cons"></div><div class="sep"></div>` : ''}<div class="mh strong mb4">Shapes (${sh.length})</div>${sketchStateChip(sh, p.cons)}<div id="sp-list"></div>
     <div class="note">Nested shapes become holes. To sketch on a body, start a new sketch and click one of its flat faces.</div></div>
     <div class="foot"><button class="btn" id="sp-cancel">Cancel</button><button class="btn primary" id="sp-ok">Finish Sketch</button></div></div>`;
   const consHost = $('#sp-cons');
@@ -1938,7 +1994,7 @@ function toggleRender() {
 function saveImageDialog() {
   const rect = $('#gl').getBoundingClientRect();
   const sizes = [[Math.round(rect.width), Math.round(rect.height), 'Same size as the view'], [1280, 720, '1280 × 720'], [1920, 1080, '1920 × 1080 (full HD)'], [3840, 2160, '3840 × 2160 (4K)'], [2048, 2048, '2048 × 2048 (square)']];
-  const nm = doc.name === 'Untitled' ? 'design' : doc.name;
+  const nm = (doc.name === 'Untitled' ? 'design' : doc.name) + verSuffix();
   const md = modal(`<div class="modal-title">Save image</div>
     <form class="modal-body ex">
       <label>File name<input id="si-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
@@ -1965,6 +2021,17 @@ function saveImageDialog() {
   };
   setTimeout(() => md.el.querySelector('#si-name').select(), 0);
 }
+/** The button that closes whatever panel is open on the right (Cancel, Done or Close), so every panel can be dismissed with the x or Esc. */
+const PANEL_CLOSE = '#d-cancel, #sp-cancel, #i-close, #pc-close, #m-done';
+const panelCloseButton = () => ($('#props-wrap').classList.contains('open') ? $('#props-wrap').querySelector(PANEL_CLOSE) : null);
+new MutationObserver(() => {
+  const t = $('#props-wrap .props .title');
+  if (!t || t.querySelector('.tclose') || !t.closest('#props-wrap').querySelector(PANEL_CLOSE)) return;
+  const b = document.createElement('button');
+  b.className = 'tclose'; b.type = 'button'; b.title = 'Close (Esc)'; b.setAttribute('aria-label', 'Close'); b.textContent = '×';
+  b.onclick = () => $('#props-wrap').querySelector(PANEL_CLOSE)?.click();
+  t.appendChild(b);
+}).observe($('#props-wrap'), { childList: true, subtree: true });
 function showSection() {
   if (dialog || sketch) return;
   if (!result.bodies.length) return toast('Nothing to section yet.', true);
@@ -2155,8 +2222,8 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 const EXPORT_FORMATS = [
-  ['stl', 'STL', ''],
-  ['3mf', '3MF', ''],
+  ['3mf', '3MF', 'Recommended for 3D printing. Keeps units and colours, and opens in every slicer.'],
+  ['stl', 'STL', 'Works everywhere, but has no units or colours.'],
   ['obj', 'OBJ', ''],
   ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
   ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
@@ -2169,16 +2236,26 @@ function exportFile(fmt, name, selectedOnly) {
   download(w(bodies, name), `${name}.${fmt}`);
   toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}`);
 }
+/** "_v3" for a saved design, so an exported file says which version it came from. */
+const verSuffix = () => (doc.rev ? `_v${doc.rev}` : '');
+/** Every edge of the mesh is shared by exactly two triangles: the body is a closed solid. */
+function isWatertight(b) {
+  const edges = new Map(), t = b.tris;
+  for (let i = 0; i < t.length; i += 3) for (let k = 0; k < 3; k++) { const a = t[i + k], c = t[i + (k + 1) % 3], key = a < c ? a * 4294967296 + c : c * 4294967296 + a; edges.set(key, (edges.get(key) || 0) + 1); }
+  for (const n of edges.values()) if (n !== 2) return false;
+  return true;
+}
 function exportDialog() {
   if (dialog || sketch) return;
-  let last = 'stl'; try { last = localStorage.getItem('sketchy.exportFormat') || 'stl'; } catch { /* storage unavailable */ }
-  if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = 'stl';
-  const hasSel = vp.selected.size > 0, nm = (doc.name === 'Untitled' ? 'design' : doc.name);
+  let last = '3mf'; try { last = localStorage.getItem('sketchy.exportFormat') || '3mf'; } catch { /* storage unavailable */ }
+  if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = '3mf';
+  const hasSel = vp.selected.size > 0, nm = (doc.name === 'Untitled' ? 'design' : doc.name) + verSuffix();
   const m = modal(`<div class="modal-title">Export</div>
     <form class="modal-body ex">
       <label>File name<input id="ex-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
       <label>Format<select id="ex-fmt" name="fmt">${EXPORT_FORMATS.map(([v, l]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + v})</option>`).join('')}</select></label>
       <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
+      <div class="ex-check" id="ex-check" aria-live="polite" hidden></div>
       <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
       <div class="note err-note" id="ex-err" role="alert"></div>
       <div class="modal-foot flush"><button type="button" class="btn" id="ex-c">Cancel</button><button type="submit" class="btn primary">Export</button></div>
@@ -2189,8 +2266,32 @@ function exportDialog() {
     const d = (EXPORT_FORMATS.find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
     de.textContent = d; de.hidden = !d;
     m.el.querySelector('#ex-sel').disabled = proj || !hasSel; m.el.querySelector('#ex-scope').style.opacity = proj || !hasSel ? '.55' : '';
+    runChecks();
   };
-  fmtSel.onchange = sync; sync();
+  let checkRun = 0, cancelCheck = { stop: false };
+  const runChecks = async () => {
+    const host = m.el.querySelector('#ex-check'), proj = fmtSel.value === 'sketchy' || fmtSel.value === 'step';
+    cancelCheck.stop = true; const mine = ++checkRun; cancelCheck = { stop: false };
+    host.hidden = proj;
+    if (proj) return;
+    const sel = m.el.querySelector('#ex-sel').checked;
+    const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!sel || vp.selected.has(b.id)));
+    if (!bodies.length) { host.innerHTML = '<div class="ex-row bad">Nothing to export. Show or select a body first.</div>'; return; }
+    const rows = [];
+    const open = bodies.filter((b) => !isWatertight(b));
+    rows.push(open.length ? ['warn', `Not watertight: ${open.map((b) => esc(b.name)).join(', ')}. Slicers may refuse it. Use MESH, Clean Mesh to repair.`] : ['ok', 'Watertight: every body is a closed solid']);
+    const fit = bedFit(bodies, vp.opts.bedSize);
+    rows.push(fit.fitsAll ? ['ok', `Fits the ${esc(bedName.split(' (')[0])} bed`] : fit.tooBig.length ? ['warn', `Too large for the bed: ${fit.tooBig.map((t) => esc(t.name)).join(', ')}`] : ['warn', `Needs ${fit.plates} plates for the ${esc(bedName.split(' (')[0])} bed`]);
+    const o = overhangs(bodies, pcOpts.angle);
+    rows.push(o.fraction > 0.15 ? ['warn', `${(o.fraction * 100).toFixed(0)}% of the surface overhangs more than ${pcOpts.angle}°, so it needs supports`] : ['ok', 'Few overhangs']);
+    const draw = (wall) => { if (mine === checkRun) host.innerHTML = [...rows, wall].map(([k, t]) => `<div class="ex-row ${k}">${k === 'ok' ? '✓' : k === 'warn' ? '!' : '…'} ${t}</div>`).join('') + '<div class="ex-foot">You can still export. <button type="button" class="linkbtn" id="ex-open-check">Open the full print check</button></div>'; host.querySelector('#ex-open-check')?.addEventListener('click', () => { m.close(); showPrintCheck(); }); };
+    draw(['wait', 'Checking wall thickness…']);
+    const w = await wallThickness(bodies, { minWall: pcOpts.minWall, maxSamples: 500, cancel: cancelCheck });
+    if (!w || mine !== checkRun) return;
+    draw(w.thin.length ? ['warn', `Thin walls: the thinnest is ${dispStr(w.min, 2)} ${getUnits()} (${w.thin.length} thin spots)`] : ['ok', `Walls are at least ${dispStr(pcOpts.minWall, 1)} ${getUnits()} thick`]);
+  };
+  m.el.querySelector('.modal-x, .close')?.addEventListener('click', () => { cancelCheck.stop = true; });
+  fmtSel.onchange = sync; m.el.querySelector('#ex-sel').onchange = runChecks; sync();
   m.el.querySelector('#ex-c').onclick = () => m.close();
   setTimeout(() => { const n = m.el.querySelector('#ex-name'); n.focus(); n.select(); }, 0);
   form.onsubmit = (e) => {
@@ -2302,7 +2403,7 @@ function loadProject(txt, rev = 0, seq = rev) {
   vp.fitted = false; refresh();
 }
 const safeName = (n) => n.replace(/[^\w .()-]/g, '_').slice(0, 80) || 'Untitled';
-const putDesign = (name, ifMatch, folder, auto = false, note = '') => call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true), { 'if-match': String(ifMatch), ...(folder === undefined ? {} : { 'x-folder': encodeURIComponent(folder) }), ...(auto ? { 'x-autosave': '1' } : {}), ...(note ? { 'x-note': encodeURIComponent(note) } : {}) });
+const putDesign = (name, ifMatch, folder, auto = false, note = '', milestone = '') => call('PUT', '/projects/' + encodeURIComponent(name), projectJSON(name, true), { 'if-match': String(ifMatch), ...(folder === undefined ? {} : { 'x-folder': encodeURIComponent(folder) }), ...(auto ? { 'x-autosave': '1' } : {}), ...(note ? { 'x-note': encodeURIComponent(note) } : {}), ...(milestone ? { 'x-milestone': encodeURIComponent(milestone) } : {}) });
 const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
 
 /** Ask what to do when the saved design changed elsewhere. Resolves 'overwrite' | 'copy' | 'theirs' | null. */
@@ -2332,18 +2433,20 @@ async function openDesign(name, quiet = false) {
 /** The Save button: asks what changed, then saves a new version with that description (shown in the version history). */
 async function saveVersion() {
   const named = acct.server && doc.name !== 'Untitled';
-  const m = modal(`<div class="modal-title">Save a version</div>
-    <form class="modal-body" autocomplete="off">
-      <p class="p0">${named ? `This saves <b>${esc(doc.name)}</b> as V${(doc.rev || 0) + 1}. You can open or restore any earlier version from the designs panel.` : 'Choose a name next, then this becomes the first version.'}</p>
-      <label>What changed? <span class="muted">(optional)</span><input name="note" maxlength="200" placeholder="e.g. Added mounting holes" aria-label="Description of this version" spellcheck="true"></label>
-      <div class="modal-foot flush"><button type="button" class="btn" id="sv-cancel">Cancel</button><button type="submit" class="btn primary">Save version</button></div>
+  const m = modal(`<div class="modal-title">Save</div>
+    <form class="modal-body sv-form" autocomplete="off">
+      ${named ? '' : '<p class="p0">Choose a name next, then this becomes the first version.</p>'}
+      <label class="sv-row"><span>Version description</span><input name="note" maxlength="200" value="User saved" aria-label="Version description" spellcheck="true"></label>
+      <div class="sv-row"><label class="sv-ms"><input type="checkbox" name="ms"> Milestone</label><input name="msname" maxlength="200" disabled aria-label="Milestone name" placeholder="Milestone name"></div>
+      <div class="modal-foot flush"><button type="submit" class="btn primary">OK</button><button type="button" class="btn" id="sv-cancel">Cancel</button></div>
     </form>`);
   const form = m.el.querySelector('form');
   m.el.querySelector('#sv-cancel').onclick = () => m.close();
-  form.note.focus();
-  form.onsubmit = async (e) => { e.preventDefault(); const note = form.note.value.trim(); m.close(); await save(false, note); };
+  form.ms.onchange = () => { form.msname.disabled = !form.ms.checked; if (form.ms.checked) form.msname.focus(); };
+  setTimeout(() => { form.note.focus(); form.note.select(); }, 80);
+  form.onsubmit = async (e) => { e.preventDefault(); const note = form.note.value.trim(), ms = form.ms.checked ? (form.msname.value.trim() || 'Milestone') : ''; m.close(); await save(false, note, ms); };
 }
-async function save(as, note = '') {
+async function save(as, note = '', milestone = '') {
   let name = doc.name, folder = doc.folder || '';
   if (acct.server && !(await requireLogin())) return;
   if (acct.server && (as || name === 'Untitled')) { // in-app Save dialog: name + folder
@@ -2357,10 +2460,10 @@ async function save(as, note = '') {
   if (acct.server) {
     doc.saves = (doc.saves || 0) + 1;
     const expect = name === doc.name ? doc.seq || 0 : 0; // a new name should not already exist
-    let r = await putDesign(name, expect, folder, false, note);
+    let r = await putDesign(name, expect, folder, false, note, milestone);
     if (r.status === 409) {
       const choice = await conflictDialog(r.data, name);
-      if (choice === 'overwrite') r = await putDesign(name, '*', folder, false, note);
+      if (choice === 'overwrite') r = await putDesign(name, '*', folder, false, note, milestone);
       else if (choice === 'copy') {
         const pick = await saveDialog({ name: `${name} (copy)`, folder, title: 'Save a copy', okLabel: 'Save copy' });
         if (!pick || pick.name === 'Untitled') return;
@@ -3145,26 +3248,54 @@ function toggleDataPanel(force) {
   if (dataOpen) renderDataPanel();
   setTimeout(() => vp?.resize(), 0);
 }
+/** Overlay what changed between an older version and the latest: kept grey, added blue, removed red, plus a list of changed features. */
+async function compareVersion(pr, rev, oldTxt) {
+  const cur = await call('GET', '/projects/' + encodeURIComponent(pr.name));
+  if (!cur.ok) return toast(cur.data?.error || 'Could not load the latest version.', true);
+  let A, B;
+  try { A = JSON.parse(oldTxt); B = typeof cur.data === 'string' ? JSON.parse(cur.data) : cur.data; } catch { return toast('Could not read those versions.', true); }
+  let ra, rb, diff;
+  try { ra = evaluateDoc({ ...A, params: A.params || [] }); rb = evaluateDoc({ ...B, params: B.params || [] }); diff = compareBodies(ra.result.bodies, rb.result.bodies); }
+  catch (e) { return toast('Could not compare: ' + e.message, true); }
+  const byId = (d) => new Map(d.features.map((f) => [f.id, f]));
+  const ma = byId(A), mb = byId(B), lines = [];
+  for (const [id, f] of mb) { const o = ma.get(id); if (!o) lines.push(['+', `${f.name} was added`]); else if (JSON.stringify([o.params, o.exprs, o.suppressed]) !== JSON.stringify([f.params, f.exprs, f.suppressed])) lines.push(['~', `${f.name} was changed`]); }
+  for (const [id, f] of ma) if (!mb.has(id)) lines.push(['−', `${f.name} was removed`]);
+  const vol = (p) => (p ? `${(p.volume / 1000).toFixed(2)} cm³` : 'none');
+  vp.setCompare(diff);
+  const wrap = $('#props-wrap');
+  wrap.innerHTML = `<div class="props"><div class="title">${ficon('combine', 20)}COMPARE</div><div class="body">
+    <div class="note">V${esc(String(rev))} compared with the latest version of "${esc(pr.name)}".</div>
+    <div class="stat"><span><i class="cmp-sw cmp-add"></i>Added (blue)</span><b>${vol(diff.added)}</b></div>
+    <div class="stat"><span><i class="cmp-sw cmp-rem"></i>Removed (red)</span><b>${vol(diff.removed)}</b></div>
+    <div class="stat"><span><i class="cmp-sw cmp-keep"></i>Unchanged (grey)</span><b>${vol(diff.kept)}</b></div>
+    <div class="mh strong mb4 mt10">Timeline changes</div>
+    ${lines.length ? lines.map(([k, t]) => `<div class="stat"><span>${k} ${esc(t)}</span></div>`).join('') : '<div class="note">The timelines are the same. Any difference comes from parameters or settings.</div>'}</div>
+    <div class="foot"><button class="btn primary" id="i-close">Close</button></div></div>`;
+  wrap.classList.add('open');
+  $('#i-close').onclick = () => { vp.setCompare(null); wrap.classList.remove('open'); };
+}
 async function showVersions(pr) {
   const r = await call('GET', '/projects/' + encodeURIComponent(pr.name) + '/versions');
   if (!r.ok) return toast(r.data?.error || 'Could not load versions.', true);
   const when = (t) => new Date(t).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-  const rows = [{ rev: pr.ver, modified: pr.modified, device: pr.device, note: pr.note, cur: true }, ...r.data];
-  const m = modal(`<div class="modal-title">Versions of ${esc(pr.name)}</div><div class="modal-body">${rows.map((v) => `<div class="ver-row" data-rev="${v.rev}"><div><b>V${v.rev}</b>${v.cur ? ' <span class="ver-cur">latest</span>' : ''}<div class="ver-sub">${when(v.modified)}${v.device ? ' · ' + esc(v.device) : ''}</div>${v.note ? `<div class="ver-note">${esc(v.note)}</div>` : ''}</div>${v.cur ? '' : '<div class="ver-btns"><button class="btn" data-a="open">Open</button><button class="btn" data-a="restore">Restore</button></div>'}</div>`).join('')}${r.data.length ? '' : '<div class="ver-sub">No earlier versions yet. Each save keeps the previous one.</div>'}<div class="ver-sub">The server keeps the most recent earlier versions of each design.</div></div>`);
+  const rows = [{ rev: pr.ver, modified: pr.modified, device: pr.device, note: pr.note, milestone: pr.milestone, cur: true }, ...r.data];
+  const m = modal(`<div class="modal-title">Versions of ${esc(pr.name)}</div><div class="modal-body">${rows.map((v) => `<div class="ver-row" data-rev="${v.rev}"><div><b>V${v.rev}</b>${v.cur ? ' <span class="ver-cur">latest</span>' : ''}${v.milestone ? ` <span class="ver-ms">★ ${esc(v.milestone)}</span>` : ''}<div class="ver-sub">${when(v.modified)}${v.device ? ' · ' + esc(v.device) : ''}</div>${v.note ? `<div class="ver-note">${esc(v.note)}</div>` : ''}</div>${v.cur ? '' : '<div class="ver-btns"><button class="btn" data-a="compare" title="Show what changed between this version and the latest">Compare</button><button class="btn" data-a="open">Open</button><button class="btn" data-a="restore">Restore</button></div>'}</div>`).join('')}${r.data.length ? '' : '<div class="ver-sub">No earlier versions yet. Each save keeps the previous one.</div>'}<div class="ver-sub">The server keeps the most recent earlier versions of each design.</div></div>`);
   m.el.querySelectorAll('.ver-row button').forEach((b) => {
     b.onclick = async () => {
       const rev = +b.closest('.ver-row').dataset.rev;
       const g = await call('GET', `/projects/${encodeURIComponent(pr.name)}/versions/${rev}`);
       if (!g.ok) return toast(g.data?.error || 'Could not load that version.', true);
       const txt = typeof g.data === 'string' ? g.data : JSON.stringify(g.data);
+      if (b.dataset.a === 'compare') { m.close(); return compareVersion(pr, rev, txt); }
       if (b.dataset.a === 'open') {
         if (!newTab({ reuseBlank: true })) return;
         m.close();
         loadProject(txt, pr.ver, pr.seq || pr.ver); doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh();
         toast(`Opened V${rev} of "${pr.name}". Save to make it the latest version.`);
       } else {
-        if (!(await confirmBox({ title: `Restore V${rev}?`, message: 'It becomes the new latest version; the current one is kept in the history.', ok: 'Restore' }))) return;
-        const p = await call('PUT', '/projects/' + encodeURIComponent(pr.name), txt, { 'if-match': String(pr.ver) });
+        if (!(await confirmBox({ title: `Restore V${rev}?`, message: `This adds a new version on top called "Restored from V${rev}". The current version stays in the history, so nothing is lost.`, ok: 'Restore' }))) return;
+        const p = await call('PUT', '/projects/' + encodeURIComponent(pr.name), txt, { 'if-match': String(pr.ver), 'x-note': encodeURIComponent(`Restored from V${rev}`) });
         if (!p.ok) return toast(p.status === 409 ? 'The design changed on another device. Reload the list and try again.' : (p.data?.error || 'Restore failed.'), true);
         m.close(); renderDataPanel(); toast(`Restored V${rev} as V${p.data.rev}`);
         if (doc.name === pr.name) openDesign(pr.name, true);
@@ -3384,7 +3515,7 @@ function bindKeys() {
       if (sketch && !sketch.picking) { SU.key(e); return; }
       if (!dialog && !measure && (selEdges.length || selFace || profSel.size)) { profSel.clear(); updateProfileView(); selEdges = []; selFace = null; vp.showFaces([], null); updateEdgeView(); renderRibbon(); return; }
       if (measure) { endMeasure(); return; }
-      if (sketch?.pts) { sketch.pts = null; vp.overlay.clear(); } else if (sketch) cancelSketch(); else if (dialog) closeDialog(false);
+      if (sketch?.pts) { sketch.pts = null; vp.overlay.clear(); } else if (sketch) cancelSketch(); else if (dialog) closeDialog(false); else panelCloseButton()?.click();
       return;
     }
     if (sketch && !sketch.picking) {
@@ -3427,7 +3558,7 @@ async function boot() {
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
     setShapes: (sh) => setSketchShapes(sh), remapCons: (si, delta) => remapSketchCons(si, delta), projectHover: (e) => projectHover(e), projectPick: (e, all) => projectPick(e, all), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
     cons: () => curSketch().params.cons || [], setCons: (c) => setSketchCons(c),
-    toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, (n) => paramState.values[n], kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
+    toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, paramScope, kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
   if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('touch');
   buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip();

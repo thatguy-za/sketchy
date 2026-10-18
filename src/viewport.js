@@ -584,6 +584,39 @@ export class Viewport {
     return hit ? hit.object.userData.pid : null;
   }
 
+  /** Show what changed between two versions: kept volume grey, added blue, removed red. Pass null to go back to the design. */
+  setCompare(c) {
+    if (this.compareGroup) { this.scene.remove(this.compareGroup); this.compareGroup.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); }); this.compareGroup = null; }
+    this.bodyGroup.visible = !c;
+    if (!c) return;
+    const g = new THREE.Group();
+    const add = (part, color, opacity, order) => {
+      if (!part) return;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(part.verts, 3)); geo.setIndex(new THREE.BufferAttribute(part.tris, 1)); geo.computeVertexNormals();
+      const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, transparent: opacity < 1, opacity, side: THREE.DoubleSide, roughness: 0.7, depthWrite: opacity >= 1 }));
+      m.renderOrder = order; m.raycast = () => {};
+      m.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30), new THREE.LineBasicMaterial({ color: color === 0x2f7cf6 ? 0x1c4fb8 : color === 0xe0453a ? 0xa8281f : 0x555a62 })));
+      g.add(m);
+    };
+    add(c.kept, 0x9aa0a8, 0.35, 3); add(c.added, 0x2f7cf6, 0.9, 4); add(c.removed, 0xe0453a, 0.9, 4);
+    this.compareGroup = g; this.scene.add(g);
+  }
+
+  /** Outline the bodies an extrude or cut is acting on, so the dialog's "Cuts from Body 2" can be seen in the viewport. */
+  setNoteBodies(ids) {
+    if (this.noteGroup) { this.scene.remove(this.noteGroup); this.noteGroup.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); }); this.noteGroup = null; }
+    if (!ids?.length) return;
+    const g = new THREE.Group();
+    for (const m of this.bodyGroup.children) {
+      if (!ids.includes(m.userData.id)) continue;
+      const box = new THREE.Box3().setFromObject(m), h = new THREE.Box3Helper(box, 0xf2b01e);
+      h.material.depthTest = false; h.renderOrder = 12; h.raycast = () => {};
+      g.add(h);
+    }
+    this.noteGroup = g; this.scene.add(g);
+  }
+
   // Selected (red) and hovered (orange) model edges outside of commands. chains: [{pts, closed}]
   showEdges(selected, hover) {
     for (const c of [...this.edgeSelGroup.children]) { c.geometry.dispose(); this.edgeSelGroup.remove(c); }

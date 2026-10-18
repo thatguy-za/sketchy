@@ -168,5 +168,20 @@ scenario('Suppress and reorder an early feature', () => {
   check('suppressing the hole restores the solid', !errs(rs) && approx(bodyOf(rs, 'box').volume, 18000, 0.001), errs(rs));
 });
 
+scenario('Failures and warnings explain themselves', () => {
+  const base = doc([prim('box', 'box', { sx: 40, sy: 30, sz: 20, radius: 0 })]);
+  const top = edgesWhere(evaluate(base), 'box', (p) => p.every((q) => Math.abs(q[2] - 20) < 1e-3 && Math.abs(q[0] - 20) < 1e-3));
+  const ghost = { body: 'box', pts: [[500, 500, 500], [500, 500, 600]], nrm: [[1, 0, 0]] };
+  const part = evaluate(doc([...base.features, { id: 'f', type: 'fillet', name: 'Fillet', params: { edges: [...top, ghost], radius: 3, tangent: false, variable: false } }]));
+  check('a fillet with one missing edge still builds', !part.result.errors.f && part.result.warnings.f?.[0]?.action === 'repick', JSON.stringify(part.result.warnings));
+  check('and says which edge was not found', JSON.stringify(part.result.lost.f) === '[1]', JSON.stringify(part.result.lost));
+  const none = evaluate(doc([...base.features, { id: 'f', type: 'fillet', name: 'Fillet', params: { edges: [ghost], radius: 3, tangent: false, variable: false } }]));
+  check('all edges missing is an error that says what to do', /Pick the edges again/.test(none.result.errors.f || ''), none.result.errors.f);
+  const sk = { id: 's', type: 'sketch', name: 'Sketch', params: { plane: 'XY', offset: 0, shapes: [{ t: 'rect', x: 200, y: 200, w: 10, h: 10 }] } };
+  const cut = evaluate(doc([...base.features, sk, { id: 'e', type: 'extrude', name: 'Cut', params: { sketch: 's', profiles: null, extent: 'distance', distance: 5, op: 'cut', target: 'box', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } }]));
+  check('a cut that misses the body warns', /does not touch any body/.test(cut.result.warnings.e?.[0]?.text || ''), JSON.stringify(cut.result.warnings));
+  check('an extrude says what it acts on', !!cut.result.notes.e?.text, JSON.stringify(cut.result.notes));
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

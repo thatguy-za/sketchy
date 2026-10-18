@@ -122,3 +122,30 @@ export function conAnchor(shapes, c) {
   const kp = keyPoints(A)[A.t === 'rect' || A.t === 'rrect' ? 4 : 0];
   return kp?.p || null;
 }
+
+/**
+ * How firmly a sketch is pinned down, counted per shape: a rectangle has two sizes (width, height), a circle one (diameter), a
+ * line segment a length and a direction. A size counts as locked when a parameter expression drives it or an Equal constraint
+ * copies it; a direction counts as locked by Horizontal, Vertical, Parallel or Perpendicular. Where the sketch sits is not counted.
+ * Returns { total, locked, free: ["Rectangle 1 width", ...], state: 'empty' | 'free' | 'partial' | 'defined' }.
+ */
+export function definedState(shapes, cons) {
+  const NAMES = { rect: 'Rectangle', rrect: 'Rounded rectangle', circle: 'Circle', ngon: 'Polygon', slot: 'Slot', ellipse: 'Ellipse', path: 'Path' };
+  const DIMS = { rect: [['w', 'width'], ['h', 'height']], rrect: [['w', 'width'], ['h', 'height'], ['r', 'corner radius']], circle: [['d', 'diameter']], ngon: [['r', 'radius']], slot: [['len', 'length'], ['w', 'width']], ellipse: [['a', 'width'], ['b', 'height']] };
+  let total = 0, locked = 0;
+  const free = [];
+  const count = (ok, label) => { total++; if (ok) locked++; else free.push(label); };
+  const equalTo = (s, seg) => (cons || []).some((c) => c.t === 'equal' && c.a?.s === s && (seg == null || c.a.seg === seg));
+  shapes.forEach((sh, s) => {
+    const nm = `${NAMES[sh.t] || 'Shape'} ${s + 1}`;
+    if (sh.t === 'path') {
+      const n = sh.pts.length, segs = sh.open ? n - 1 : n;
+      for (let i = 0; i < segs; i++) {
+        const arc = !!sh.pts[i][2];
+        count(!!sh.ex?.['s' + i] || equalTo(s, i), `${nm} ${arc ? 'arc radius' : 'side'} ${i + 1}`);
+        if (!arc) count((cons || []).some((c) => c.a?.s === s && c.a.seg === i && ['horizontal', 'vertical', 'parallel', 'perpendicular'].includes(c.t)), `${nm} side ${i + 1} direction`);
+      }
+    } else for (const [id, label] of DIMS[sh.t] || []) count(!!sh.ex?.[id] || (equalTo(s) && ['d', 'r'].includes(id)), `${nm} ${label}`);
+  });
+  return { total, locked, free, state: !total ? 'empty' : locked === total ? 'defined' : locked ? 'partial' : 'free' };
+}
