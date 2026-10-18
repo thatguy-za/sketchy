@@ -184,13 +184,13 @@ export async function requireLogin() { return acct.user ? true : showAuth(); }
 
 // ---------------------------------------------------------------- change password
 /** Popover under the avatar: who you are, shortcuts, theme switch, log out. */
-export function openUserMenu(anchor, { onAccount, onSettings, onTheme, isDark, onLogout }) {
+export function openUserMenu(anchor, { onAccount, onPrefs, onSettings, onTheme, isDark, onLogout }) {
   document.querySelector('.umenu')?.remove();
   const el = document.createElement('div');
   el.className = 'umenu'; el.setAttribute('role', 'menu');
   const item = (id, ico, label, extra = '') => `<button role="menuitem" class="um-item" data-id="${id}" type="button"><span class="um-ico">${uicon(ico, 17, 1.6)}</span><span class="um-lbl">${label}</span>${extra}</button>`;
   el.innerHTML = `<div class="um-head"><span class="avatar big" aria-hidden="true">${esc(acct.user.slice(0, 1).toUpperCase())}</span><div class="um-who"><b>${esc(acct.user)}</b><span>${acct.admin ? 'Administrator' : 'Member'}</span></div></div>
-    <div class="um-group">${item('account', 'user', 'Account')}${acct.admin ? item('settings', 'cog', 'Server settings') : ''}</div>
+    <div class="um-group">${item('account', 'user', 'Account')}${item('prefs', 'cog', 'Settings')}${acct.admin ? item('settings', 'globe', 'Server settings') : ''}</div>
     <div class="um-group"><button role="menuitemcheckbox" aria-checked="${isDark()}" class="um-item" data-id="theme" type="button"><span class="um-ico">${uicon(isDark() ? 'moon' : 'sun', 17, 1.6)}</span><span class="um-lbl">Dark mode</span><span class="um-switch${isDark() ? ' on' : ''}" aria-hidden="true"><i></i></span></button></div>
     <div class="um-group">${item('logout', 'logout', 'Log out')}</div>`;
   document.body.appendChild(el);
@@ -212,7 +212,7 @@ export function openUserMenu(anchor, { onAccount, onSettings, onTheme, isDark, o
     const b = e.target.closest('.um-item'); if (!b) return;
     if (b.dataset.id === 'theme') { onTheme(); close(); return; }
     close();
-    ({ account: onAccount, settings: onSettings, logout: onLogout })[b.dataset.id]?.();
+    ({ account: onAccount, prefs: onPrefs, settings: onSettings, logout: onLogout })[b.dataset.id]?.();
   };
   items[0].focus({ preventScroll: true });
 }

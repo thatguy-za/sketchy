@@ -1041,3 +1041,9 @@ body.touch .row { margin: 10px 0; }
 .ex-row.ok { color: var(--c-2e9d5f, #2e9d5f); } .ex-row.warn { color: var(--c-b5700a, #b5700a); } .ex-row.wait, .ex-row.bad { color: var(--muted); }
 .ex-foot { color: var(--muted); font-size: var(--fs-xs); margin-top: 2px; }
 .linkbtn { background: none; border: 0; padding: 0; color: var(--accent-text, #1a7f4b); text-decoration: underline; cursor: pointer; font: inherit; }
+.set-body { display: flex; flex-direction: column; gap: 10px; min-width: 400px; }
+.set-body .set-h { margin: 0; font-size: var(--fs-md); text-align: left; }
+.set-body .set-row { display: grid; grid-template-columns: 130px 1fr; align-items: center; gap: 12px; font-weight: 400; text-align: left; }
+.set-body .set-row > span { text-align: left; }
+.set-body .set-row select { width: 100%; }
+@media (max-width: 520px) { .set-body { min-width: 0; } .set-body .set-row { grid-template-columns: 1fr; } }

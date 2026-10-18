@@ -5,6 +5,7 @@ import { initHeadless, evaluate } from '../src/headless.js';
 import { findEdgeChains, edgeRef } from '../src/edges.js';
 import { planarFace } from '../src/edges.js';
 import { findFaceTri } from '../src/kernel.js';
+import { findSkins } from '../src/skins.js';
 
 await initHeadless();
 let failed = 0, passed = 0;
@@ -181,6 +182,33 @@ scenario('Failures and warnings explain themselves', () => {
   const cut = evaluate(doc([...base.features, sk, { id: 'e', type: 'extrude', name: 'Cut', params: { sketch: 's', profiles: null, extent: 'distance', distance: 5, op: 'cut', target: 'box', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } }]));
   check('a cut that misses the body warns', /does not touch any body/.test(cut.result.warnings.e?.[0]?.text || ''), JSON.stringify(cut.result.warnings));
   check('an extrude says what it acts on', !!cut.result.notes.e?.text, JSON.stringify(cut.result.notes));
+});
+
+scenario('Tools that meet at the same height leave no skin between them', () => {
+  const plate = prim('p', 'box', { sx: 60, sy: 60, sz: 4.65, radius: 0 });
+  const sk = (id, off, w) => ({ id, type: 'sketch', name: id, params: { plane: 'XY', offset: off, shapes: [{ t: 'rect', x: -w / 2, y: -w / 2, w, h: w }] } });
+  const cut = (id, s, d) => ({ id, type: 'extrude', name: id, params: { sketch: s, profiles: null, extent: 'distance', distance: d, op: 'cut', target: 'p', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } });
+  for (const [label, off] of [['0.7', 0.7], ['4.65 - 3.95', 4.65 - 3.95], ['0.1 + 0.6', 0.1 + 0.6]]) {
+    const r = evaluate(doc([plate, sk('s1', 0, 20), cut('c1', 's1', 0.7), sk('s2', off, 30), cut('c2', 's2', 3.95)]));
+    const b = bodyOf(r, 'p'), V = b.verts, T = b.tris;
+    let hits = 0;
+    for (let i = 0; i < T.length; i += 3) { // a vertical line through the middle of the opening: nothing should be in the way
+      const a = [0, 1, 2].map((k) => V[T[i] * 3 + k]), c = [0, 1, 2].map((k) => V[T[i + 1] * 3 + k]), d = [0, 1, 2].map((k) => V[T[i + 2] * 3 + k]);
+      const den = (c[1] - d[1]) * (a[0] - d[0]) + (d[0] - c[0]) * (a[1] - d[1]); if (Math.abs(den) < 1e-12) continue;
+      const l1 = ((c[1] - d[1]) * (0.3 - d[0]) + (d[0] - c[0]) * (0.2 - d[1])) / den, l2 = ((d[1] - a[1]) * (0.3 - d[0]) + (a[0] - d[0]) * (0.2 - d[1])) / den;
+      if (l1 >= 0 && l2 >= 0 && 1 - l1 - l2 >= 0) hits++;
+    }
+    check(`pocket meets the hole at ${label}: nothing left in the opening`, !errs(r) && hits === 0, `${hits} faces in the way`);
+  }
+});
+
+scenario('Zero-thickness walls are found and a healthy solid has none', () => {
+  const cube = [Float32Array.from([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1]), Uint32Array.from([0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7])];
+  check('a cube has no zero-thickness walls', findSkins(...cube).size === 0);
+  // the same cube plus a square sheet inside it that faces both ways: two triangles up, two down, on the same plane
+  const v = Float32Array.from([...cube[0], 0, 0, 0.5, 1, 0, 0.5, 1, 1, 0.5, 0, 1, 0.5]);
+  const t = Uint32Array.from([...cube[1], 8, 9, 10, 8, 10, 11, 8, 10, 9, 8, 11, 10]);
+  check('a two-sided sheet is found', findSkins(v, t).size === 4, String(findSkins(v, t).size));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

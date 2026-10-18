@@ -176,9 +176,22 @@ export function planeFrame(params) {
 }
 
 // Place a solid built in sketch-local coordinates (z = sketch normal) onto the sketch plane.
+/**
+ * Put a tool's corners on the same grid the saved meshes use (32-bit floats). Two tools meant to meet at one height, say a pocket
+ * that ends at 0.7 and a hole that starts at 4.65 - 3.95, can differ by 2e-16; a boolean then leaves a skin thinner than any
+ * printer can see, which renders as a floor but exports as nothing. After this both heights are the same number, so the faces
+ * line up exactly and no skin forms. Returns the tool unchanged if it cannot be rebuilt.
+ */
+function snapTool(m, t) {
+  try {
+    const me = m.getMesh();
+    if (me.numProp !== 3) return m;
+    return t(new K.Manifold(new K.Mesh({ numProp: 3, vertProperties: Float32Array.from(me.vertProperties), triVerts: me.triVerts })));
+  } catch { return m; }
+}
 function toPlane(m, params, t) {
   const { o, x, y, n } = planeFrame(params);
-  return t(m.transform([x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, n[0], n[1], n[2], 0, o[0], o[1], o[2], 1]));
+  return snapTool(t(m.transform([x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, n[0], n[1], n[2], 0, o[0], o[1], o[2], 1])), t);
 }
 
 // ---------- fillet / chamfer ----------
@@ -352,7 +365,7 @@ function makePrimitive(p, t) {
     case 'torus': m = t(K.CrossSection.circle(p.minor, 32).translate([p.major, 0])).revolve(SEG, 360); break;
     default: throw new Error('unknown primitive');
   }
-  return t(t(m).translate([px, py, pz]));
+  return snapTool(t(t(m).translate([px, py, pz])), t);
 }
 
 

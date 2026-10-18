@@ -26,6 +26,7 @@ import { ficon, uicon } from './ficons.js';
 import { createSketchUI } from './sketchui.js';
 import { smoothPath } from './solids.js';
 import { bedFit, overhangs, wallThickness } from './printcheck.js';
+import { withoutSkins } from './skins.js';
 import { MATERIALS, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
 import { resolveSketch } from './sketchdims.js';
 import { CON_GLYPH, CON_LABEL, definedState } from './sketchcons.js';
@@ -40,7 +41,9 @@ const PRINTERS = {
 };
 
 // ------------------------------------------------------------------ state
-const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: 'mm', components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
+/** The unit new designs start in: a personal setting kept in this browser (Settings, Units). */
+const defaultUnits = () => { try { const u = localStorage.getItem('sketchy.units'); return UNIT_TABLE[u] ? u : 'mm'; } catch { return 'mm'; } };
+const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: defaultUnits(), components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
 let bedName = localStorage.getItem('sketchy.bed') || Object.keys(PRINTERS)[0];
 let doc = blankDoc();
 let undoStack = [], redoStack = [];
@@ -67,6 +70,10 @@ let selPriority = prefPriority;
 const savePriority = (v) => { prefPriority = v; try { localStorage.setItem('sketchy.selPriority', v); } catch { /* storage unavailable */ } };
 let selMode = 'click';           // click | window | freeform | paint (drag-selection tools)
 let selFace = null;
+let viewBodies = [], skinCount = 0, skinWarned = false; // what the viewport draws, and how many triangles of zero-thickness walls were left out of it
+let selFaceB = null; // a second flat face (Shift or Ctrl-click) to measure against; only valid while selFace is still the face it was added to
+const faceB = () => (selFace && selFaceB && selFaceB.base === selFace ? selFaceB : null);
+const shownFaces = () => [selFace, faceB()].filter(Boolean);
 let selEdges = [];
 let profSel = new Set(), profHover = null; // idle sketch-region selection: keys "sketchId|profileId"
 let edgeHover = null;
@@ -134,7 +141,10 @@ function refreshNow() {
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   for (const [id, origin] of Object.entries(result.shifted || {})) if (resolvedMap[id]) resolvedMap[id] = { ...resolvedMap[id], origin }; // sketches that followed their face
   vp.bodyColors = doc.appearance || {};
-  vp.setBodies([...result.bodies, ...(result.surfaces || [])].filter((b) => !hiddenBodies.has(b.id)));
+  viewBodies = result.bodies.map((b) => withoutSkins(b)); // zero-thickness walls are not drawn: they hold no material and would not print
+  skinCount = viewBodies.reduce((a, b) => a + (b.skinned || 0), 0);
+  if (skinCount && !skinWarned) { skinWarned = true; toast('Some walls have no thickness, so they are hidden: they hold no material and would not print.'); } else if (!skinCount) skinWarned = false;
+  vp.setBodies([...viewBodies, ...(result.surfaces || [])].filter((b) => !hiddenBodies.has(b.id)));
   for (const id of [...vp.selected]) if (!result.bodies.some((b) => b.id === id)) vp.selected.delete(id);
   vp.refreshMaterials();
   drawSketches();
@@ -144,7 +154,7 @@ function refreshNow() {
   updatePickEdges();
   if (selFace && !result.bodies.some((b) => b.id === selFace.id)) selFace = null;
   updateEdgeView();
-  if (dialog) updateFaceHL(); else if (!sketch && !measure) vp.showFaces(selFace ? [selFace] : [], null);
+  if (dialog) updateFaceHL(); else if (!sketch && !measure) vp.showFaces(shownFaces(), null);
   renderTree(); renderTimeline(); renderRibbon(); renderStatus();
   $('#btn-undo').disabled = !undoStack.length || !!dialog || !!sketch;
   $('#btn-redo').disabled = !redoStack.length || !!dialog || !!sketch;
@@ -345,6 +355,19 @@ function toggleEdge(entry) {
 }
 
 const paramShow = (p, v) => (v === undefined ? '' : p.unit === 'number' ? String(+v.toFixed(4)) : p.unit === 'angle' ? `${+v.toFixed(4)}°` : fmtLen(v));
+/** Settings (user menu → Settings): personal preferences. Units is the first one. */
+function showSettings() {
+  const unitOpts = (sel) => Object.keys(UNIT_TABLE).map((u) => `<option value="${u}"${u === sel ? ' selected' : ''}>${esc(UNIT_NAMES[u])} (${u})</option>`).join('');
+  const m = modal(`<div class="modal-title">Settings</div>
+    <div class="modal-body set-body">
+      <h3 class="set-h">Units</h3>
+      <label class="set-row"><span>This design</span><select id="st-doc" aria-label="Units of this design">${unitOpts(getUnits())}</select></label>
+      <label class="set-row"><span>New designs</span><select id="st-new" aria-label="Units for new designs">${unitOpts(defaultUnits())}</select></label>
+      <div class="hint-sm">Lengths are shown and typed in these units. Everything is stored in millimetres, so changing units never changes the geometry. The choice for new designs is kept in this browser.</div>
+    </div>`);
+  m.el.querySelector('#st-doc').onchange = (e) => setDocUnits(e.target.value);
+  m.el.querySelector('#st-new').onchange = (e) => { try { localStorage.setItem('sketchy.units', e.target.value); } catch { /* storage unavailable */ } toast(`New designs will start in ${UNIT_NAMES[e.target.value]}.`); };
+}
 function unitsMenu(anchor) {
   const r = (anchor || $('#tree')).getBoundingClientRect();
   showMenu(r.left, r.bottom + 2, [{ head: 'DOCUMENT UNITS' }, ...Object.keys(UNIT_TABLE).map((u) => ({ label: `${UNIT_NAMES[u]} (${u})`, check: getUnits() === u, run: () => setDocUnits(u) }))]);
@@ -356,10 +379,23 @@ function setDocUnits(u) {
   renderTree(); renderStatus(); renderSketchPanel?.(); refresh();
   toast(`Units: ${UNIT_NAMES[u]}. Everything is stored in millimetres, so existing geometry doesn't change.`);
 }
+/** How far apart two flat faces are (parallel faces), or the angle between them. */
+function faceGap(a, b) {
+  const dt = a.normal[0] * b.normal[0] + a.normal[1] * b.normal[1] + a.normal[2] * b.normal[2];
+  const ang = (Math.acos(Math.min(1, Math.abs(dt))) * 180) / Math.PI;
+  if (ang < 0.05) return { parallel: true, d: Math.abs((b.point[0] - a.point[0]) * a.normal[0] + (b.point[1] - a.point[1]) * a.normal[1] + (b.point[2] - a.point[2]) * a.normal[2]) };
+  return { parallel: false, ang };
+}
 function renderStatus() {
+  const fb = faceB();
+  if (fb) {
+    const g = faceGap(selFace, fb);
+    $('#statusbar').textContent = g.parallel ? `Distance between faces: ${dispStr(g.d, 3)} ${getUnits()}` : `Angle between faces: ${g.ang.toFixed(2)}°`;
+    return;
+  }
   const n = result.bodies.length;
   const tris = result.bodies.reduce((a, b) => a + b.tris.length / 3, 0);
-  $('#statusbar').textContent = `${n} ${n === 1 ? 'body' : 'bodies'} · ${tris.toLocaleString()} triangles · ${getUnits()}`;
+  $('#statusbar').textContent = `${n} ${n === 1 ? 'body' : 'bodies'} · ${tris.toLocaleString()} triangles · ${getUnits()}${skinCount ? ' · zero-thickness walls hidden' : ''}`;
 }
 
 // ------------------------------------------------------------------ toolbar (familiar CAD style)
@@ -432,6 +468,7 @@ function sketchOnSelectedFace() {
   enterSketch(sketch.index, true, { plane: 'custom', origin: n.map((c) => +(c * d).toFixed(4)), normal: nn.map((c) => +c.toFixed(6)), xdir });
 }
 function renderRibbon() {
+  renderStatus(); // the status line follows the selection (two faces show the distance between them)
   vp.hold('sketch', !!sketch);
   const picking = !!sketch?.picking, inSketch = !!sketch && !picking;
   const tabList = sketch ? ['SKETCH'] : WORKSPACE_TABS;
@@ -2824,9 +2861,10 @@ function bindViewport() {
     if (selPriority === 'face') {
       const tg = vp.pickPlanarFace(e);
       vp.selected.clear(); vp.refreshMaterials();
-      selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal } : null;
+      if (add && selFace && tg?.face && !faceB()) selFaceB = { id: tg.id, point: tg.point, normal: tg.normal, base: selFace }; // a second face: measure between them
+      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal } : null;
       if (tg?.curved) { vp.selected.add(tg.id); vp.refreshMaterials(); toast('Curved face: selected the whole body. Flat faces select on their own.'); } // something is always selectable
-      vp.showFaces(selFace ? [selFace] : [], null);
+      vp.showFaces(shownFaces(), null);
       renderTree(); renderRibbon();
       return;
     }
@@ -2907,7 +2945,7 @@ function bindViewport() {
       if (sketch || measure) return;
       const en = vp.pickEdge(e, edgeEntries());
       if ((en?.chain || null) !== (edgeHover?.chain || null)) { edgeHover = en; updateEdgeView(); }
-      if (en) { $('#gl').style.cursor = 'pointer'; if (vp.hover) { vp.hover = null; vp.refreshMaterials(); } vp.showFaces(selFace ? [selFace] : [], null); return; }
+      if (en) { $('#gl').style.cursor = 'pointer'; if (vp.hover) { vp.hover = null; vp.refreshMaterials(); } vp.showFaces(shownFaces(), null); return; }
       const pf = vp.pickProfileAt(e);
       const pk = pf ? pf.key : null;
       if (pk !== profHover) { profHover = pk; vp.setProfileState(profSel, profHover); }
@@ -2915,7 +2953,7 @@ function bindViewport() {
       $('#gl').style.cursor = '';
       if (selPriority === 'face') {
         const tg = vp.pickPlanarFace(e);
-        vp.showFaces(selFace ? [selFace] : [], tg?.face ? tg : null);
+        vp.showFaces(shownFaces(), tg?.face ? tg : null);
         if (vp.hover) { vp.hover = null; vp.refreshMaterials(); }
         return;
       }
@@ -3601,7 +3639,7 @@ async function boot() {
   await refreshAccount();
   await ensureSignedIn(); // server mode: sign-up on first visit, login afterwards
   setAccountMenuHandler((anchor) => openUserMenu(anchor, {
-    onAccount: () => showAccount(), onSettings: showAdmin,
+    onAccount: () => showAccount(), onPrefs: () => showSettings(), onSettings: showAdmin,
     isDark: () => getTheme() === 'dark', onTheme: () => setTheme(getTheme() === 'dark' ? 'light' : 'dark'),
     onLogout: async () => { await signOut(); try { localStorage.removeItem('sketchy.autosave'); } catch { /* ignore */ } location.reload(); },
   }));

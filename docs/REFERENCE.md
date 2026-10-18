@@ -103,6 +103,10 @@ One system font stack (`system-ui`, falling back through Segoe UI / Roboto / Hel
 The interface chrome (menus, dialogs, sidebar, sign-up / login) targets **WCAG 2.2 AA**: text contrast of at least 4.5:1, control borders of at least 3:1, visible keyboard focus, accessible names on icon buttons, keyboard-operable menus (arrows, Enter, Esc) and 24px minimum target sizes. The palette is built on flag green `#169B62` (buttons and links use `#0E7C4A` so white text passes). Checked with axe-core on the main screen, the Extrude dialog, the sidebar, menus and the sign-in page. **Not covered:** the 3D viewport and sketching tools are pointer-driven and have no keyboard or screen-reader equivalent, and this has not had a manual screen-reader review.
 
 
+## Settings
+
+Your initial (top right) → **Settings** holds personal preferences. **Units** sets the length unit of the open design and the unit new designs start in (kept in this browser). Everything is stored in millimetres, so changing units never changes the geometry. **Server settings**, for administrators, is a separate item in the same menu.
+
 ## Explaining problems and checking work
 
 * **Failures say what to do.** A feature that cannot be built shows its reason inside its dialog with a hint for the usual fixes, and a red mark on its timeline item. A feature that built but needs a look (a cut that touches nothing, a fillet that lost some edges) gets an amber mark and a warning.

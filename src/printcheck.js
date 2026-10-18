@@ -123,7 +123,7 @@ export function wallThickness(bodies, { minWall = 1.2, maxSamples = 1600, onProg
           const w = (dir[0] * qx + dir[1] * qy + dir[2] * qz) * inv;
           if (w < 0 || u + w > 1) continue;
           const dist = (e2x * qx + e2y * qy + e2z * qz) * inv;
-          if (dist > 1e-6 && dist < best) best = dist;
+          if (dist > -1e-5 && dist < best) best = Math.max(dist, 0); // a twin face right on top of this one is a skin with no thickness: it counts as 0, not as nothing
         }
         if (best < Infinity) out.push({ p: o, t: best });
       }
