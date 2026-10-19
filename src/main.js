@@ -2286,7 +2286,13 @@ function exportDialog() {
   if (dialog || sketch) return;
   let last = '3mf'; try { last = localStorage.getItem('sketchy.exportFormat') || '3mf'; } catch { /* storage unavailable */ }
   if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = '3mf';
-  const hasSel = vp.selected.size > 0, nm = (doc.name === 'Untitled' ? 'design' : doc.name) + verSuffix();
+  const hasSel = vp.selected.size > 0;
+  /** The design's name, then the body's name when only one body of several is exported, then the version: "Bracket_Lid_v3". */
+  const nameFor = (selectedOnly) => {
+    const ids = [...vp.selected], one = selectedOnly && ids.length === 1 && result.bodies.length > 1 ? result.bodies.find((b) => b.id === ids[0]) : null;
+    return (doc.name === 'Untitled' ? 'design' : doc.name) + (one ? '_' + one.name : '') + verSuffix();
+  };
+  const nm = nameFor(hasSel);
   const m = modal(`<div class="modal-title">Export</div>
     <form class="modal-body ex">
       <label>File name<input id="ex-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
@@ -2328,7 +2334,10 @@ function exportDialog() {
     draw(w.thin.length ? ['warn', `Thin walls: the thinnest is ${dispStr(w.min, 2)} ${getUnits()} (${w.thin.length} thin spots)`] : ['ok', `Walls are at least ${dispStr(pcOpts.minWall, 1)} ${getUnits()} thick`]);
   };
   m.el.querySelector('.modal-x, .close')?.addEventListener('click', () => { cancelCheck.stop = true; });
-  fmtSel.onchange = sync; m.el.querySelector('#ex-sel').onchange = runChecks; sync();
+  const nameBox = m.el.querySelector('#ex-name'); let typed = false; // keep the suggested name in step with the options until the person types their own
+  nameBox.addEventListener('input', () => { typed = true; });
+  const suggest = () => { if (!typed) nameBox.value = nameFor(m.el.querySelector('#ex-sel').checked && fmtSel.value !== 'sketchy'); };
+  fmtSel.onchange = () => { sync(); suggest(); }; m.el.querySelector('#ex-sel').onchange = () => { runChecks(); suggest(); }; sync();
   m.el.querySelector('#ex-c').onclick = () => m.close();
   setTimeout(() => { const n = m.el.querySelector('#ex-name'); n.focus(); n.select(); }, 0);
   form.onsubmit = (e) => {
@@ -2474,14 +2483,13 @@ async function saveVersion() {
     <form class="modal-body sv-form" autocomplete="off">
       ${named ? '' : '<p class="p0">Choose a name next, then this becomes the first version.</p>'}
       <label class="sv-row"><span>Version description</span><input name="note" maxlength="200" value="User saved" aria-label="Version description" spellcheck="true"></label>
-      <div class="sv-row"><label class="sv-ms"><input type="checkbox" name="ms"> Milestone</label><input name="msname" maxlength="200" disabled aria-label="Milestone name" placeholder="Milestone name"></div>
+      <div class="sv-row"><span>Version</span><input class="sv-ver" value="V${(named ? doc.rev || 0 : 0) + 1}" readonly tabindex="-1" aria-label="The number this version will get"></div>
       <div class="modal-foot flush"><button type="submit" class="btn primary">OK</button><button type="button" class="btn" id="sv-cancel">Cancel</button></div>
     </form>`);
   const form = m.el.querySelector('form');
   m.el.querySelector('#sv-cancel').onclick = () => m.close();
-  form.ms.onchange = () => { form.msname.disabled = !form.ms.checked; if (form.ms.checked) form.msname.focus(); };
   setTimeout(() => { form.note.focus(); form.note.select(); }, 80);
-  form.onsubmit = async (e) => { e.preventDefault(); const note = form.note.value.trim(), ms = form.ms.checked ? (form.msname.value.trim() || 'Milestone') : ''; m.close(); await save(false, note, ms); };
+  form.onsubmit = async (e) => { e.preventDefault(); const note = form.note.value.trim(); m.close(); await save(false, note); };
 }
 async function save(as, note = '', milestone = '') {
   let name = doc.name, folder = doc.folder || '';

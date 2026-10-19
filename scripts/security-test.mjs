@@ -183,6 +183,16 @@ try {
   const g0 = await (await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${tok0}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_design', arguments: { design: 'Crafty' } } }) })).json();
   check('an assistant is not handed a crafted design on disk to replay', /cannot be opened by an assistant/.test(JSON.stringify(g0)), JSON.stringify(g0).slice(0, 200));
 
+  // An assistant's edits change a design in place. Only the Save button adds a numbered revision.
+  const rpcV = async (name, args) => (await (await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${tok0}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) })).json());
+  await rpcV('create_design', { name: 'Assistant made' });
+  for (let i = 0; i < 3; i++) await rpcV('add_feature', { design: 'Assistant made', kind: 'box' });
+  const mcpList = await rpcV('list_designs', {});
+  let rows = []; try { rows = JSON.parse(mcpList.result.content[0].text); } catch { /* shown below */ }
+  check('three assistant edits leave the design on revision 1', rows.find((x) => x.name === 'Assistant made')?.revision === 1, JSON.stringify(mcpList).slice(0, 300));
+  const verList = fs.existsSync(path.join(dir, 'projects', uid, '.versions', 'Assistant made')) ? fs.readdirSync(path.join(dir, 'projects', uid, '.versions', 'Assistant made')).filter((f) => f.endsWith('.json')) : [];
+  check('and made no more than the one kept copy of the original', verList.length <= 1, verList.join(','));
+
   console.log('Host header');
   const withHost = (h, port0 = port) => new Promise((resolve, reject) => { const r = http.request({ host: '127.0.0.1', port: port0, path: '/api/me', headers: { host: h } }, (rs) => { rs.resume(); rs.on('end', () => resolve(rs.statusCode)); }); r.on('error', reject); r.end(); });
   check('a public-looking name is refused (DNS rebinding)', (await withHost('evil.example.com')) === 421);

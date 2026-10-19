@@ -401,7 +401,9 @@ const mcpStorage = {
   },
   async write(u, name, obj, device, rev) {
     if (!nameOk(name)) throw new Error('Invalid design name.');
-    try { return (await writeProject(u, name, JSON.stringify(obj), device, rev)).seq; }
+    // An assistant's edits are work in progress, like autosave: they change the design in place and never add a numbered revision.
+    // Only the Save button in the app does that.
+    try { return (await writeProject(u, name, JSON.stringify(obj), device, rev, { auto: true })).seq; }
     catch (e) { if (e instanceof Conflict) throw new Error('The design was changed by someone else while this edit was being made. Fetch it again and retry.'); throw e; }
   },
 };
