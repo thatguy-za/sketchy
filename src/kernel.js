@@ -695,6 +695,43 @@ export function resolvePlanes(features) {
   });
 }
 
+// ---------- incremental rebuild ----------
+// A rebuild replays the timeline. Replaying all of it for every edit is what makes a big design slow, so the kernel keeps
+// checkpoints (the live bodies as they stood before feature i) and starts from the latest one that is still valid: edit a feature
+// near the end and only the last few steps run again. Shapes that no later step needs are freed as soon as a step is done, so
+// memory stays near the size of the final bodies instead of growing with every step.
+const CACHE = { feats: [], bodyComp: '', cps: [], out: [], steps: 0 };
+const refs = new Map(); // manifold -> how many checkpoints hold it (they must not be freed)
+const retain = (m) => refs.set(m, (refs.get(m) || 0) + 1);
+const release = (m) => { const c = (refs.get(m) || 0) - 1; if (c > 0) refs.set(m, c); else { refs.delete(m); try { m.delete(); } catch { /* shared handle */ } } };
+const bodyMeshCache = new WeakMap(); // manifold -> its mesh data, so a body that did not change is not read out of the kernel again
+let meshKey = 0;
+const KEY_PREFIX = typeof WorkerGlobalScope !== 'undefined' ? 'w' : 'm'; // a worker and the page both number their meshes; the prefix keeps the numbers apart
+/** Same feature, deeply: parameters are plain data, long strings (imported meshes) are compared by value last. */
+function sameValue(a, b) {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) if (!(k in b) || !sameValue(a[k], b[k])) return false;
+  return true;
+}
+/** Free everything the incremental cache holds (a different design was opened, or the page is done with it). */
+export function clearKernelCache() {
+  for (const cp of CACHE.cps) for (const e of cp.live) release(e.m);
+  CACHE.cps = []; CACHE.feats = []; CACHE.out = []; CACHE.steps = 0;
+}
+const meshOf = (m) => {
+  let o = bodyMeshCache.get(m);
+  if (!o) {
+    const mesh = m.getMesh();
+    o = { key: KEY_PREFIX + ++meshKey, verts: new Float32Array(mesh.vertProperties.filter((_, i) => i % mesh.numProp < 3)), tris: new Uint32Array(mesh.triVerts), volume: m.volume(), area: m.surfaceArea(), bbox: bboxOf(m) };
+    bodyMeshCache.set(m, o);
+  }
+  return o;
+};
+
 export function rebuild(features, count, opts = {}) {
   features = resolvePlanes(features);
   const garbage = [];
@@ -780,7 +817,42 @@ export function rebuild(features, count, opts = {}) {
     } else { addBody(f.id, solid, f.name); notes[f.id] = { op: 'new', bodies: [], text: 'Makes a new body' }; }
   };
 
-  for (let i = 0; i < Math.min(count, features.length); i++) {
+  // Where to start: the latest checkpoint at or before the first feature that differs from the last run (and before the feature
+  // whose preview or pick data is wanted, since those are produced while it runs).
+  const n = Math.min(count, features.length), useCache = opts.cache !== false;
+  const compKey = JSON.stringify(opts.bodyComp || null);
+  let firstDiff = 0;
+  if (useCache && compKey === CACHE.bodyComp) { const lim = Math.min(CACHE.feats.length, features.length); while (firstDiff < lim && sameValue(CACHE.feats[firstDiff], features[firstDiff])) firstDiff++; }
+  const previewAt = opts.previewId ? features.findIndex((x) => x.id === opts.previewId) : -1;
+  const wanted = Math.min(firstDiff, opts.capture >= 0 ? opts.capture : Infinity, previewAt >= 0 ? previewAt : Infinity);
+  if (!useCache) clearKernelCache();
+  for (let j = CACHE.cps.length - 1; j >= 0; j--) if (CACHE.cps[j].i > firstDiff) { for (const e of CACHE.cps[j].live) release(e.m); CACHE.cps.splice(j, 1); } // those were built on features that changed
+  CACHE.out.length = Math.min(CACHE.out.length, firstDiff);
+  const resume = useCache ? CACHE.cps.filter((c) => c.i <= Math.min(wanted, n)).sort((a, b) => b.i - a.i)[0] : null;
+  const start = resume ? resume.i : 0;
+  if (resume) {
+    for (const e of resume.live) live.set(e.id, { id: e.id, name: e.name, m: e.m });
+    for (const sf of resume.surfaces) surfaces.set(sf.id, { ...sf });
+    Object.assign(sketches, resume.sketches);
+    counter = resume.counter; surfCount = resume.surfCount;
+    for (const id of resume.used) sketchUsed.add(id);
+  }
+  const rec = []; // what each step reports, kept so a later run that starts further on can still return it
+  for (let j = 0; j < start; j++) { const o = CACHE.out[j]; snaps.push(o.snap); surfSnaps.push(o.surf); if (o.error) errors[features[j].id] = o.error; if (o.warnings) warnings[features[j].id] = o.warnings; if (o.note) notes[features[j].id] = o.note; if (o.lost) lost[features[j].id] = o.lost; if (o.shifted) shifted[features[j].id] = o.shifted; }
+  const step = Math.max(1, Math.ceil(n / 16)); // a checkpoint every few features: more of them cost more memory, fewer make a resume replay more
+  const makeCheckpoint = (i) => {
+    const cp = { i, live: [...live.values()].map((b) => ({ id: b.id, name: b.name, m: b.m })), surfaces: [...surfaces.values()].map((q) => ({ ...q })), sketches: { ...sketches }, counter, surfCount, used: [...sketchUsed] };
+    for (const e of cp.live) retain(e.m);
+    return cp;
+  };
+  const newCps = [];
+  const sweep = () => { // free what the next step cannot need: anything not held by a live body or a checkpoint
+    const liveMs = new Set(); for (const b of live.values()) liveMs.add(b.m);
+    const keep = [];
+    for (const o of garbage) { if (liveMs.has(o) || refs.has(o)) keep.push(o); else { try { o.delete(); } catch { /* shared handle */ } } }
+    garbage.length = 0; garbage.push(...keep);
+  };
+  for (let i = start; i < n; i++) {
     const f0 = features[i];
     // Emboss is an extrude in disguise: raise = join outward along the sketch normal, engrave = cut into the part
     const eng = f0.type === 'emboss' && f0.params.mode === 'engrave';
@@ -788,11 +860,11 @@ export function rebuild(features, count, opts = {}) {
       ? { ...f0, type: 'extrude', params: { sketch: f0.params.sketch, profiles: f0.params.profiles, extent: 'distance', distance: (eng ? -1 : 1) * Math.abs(f0.params.depth || 0), flip: false, symmetric: false, op: eng ? 'cut' : 'join', target: f0.params.target || '', toBody: '', taper: 0, twist: 0, scaleTop: 1 } }
       : f0;
     curF = f;
-    snaps.push(snap());
-    surfSnaps.push([...surfaces.values()].map((q) => ({ id: q.id, name: q.name })));
+    const sn = snap(), sf = [...surfaces.values()].map((q) => ({ id: q.id, name: q.name })), usedBefore = sketchUsed.size;
+    snaps.push(sn); surfSnaps.push(sf);
+    if (i > start && i % step === 0 && !CACHE.cps.some((c) => c.i === i)) newCps.push(makeCheckpoint(i));
     if (opts.capture === i) captured = [...live.values()].map((b) => { const me = b.m.getMesh(); return { id: b.id, name: b.name, verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts) }; });
-    if (f.suppressed) continue;
-    try {
+    if (!f.suppressed) try {
       const p = f.params;
       switch (f.type) {
         case 'primitive': addBody(f.id, makePrimitive(p, t), f.name); break;
@@ -1426,18 +1498,26 @@ export function rebuild(features, count, opts = {}) {
     } catch (e) {
       errors[f.id] = (e && e.message) || String(e);
     }
+    CACHE.out[i] = { snap: sn, surf: sf, error: errors[f.id], warnings: warnings[f.id], note: notes[f.id], lost: lost[f.id], shifted: shifted[f.id], used: [...sketchUsed].slice(usedBefore) };
+    sweep();
   }
 
-  const bodies = [...live.values()].map((b) => {
-    const mesh = b.m.getMesh();
-    return {
-      id: b.id, name: b.name,
-      verts: new Float32Array(mesh.vertProperties.filter((_, i) => i % mesh.numProp < 3)),
-      tris: new Uint32Array(mesh.triVerts),
-      volume: b.m.volume(), area: b.m.surfaceArea(), bbox: bboxOf(b.m),
-    };
-  });
-  garbage.forEach((o) => { try { o.delete(); } catch { /* shared handle */ } });
+  const bodies = [...live.values()].map((b) => ({ id: b.id, name: b.name, ...meshOf(b.m) }));
+  if (useCache) {
+    // keep the checkpoints made now, plus the end state (the next run starts from it when only a later feature changes)
+    const oldEnd = CACHE.cps.findIndex((c) => c.i === n);
+    if (oldEnd < 0 || start < n) {
+      const fin = makeCheckpoint(n);
+      if (oldEnd >= 0) { for (const e of CACHE.cps[oldEnd].live) release(e.m); CACHE.cps.splice(oldEnd, 1); }
+      CACHE.cps.push(fin);
+    }
+    for (const cp of newCps) CACHE.cps.push(cp);
+    const liveMs = new Set(); for (const b of live.values()) liveMs.add(b.m);
+    for (const o of garbage) if (!refs.has(o) && !liveMs.has(o)) { try { o.delete(); } catch { /* shared handle */ } } // whatever the last steps left behind
+    // thin the checkpoints out so memory stays bounded: about one per `step` features, whatever the timeline's length
+    for (let j = CACHE.cps.length - 1; j >= 0; j--) { const c = CACHE.cps[j]; if (c.i !== n && c.i % step !== 0) { for (const e of c.live) release(e.m); CACHE.cps.splice(j, 1); } }
+    CACHE.feats = features; CACHE.bodyComp = compKey;
+  } else garbage.forEach((o) => { try { o.delete(); } catch { /* shared handle */ } });
   const surfList = [...surfaces.values()].map((q) => { let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity; for (let i = 0; i < q.verts.length; i += 3) { x0 = Math.min(x0, q.verts[i]); x1 = Math.max(x1, q.verts[i]); y0 = Math.min(y0, q.verts[i + 1]); y1 = Math.max(y1, q.verts[i + 1]); z0 = Math.min(z0, q.verts[i + 2]); z1 = Math.max(z1, q.verts[i + 2]); } return { ...q, surface: true, bbox: { min: [x0, y0, z0], max: [x1, y1, z1] } }; });
-  return { bodies, surfaces: surfList, surfSnaps, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted };
+  return { bodies, surfaces: surfList, surfSnaps, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted, stats: { from: start, steps: n - start, total: n } };
 }

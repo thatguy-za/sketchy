@@ -6,6 +6,25 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { buildBVH, raycastBVH } from './bvh.js';
+import { clusterMesh } from './lod.js';
+
+const BVH_MIN = 20000;    // triangles: a body with more than this is picked through a tree, not by testing every triangle
+const LOD_MIN = 60000;    // while the camera moves, bodies with more triangles than this are drawn from a coarse copy ...
+const LOD_TOTAL = 250000; // ... once the whole model passes this many
+
+/** Mesh.raycast for big bodies: nearest hit through the mesh's BVH, in the same shape three.js returns. */
+function bvhRaycast(raycaster, intersects) {
+  const src = this.userData.src;
+  if (!src) return;
+  const bvh = this.userData.bvh || (this.userData.bvh = buildBVH(src.verts, src.tris));
+  const o = raycaster.ray.origin, d = raycaster.ray.direction, mat = Array.isArray(this.material) ? this.material[0] : this.material;
+  const hit = raycastBVH(bvh, o.x, o.y, o.z, d.x, d.y, d.z, raycaster.far, mat?.side !== THREE.FrontSide);
+  if (!hit || hit.t < raycaster.near) return;
+  const T = src.tris, V = src.verts, i = hit.tri, a = T[i * 3], b = T[i * 3 + 1], c = T[i * 3 + 2];
+  const n = new THREE.Vector3(V[b * 3] - V[a * 3], V[b * 3 + 1] - V[a * 3 + 1], V[b * 3 + 2] - V[a * 3 + 2]).cross(new THREE.Vector3(V[c * 3] - V[a * 3], V[c * 3 + 1] - V[a * 3 + 1], V[c * 3 + 2] - V[a * 3 + 2])).normalize();
+  intersects.push({ distance: hit.t, point: new THREE.Vector3(o.x + d.x * hit.t, o.y + d.y * hit.t, o.z + d.z * hit.t), object: this, faceIndex: i, face: { a, b, c, normal: n } });
+}
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { PLANES, planeFrame } from './kernel.js';
 import { look } from './materials.js';
@@ -26,7 +45,8 @@ export class Viewport {
     this.persp.position.set(90, -120, 80);
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = false;
-    this.controls.addEventListener('start', () => { this.anim = null; });
+    this.controls.addEventListener('start', () => { this.anim = null; this.setMoving(true); });
+    this.controls.addEventListener('end', () => this.setMoving(false));
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
     this.controls.screenSpacePanning = true;
     // Two-view layout: pane 0 is the main view; pane 1 is created on demand. this.camera / this.controls / this.persp / this.ortho
@@ -301,21 +321,59 @@ export class Viewport {
   }
 
   // ---- bodies ----
+  disposeMesh(m) { m.traverse((o) => { o.geometry?.dispose(); }); m.userData.lod?.dispose(); m.userData.full?.dispose(); }
+  /** For a very big model: make a coarse copy of each heavy body in a quiet moment, to draw while the camera moves. */
+  prepareLOD() {
+    const meshes = this.bodyGroup.children, total = meshes.reduce((a, m) => a + m.userData.src.tris.length / 3, 0);
+    this.lodOn = total >= LOD_TOTAL;
+    if (!this.lodOn) return;
+    const idle = window.requestIdleCallback || ((f) => setTimeout(f, 50));
+    for (const m of meshes) {
+      if (m.userData.lod || m.userData.src.tris.length / 3 < LOD_MIN) continue;
+      idle(() => {
+        if (m.userData.lod || !m.parent) return;
+        const c = clusterMesh(m.userData.src.verts, m.userData.src.tris);
+        const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(c.verts, 3)); g.setIndex(new THREE.BufferAttribute(c.tris, 1)); g.computeVertexNormals();
+        m.userData.lod = g;
+      });
+    }
+  }
+  /** Swap heavy bodies for their coarse copies while the camera is being moved, and back when it stops. */
+  setMoving(on) {
+    if (!this.lodOn && !this.lodSwapped) return;
+    for (const m of this.bodyGroup.children) {
+      const lod = m.userData.lod;
+      if (!lod) continue;
+      if (on && !m.userData.full) { m.userData.full = m.geometry; m.geometry = lod; for (const c of m.children) c.visible = false; }
+      else if (!on && m.userData.full) { m.geometry = m.userData.full; m.userData.full = null; for (const c of m.children) c.visible = true; }
+    }
+    this.lodSwapped = on;
+  }
   setBodies(bodies) {
-    for (const c of [...this.bodyGroup.children]) { c.traverse((o) => o.geometry?.dispose()); this.bodyGroup.remove(c); }
+    // A body whose shape did not change keeps its mesh (same key from the kernel): building the smooth normals and the edge
+    // lines of a big body is the slow part, and most edits change one body of many.
+    const old = new Map();
+    for (const c of [...this.bodyGroup.children]) { this.bodyGroup.remove(c); if (c.userData.key) old.set(c.userData.key, c); else this.disposeMesh(c); }
+    const kept = new Set();
     for (const b of bodies) {
+      let mesh = b.key ? old.get(b.key) : null;
+      if (mesh && !!mesh.userData.surface === !!b.surface && mesh.userData.src.tris.length === b.tris.length) { mesh.userData.id = b.id; kept.add(b.key); this.bodyGroup.add(mesh); continue; }
       let geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(b.verts, 3));
       geo.setIndex(new THREE.BufferAttribute(b.tris, 1));
       geo = toCreasedNormals(geo, (35 * Math.PI) / 180);
-      const mesh = new THREE.Mesh(geo, this.mats.body);
-      mesh.userData.id = b.id; mesh.userData.surface = !!b.surface; mesh.castShadow = true; mesh.receiveShadow = true;
+      mesh = new THREE.Mesh(geo, this.mats.body);
+      mesh.userData.id = b.id; mesh.userData.surface = !!b.surface; mesh.userData.key = b.key || null; mesh.castShadow = true; mesh.receiveShadow = true;
       mesh.userData.src = { verts: b.verts, tris: b.tris };
+      if (b.tris.length / 3 >= BVH_MIN) mesh.raycast = bvhRaycast; // big body: pick through a tree (built on first use)
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30), this.mats.edge);
       edges.raycast = () => {};
       mesh.add(edges);
+      if (b.key) kept.add(b.key);
       this.bodyGroup.add(mesh);
     }
+    for (const [k, m] of old) if (!kept.has(k)) this.disposeMesh(m);
+    this.prepareLOD();
     this.refreshMaterials();
     this.rebuildSection();
     if (this.opts.render) this.fitRenderLights();
@@ -849,7 +907,20 @@ export class Viewport {
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
     const proj = (p) => { const v = p.clone().project(this.camera); return [(v.x + 1) / 2 * r.width, (1 - v.y) / 2 * r.height, v]; };
     let best = null, bd = tol;
+    const cv = new THREE.Vector3();
     for (const e of entries) {
+      // most chains are nowhere near the cursor: test the screen box of the chain's bounding box first, before projecting its points
+      if (e.chain.pts.length > 4) {
+        const bb = e.chain.bb || (e.chain.bb = (() => { const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity]; for (const p of e.chain.pts) for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; } return [lo, hi]; })());
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, behind = false;
+        for (let c = 0; c < 8; c++) {
+          cv.set(bb[c & 1][0], bb[(c >> 1) & 1][1], bb[(c >> 2) & 1][2]).project(this.camera);
+          if (cv.z > 1) { behind = true; break; }
+          const px = (cv.x + 1) / 2 * r.width, py = (1 - cv.y) / 2 * r.height;
+          if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+        }
+        if (!behind && (mx < x0 - bd || mx > x1 + bd || my < y0 - bd || my > y1 + bd)) continue;
+      }
       const P = e.chain.pts.map((p) => new THREE.Vector3(...p));
       if (e.chain.closed) P.push(P[0]);
       for (let i = 0; i < P.length - 1; i++) {

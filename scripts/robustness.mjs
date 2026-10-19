@@ -4,8 +4,10 @@
 import { initHeadless, evaluate } from '../src/headless.js';
 import { findEdgeChains, edgeRef } from '../src/edges.js';
 import { planarFace } from '../src/edges.js';
-import { findFaceTri } from '../src/kernel.js';
+import { findFaceTri, rebuild, clearKernelCache } from '../src/kernel.js';
 import { findSkins } from '../src/skins.js';
+import { buildBVH, raycastBVH } from '../src/bvh.js';
+import { clusterMesh } from '../src/lod.js';
 
 await initHeadless();
 let failed = 0, passed = 0;
@@ -209,6 +211,73 @@ scenario('Zero-thickness walls are found and a healthy solid has none', () => {
   const v = Float32Array.from([...cube[0], 0, 0, 0.5, 1, 0, 0.5, 1, 1, 0.5, 0, 1, 0.5]);
   const t = Uint32Array.from([...cube[1], 8, 9, 10, 8, 10, 11, 8, 10, 9, 8, 11, 10]);
   check('a two-sided sheet is found', findSkins(v, t).size === 4, String(findSkins(v, t).size));
+});
+
+scenario('Resuming from a checkpoint gives the same result as rebuilding everything', () => {
+  const plate = prim('p', 'box', { sx: 200, sy: 200, sz: 10, radius: 0 });
+  const peg = (i, r = 4) => prim('h' + i, 'cylinder', { pos: [-90 + (i % 10) * 20, -90 + Math.floor(i / 10) * 20, 10], radius: r, height: 6 });
+  const join = (i) => ({ id: 'j' + i, type: 'combine', name: 'J' + i, params: { target: 'p', tool: 'h' + i, op: 'join', keepTool: false } });
+  const sk = { id: 's', type: 'sketch', name: 'S', params: { plane: 'XY', offset: 0, shapes: [{ t: 'rect', x: 500, y: 500, w: 10, h: 10 }] } };
+  const cut = { id: 'c', type: 'extrude', name: 'Cut', params: { sketch: 's', profiles: null, extent: 'distance', distance: 5, op: 'cut', target: 'p', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } };
+  const build = (n, edit = {}) => { const f = [plate]; for (let i = 0; i < n; i++) f.push(peg(i, edit[i] ?? 4), join(i)); f.push(sk, cut); return f; };
+  const sig = (r) => JSON.stringify({ b: r.result.bodies.map((b) => [b.id, +b.volume.toFixed(3), b.bbox.min.map((v) => +v.toFixed(3)), b.bbox.max.map((v) => +v.toFixed(3)), b.tris.length]), e: r.result.errors, w: r.result.warnings, n: Object.keys(r.result.notes), s: [...r.result.sketchUsed], sn: r.result.snaps.length });
+  const run = (feats, cache, extra = {}) => evaluate(doc(feats), { cache, ...extra });
+  const steps = [[{}], [{ 29: 5 }], [{ 29: 5, 15: 3 }], [{ 0: 6, 29: 5, 15: 3 }], [{ 0: 6, 29: 5, 15: 3 }], [{ 15: 2 }]];
+  steps.forEach(([edit], k) => {
+    const feats = build(30, edit), inc = run(feats, true), full = run(feats, false);
+    check(`edit step ${k + 1}: same bodies, errors, notes and snapshots as a full rebuild`, sig(inc) === sig(full), `${sig(inc).slice(0, 120)} vs ${sig(full).slice(0, 120)}`);
+  });
+  const feats = build(30, {});
+  run(feats, true);
+  const again = run(feats, true);
+  check('an unchanged design replays nothing', again.result.stats.steps === 0, JSON.stringify(again.result.stats));
+  const e2 = build(30, { 29: 7 }); const last = run(e2, true);
+  check('editing a late feature replays only a few steps', last.result.stats.steps < 12, JSON.stringify(last.result.stats));
+  // the marker: roll back, then forward again
+  const back = run(build(30, { 29: 7 }).slice(0, 20), true), fullBack = run(build(30, { 29: 7 }).slice(0, 20), false);
+  check('shortening the timeline still matches', sig(back) === sig(fullBack));
+  const fwd = run(build(30, { 29: 7 }), true), fullFwd = run(build(30, { 29: 7 }), false);
+  check('and so does growing it back', sig(fwd) === sig(fullFwd));
+  // suppressing, deleting and reordering
+  const sup = build(30, {}); sup[11] = { ...sup[11], suppressed: true };
+  check('suppressing a feature matches', sig(run(sup, true)) === sig(run(sup, false)));
+  const del = build(30, {}); del.splice(5, 2);
+  check('deleting features matches', sig(run(del, true)) === sig(run(del, false)));
+  const dialogPreview = run(build(30, { 29: 7 }), true, {}), withPreview = evaluate(doc(build(30, { 29: 7 })), { cache: true });
+  void dialogPreview; void withPreview;
+});
+
+scenario('Dialog data (picked-edge capture and extrude preview) is the same from a checkpoint', () => {
+  clearKernelCache();
+  const plate = prim('p', 'box', { sx: 100, sy: 100, sz: 10, radius: 0 });
+  const peg = (i) => prim('h' + i, 'cylinder', { pos: [-40 + i * 20, 0, 10], radius: 4, height: 6 });
+  const join = (i) => ({ id: 'j' + i, type: 'combine', name: 'J' + i, params: { target: 'p', tool: 'h' + i, op: 'join', keepTool: false } });
+  const sk = { id: 's', type: 'sketch', name: 'S', params: { plane: 'XY', offset: 10, shapes: [{ t: 'rect', x: -5, y: -30, w: 10, h: 10 }] } };
+  const ex = { id: 'e', type: 'extrude', name: 'E', params: { sketch: 's', profiles: null, extent: 'distance', distance: 4, op: 'join', target: 'p', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } };
+  const feats = [plate]; for (let i = 0; i < 9; i++) feats.push(peg(i), join(i)); feats.push(sk, ex);
+  const idx = feats.findIndex((f) => f.id === 'e');
+  rebuild(feats, feats.length, {}); // everything cached, no dialog open
+  const a = rebuild(feats, feats.length, { previewId: 'e', capture: idx });
+  const b = rebuild(feats, feats.length, { previewId: 'e', capture: idx, cache: false });
+  check('the preview comes back and matches', !!a.preview && a.preview.op === b.preview.op && a.preview.tris.length === b.preview.tris.length, JSON.stringify([a.preview?.op, b.preview?.op]));
+  check('the captured bodies match', JSON.stringify(a.captured?.map((x) => [x.id, x.tris.length])) === JSON.stringify(b.captured?.map((x) => [x.id, x.tris.length])) && a.captured.length > 0);
+  clearKernelCache();
+});
+
+scenario('Picking through the tree matches testing every triangle, and the coarse copy is smaller', () => {
+  const sphere = (nu, nv, r = 50) => { const v = [], t = []; for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) { const th = (j / nv) * Math.PI, ph = (i / nu) * 2 * Math.PI; v.push(r * Math.sin(th) * Math.cos(ph), r * Math.sin(th) * Math.sin(ph), r * Math.cos(th)); } for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) { const a = j * (nu + 1) + i, b = a + 1, c = a + nu + 1, d = c + 1; if (j > 0) t.push(a, c, b); if (j < nv - 1) t.push(b, c, d); } return { verts: Float32Array.from(v), tris: Uint32Array.from(t) }; };
+  const brute = (m, o, d, back) => { let best = Infinity, hit = -1; const V = m.verts, T = m.tris; for (let i = 0; i < T.length; i += 3) { const a = T[i] * 3, b = T[i + 1] * 3, c = T[i + 2] * 3; const e1 = [V[b] - V[a], V[b + 1] - V[a + 1], V[b + 2] - V[a + 2]], e2 = [V[c] - V[a], V[c + 1] - V[a + 1], V[c + 2] - V[a + 2]]; const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]; const dn = d[0] * n[0] + d[1] * n[1] + d[2] * n[2]; if ((!back && dn > 0) || dn === 0) continue; const t = ((V[a] - o[0]) * n[0] + (V[a + 1] - o[1]) * n[1] + (V[a + 2] - o[2]) * n[2]) / dn; if (t <= 1e-9 || t >= best) continue; const p = [o[0] + d[0] * t - V[a], o[1] + d[1] * t - V[a + 1], o[2] + d[2] * t - V[a + 2]]; const d00 = e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2], d01 = e1[0] * e2[0] + e1[1] * e2[1] + e1[2] * e2[2], d11 = e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2], d20 = p[0] * e1[0] + p[1] * e1[1] + p[2] * e1[2], d21 = p[0] * e2[0] + p[1] * e2[1] + p[2] * e2[2]; const den = d00 * d11 - d01 * d01, u = (d11 * d20 - d01 * d21) / den, w = (d00 * d21 - d01 * d20) / den; if (u < 0 || w < 0 || u + w > 1) continue; best = t; hit = i / 3; } return hit < 0 ? null : { t: best, tri: hit }; };
+  let seed = 11; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  for (const [nu, nv] of [[24, 12], [90, 45]]) {
+    const m = sphere(nu, nv), bvh = buildBVH(m.verts, m.tris); let bad = 0, hits = 0;
+    for (let k = 0; k < 300; k++) {
+      const o = [(rnd() - 0.5) * 200, (rnd() - 0.5) * 200, 90 + rnd() * 50], tg = [(rnd() - 0.5) * 90, (rnd() - 0.5) * 90, (rnd() - 0.5) * 40], d = [tg[0] - o[0], tg[1] - o[1], tg[2] - o[2]], l = Math.hypot(...d); d[0] /= l; d[1] /= l; d[2] /= l;
+      for (const back of [false, true]) { const a = brute(m, o, d, back), b = raycastBVH(bvh, o[0], o[1], o[2], d[0], d[1], d[2], Infinity, back); if (a) hits++; if ((a === null) !== (b === null) || (a && Math.abs(a.t - b.t) > 1e-6)) bad++; }
+    }
+    check(`${m.tris.length / 3} triangles: ${hits} hits agree with the slow way`, bad === 0 && hits > 100, `${bad} differ`);
+  }
+  const big = sphere(300, 200), c = clusterMesh(big.verts, big.tris, 40);
+  check('the coarse copy has far fewer triangles but is still a surface', c.tris.length > 300 && c.tris.length < big.tris.length / 8, `${big.tris.length / 3} -> ${c.tris.length / 3}`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

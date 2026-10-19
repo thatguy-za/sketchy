@@ -1047,3 +1047,10 @@ body.touch .row { margin: 10px 0; }
 .set-body .set-row select { width: 100%; }
 @media (max-width: 520px) { .set-body { min-width: 0; } .set-body .set-row { grid-template-columns: 1fr; } }
 .sv-form .sv-ver { background: transparent; border-color: transparent; color: var(--muted); font-weight: 600; cursor: default; box-shadow: none; }
+.sv-form .pr-size { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.sv-form .pr-size input { min-width: 0; width: 100%; }
+.sv-form .sv-row > * { min-width: 0; }
+#busybar { position: absolute; left: 50%; bottom: 62px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-radius: 8px; background: var(--panel, #fff); color: var(--text); border: 1px solid var(--line); box-shadow: 0 4px 14px rgba(0,0,0,.25); font-size: var(--fs-sm); z-index: 30; }
+#busybar[hidden] { display: none; }
+#busybar .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent, #3d8bfd); animation: busyspin .8s linear infinite; }
+@keyframes busyspin { to { transform: rotate(360deg); } }

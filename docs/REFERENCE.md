@@ -103,6 +103,16 @@ One system font stack (`system-ui`, falling back through Segoe UI / Roboto / Hel
 The interface chrome (menus, dialogs, sidebar, sign-up / login) targets **WCAG 2.2 AA**: text contrast of at least 4.5:1, control borders of at least 3:1, visible keyboard focus, accessible names on icon buttons, keyboard-operable menus (arrows, Enter, Esc) and 24px minimum target sizes. The palette is built on flag green `#169B62` (buttons and links use `#0E7C4A` so white text passes). Checked with axe-core on the main screen, the Extrude dialog, the sidebar, menus and the sign-in page. **Not covered:** the 3D viewport and sketching tools are pointer-driven and have no keyboard or screen-reader equivalent, and this has not had a manual screen-reader review.
 
 
+## Large designs
+
+Sketchy rebuilds the timeline after each edit, so a design with hundreds of features or very dense meshes can feel slow. What it does about that:
+
+* **Only the changed part is rebuilt.** The kernel keeps checkpoints along the timeline. Editing a feature near the end replays only the steps after the nearest checkpoint (the status line says "from step 224 of 241"); editing the first feature replays everything. Shapes no later step needs are freed as it goes, so memory stays near the size of the result.
+* **Big designs rebuild in the background.** When a rebuild takes longer than about 150 ms, rebuilding moves to a worker thread: orbiting, menus and typing stay responsive, a "Rebuilding the design…" bar shows the time, and **Stop** abandons it. Small designs rebuild on the page as before.
+* **The viewport only redraws what changed.** A body that did not change keeps its mesh and its edge lines. Picking and hover on bodies over 20,000 triangles go through a spatial tree instead of testing every triangle. While you orbit a model of more than about 250,000 triangles, heavy bodies are drawn from a coarse copy, and the full mesh returns when you stop.
+* **Large imports** show what they are doing and can be cancelled. A model of more than 300,000 triangles asks whether to import it as it is or with a **Reduce** step (a normal timeline step, about 250,000 triangles) that you can adjust or suppress.
+* **If it is still slow:** roll the timeline marker back, suppress features you are not working on, or keep a big imported mesh in its own design.
+
 ## Settings
 
 Your initial (top right) → **Settings** holds personal preferences. **Units** sets the length unit of the open design and the unit new designs start in (kept in this browser). Everything is stored in millimetres, so changing units never changes the geometry. **Server settings**, for administrators, is a separate item in the same menu.

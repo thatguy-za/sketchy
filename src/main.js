@@ -2,7 +2,7 @@ import './style.css';
 import * as THREE from 'three';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
-import { initKernel, rebuild, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference, compareBodies } from './kernel.js';
+import { initKernel, rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference, compareBodies } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { writeSTL } from './stl.js';
 import { readModelFile } from './importers.js';
@@ -44,6 +44,10 @@ const PRINTERS = {
 /** The unit new designs start in: a personal setting kept in this browser (Settings, Units). */
 const defaultUnits = () => { try { const u = localStorage.getItem('sketchy.units'); return UNIT_TABLE[u] ? u : 'mm'; } catch { return 'mm'; } };
 const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: defaultUnits(), components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
+/** Printers the person added themselves (a name and a build volume), kept in this browser. */
+const customPrinters = () => { try { const l = JSON.parse(localStorage.getItem('sketchy.printers') || '[]'); return Array.isArray(l) ? l.filter((x) => x && typeof x.name === 'string' && Array.isArray(x.size) && x.size.length === 3 && x.size.every((v) => v > 0)) : []; } catch { return []; } };
+const saveCustomPrinters = (l) => { try { localStorage.setItem('sketchy.printers', JSON.stringify(l)); } catch { /* storage unavailable */ } };
+const printerSize = (name) => PRINTERS[name] || customPrinters().find((x) => x.name === name)?.size || null;
 let bedName = localStorage.getItem('sketchy.bed') || Object.keys(PRINTERS)[0];
 let doc = blankDoc();
 let undoStack = [], redoStack = [];
@@ -77,7 +81,7 @@ const shownFaces = () => [selFace, faceB()].filter(Boolean);
 let selEdges = [];
 let profSel = new Set(), profHover = null; // idle sketch-region selection: keys "sketchId|profileId"
 let edgeHover = null;
-const chainCache = new WeakMap();
+const chainCache = new Map(); // edge chains by the body's mesh key: a body that did not change keeps its chains across rebuilds
 let playTimer = null;
 let dialog = null;               // {index, isNew, pre, mode}
 let sketch = null;               // active sketch session
@@ -107,6 +111,76 @@ const limit = () => (sketch ? sketch.index : doc.marker);
 
 // ------------------------------------------------------------------ rebuild / refresh
 let pending = false;
+// ------------------------------------------------------------------ rebuilding off the main thread
+// A design that takes a while to rebuild is rebuilt in a Web Worker instead (kernel-worker.js), so orbiting, menus and typing stay
+// responsive. Small designs keep rebuilding on the page itself: no round trip, and the result is there straight away.
+const HEAVY_MS = 150; // a rebuild slower than this moves the kernel to the worker
+const canWorker = typeof Worker !== 'undefined';
+let kernelHeavy = false, lastRebuildMs = 0, quickRuns = 0;
+const kw = { worker: null, ready: false, seq: 0, running: null, pending: null, meshes: new Map(), idle: [], busyTimer: 0 };
+function ensureKernelWorker() {
+  if (kw.worker || !canWorker) return;
+  try {
+    kw.worker = new Worker(new URL('./kernel-worker.js', import.meta.url), { type: 'module' });
+    kw.worker.onmessage = onKernelMessage;
+    kw.worker.onerror = (e) => { console.error(e); stopKernelWorker(); kernelHeavy = false; toast('The background rebuild failed, so Sketchy went back to rebuilding on the page.', true); refresh(); };
+    kw.worker.postMessage({ type: 'init', wasmUrl });
+  } catch (e) { console.error(e); kw.worker = null; kernelHeavy = false; }
+}
+function stopKernelWorker() {
+  kw.worker?.terminate(); kw.worker = null; kw.running = null; kw.pending = null; kw.meshes = new Map();
+  showBusy(false); for (const f of kw.idle.splice(0)) f();
+}
+const kernelBusy = () => !!(kw.running || kw.pending);
+const kernelIdle = () => new Promise((res) => (kernelBusy() ? kw.idle.push(res) : res()));
+function rebuildInWorker(req, done) {
+  ensureKernelWorker();
+  if (!kw.worker) { kernelHeavy = false; refresh(); return; }
+  req.done = done;
+  if (kw.running) { kw.pending = req; return; } // only the newest change waits its turn; the ones in between are skipped
+  sendRebuild(req);
+}
+function sendRebuild(req, resend = false) {
+  kw.running = { id: ++kw.seq, req, t0: performance.now() };
+  kw.worker.postMessage({ type: 'rebuild', id: kw.running.id, features: req.features, count: req.count, opts: req.opts, resend });
+  clearTimeout(kw.busyTimer); kw.busyTimer = setTimeout(() => showBusy(true), 400);
+}
+function onKernelMessage(e) {
+  const m = e.data;
+  if (m.type === 'ready') { kw.ready = true; return; }
+  const run = kw.running;
+  if (!run || m.id !== run.id) return; // an answer for a request that was stopped
+  kw.running = null;
+  if (m.type === 'error') { console.error(m.message); toast('Kernel error: ' + m.message, true); } else {
+    const res = m.result;
+    const missing = res.bodies.some((b) => !b.verts && !kw.meshes.has(b.key));
+    if (missing) { sendRebuild(run.req, true); return; } // the page lost a mesh the worker thought it had: ask for everything again
+    for (const b of res.bodies) { if (b.verts) kw.meshes.set(b.key, { verts: b.verts, tris: b.tris }); else Object.assign(b, kw.meshes.get(b.key)); }
+    const keep = new Set(res.bodies.map((b) => b.key)); for (const k of [...kw.meshes.keys()]) if (!keep.has(k)) kw.meshes.delete(k);
+    lastRebuildMs = m.ms;
+    quickRuns = m.ms < 40 ? quickRuns + 1 : 0;
+    if (quickRuns >= 6 && !kw.pending) { kernelHeavy = false; quickRuns = 0; kw.worker.postMessage({ type: 'clear' }); kw.meshes = new Map(); } // cheap again: go back to rebuilding on the page
+    run.req.done(res);
+  }
+  if (kw.pending) { const next = kw.pending; kw.pending = null; sendRebuild(next); }
+  else { showBusy(false); for (const f of kw.idle.splice(0)) f(); }
+}
+function showBusy(on) {
+  clearTimeout(kw.busyTimer);
+  let el = $('#busybar');
+  if (!on) { el && (el.hidden = true); clearInterval(kw.busyTick); return; }
+  if (!el) {
+    el = document.createElement('div'); el.id = 'busybar'; el.setAttribute('role', 'status');
+    el.innerHTML = '<span class="spin"></span><span id="busy-text">Rebuilding the design…</span><button type="button" class="btn small" id="busy-stop">Stop</button>';
+    $('#viewport').appendChild(el);
+    el.querySelector('#busy-stop').onclick = () => { stopKernelWorker(); toast('Stopped. What you see may be out of date. Change something to rebuild.'); };
+  }
+  el.hidden = false;
+  const t0 = kw.running?.t0 || performance.now();
+  clearInterval(kw.busyTick);
+  kw.busyTick = setInterval(() => { const t = $('#busy-text'); if (t) t.textContent = `Rebuilding the design… ${((performance.now() - t0) / 1000).toFixed(1)} s`; }, 200);
+}
+
 function refresh() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; refreshNow(); }); } }
 const paramScope = Object.assign((n) => paramState.values[n], { names: () => Object.keys(paramState?.values || {}) });
 function refreshParamsNow() { paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig)); }
@@ -136,11 +210,21 @@ function refreshNow() {
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
   vp.setCanvases((doc.canvases || []).map((c) => ({ ...c, hidden: canvasHidden.has(c.id) })));
   vp.setConstructionPlanes(feats.filter((f, i) => f.type === 'plane' && !f.suppressed && i < limit()).map((f) => ({ id: f.id, name: f.name, origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir, hidden: planeHidden.has(f.id) })));
-  try { result = rebuild(feats, limit(), { bodyComp: doc.bodyComp, capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null }); }
+  const req = { features: feats, count: limit(), opts: { bodyComp: doc.bodyComp, capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null } };
+  if (kernelHeavy && canWorker) { rebuildInWorker(req, (res) => { result = res; applyResult(evalErr); }); return; } // a big design: the page stays usable while it rebuilds
+  const t0 = performance.now();
+  try { result = rebuild(req.features, req.count, req.opts); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
+  lastRebuildMs = performance.now() - t0;
+  if (lastRebuildMs > HEAVY_MS && canWorker) { kernelHeavy = true; clearKernelCache(); ensureKernelWorker(); } // from the next change on, rebuild off the main thread
+  applyResult(evalErr);
+}
+/** Everything that follows a rebuild: colours, meshes, selection, panels. */
+function applyResult(evalErr) {
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   for (const [id, origin] of Object.entries(result.shifted || {})) if (resolvedMap[id]) resolvedMap[id] = { ...resolvedMap[id], origin }; // sketches that followed their face
   vp.bodyColors = doc.appearance || {};
+  { const live = new Set(result.bodies.map((b) => b.key || b)); for (const k of [...chainCache.keys()]) if (!live.has(k)) chainCache.delete(k); }
   viewBodies = result.bodies.map((b) => withoutSkins(b)); // zero-thickness walls are not drawn: they hold no material and would not print
   skinCount = viewBodies.reduce((a, b) => a + (b.skinned || 0), 0);
   if (skinCount && !skinWarned) { skinWarned = true; toast('Some walls have no thickness, so they are hidden: they hold no material and would not print.'); } else if (!skinCount) skinWarned = false;
@@ -200,13 +284,18 @@ function updateProfileView() {
 
 // ---- direct edge selection (hover / click edges, then Fillet or Chamfer)
 function chainsFor(b) {
-  let c = chainCache.get(b);
-  if (!c) { c = chainsOf(b.verts, 3, b.tris); chainCache.set(b, c); }
+  const k = b.key || b;
+  let c = chainCache.get(k);
+  if (!c) { c = chainsOf(b.verts, 3, b.tris); chainCache.set(k, c); }
   return c;
 }
-function edgeEntries() {
+let entriesMemo = { result: null, hidden: '', list: [] };
+function edgeEntries() { // asked for on every mouse move, so the list is kept until the result or the hidden bodies change
+  const hidden = [...hiddenBodies].sort().join('|');
+  if (entriesMemo.result === result && entriesMemo.hidden === hidden) return entriesMemo.list;
   const out = [];
   for (const b of result.bodies) if (!hiddenBodies.has(b.id)) for (const chain of chainsFor(b)) out.push({ body: b.id, chain });
+  entriesMemo = { result, hidden, list: out };
   return out;
 }
 function resolveSelEdges() {
@@ -395,7 +484,7 @@ function renderStatus() {
   }
   const n = result.bodies.length;
   const tris = result.bodies.reduce((a, b) => a + b.tris.length / 3, 0);
-  $('#statusbar').textContent = `${n} ${n === 1 ? 'body' : 'bodies'} · ${tris.toLocaleString()} triangles · ${getUnits()}${skinCount ? ' · zero-thickness walls hidden' : ''}`;
+  $('#statusbar').textContent = `${n} ${n === 1 ? 'body' : 'bodies'} · ${tris.toLocaleString()} triangles · ${getUnits()}${skinCount ? ' · zero-thickness walls hidden' : ''}${lastRebuildMs > 300 ? ` · rebuilt in ${(lastRebuildMs / 1000).toFixed(1)} s${result.stats && result.stats.from > 0 ? `, from step ${result.stats.from + 1} of ${result.stats.total}` : ''}` : ''}`;
 }
 
 // ------------------------------------------------------------------ toolbar (familiar CAD style)
@@ -711,8 +800,8 @@ function moveFeature(from, to) {
   feats.splice(dest, 0, f);
   const m = doc.marker;
   const newMarker = from < m && dest >= m ? m - 1 : from >= m && dest < m ? m + 1 : m;
-  const old = rebuild(doc.features, doc.marker).errors;
-  const res = rebuild(feats, newMarker).errors;
+  const old = result.errors; // the design as it stands now was just built; only the moved order needs a trial rebuild
+  const res = rebuild(feats, newMarker, { cache: false }).errors;
   const bad = Object.keys(res).filter((k) => !old[k]);
   if (bad.length) return toast(`Moving "${f.name}" there would break "${doc.features.find((x) => x.id === bad[0])?.name || 'a feature'}".`, true);
   pushUndo(pre);
@@ -1507,19 +1596,41 @@ function renderDialogErrors() {
   vp.setNoteBodies?.(note?.bodies || []);
 }
 function printerMenu(anchor) {
-  const r = anchor.getBoundingClientRect();
+  const r = anchor.getBoundingClientRect(), mine = customPrinters();
   showMenu(r.left, r.bottom, [
     ...Object.keys(PRINTERS).map((n) => ({ label: n, check: n === bedName, run: () => setBed(n, PRINTERS[n]) })),
+    ...(mine.length ? [{ sep: true }, { head: 'MY PRINTERS' }, ...mine.map((x) => ({ label: `${x.name} (${x.size.join('×')})`, check: x.name === bedName, run: () => setBed(x.name, x.size) }))] : []),
     { sep: true },
-    { label: 'Custom…', run: async () => {
-      const s = await askName({ title: 'Custom build volume', label: 'Size X, Y, Z in mm', value: '200,200,200', ok: 'Set', raw: true, validate: (t) => { const v = t.split(',').map(Number); return v.length === 3 && v.every((n) => n > 0) ? '' : 'Enter three positive numbers separated by commas, for example 200,200,200.'; } });
-      if (s) setBed('Custom', s.split(',').map(Number));
-    } },
+    { label: 'Add a printer…', run: () => customPrinterDialog() },
+    ...mine.map((x) => ({ label: `Remove "${x.name}"`, run: () => { saveCustomPrinters(customPrinters().filter((y) => y.name !== x.name)); if (bedName === x.name) setBed(Object.keys(PRINTERS)[0], Object.values(PRINTERS)[0]); toast(`Removed ${x.name}.`); } })),
   ]);
+}
+/** A printer of your own: a name, and the size of its build volume in millimetres. */
+function customPrinterDialog() {
+  const m = modal(`<div class="modal-title">Add a printer</div>
+    <form class="modal-body sv-form" autocomplete="off">
+      <label class="sv-row"><span>Name</span><input name="pname" maxlength="40" placeholder="e.g. Workshop Ender" aria-label="Printer name"></label>
+      <div class="sv-row"><span>Build volume (mm)</span><div class="pr-size"><input name="x" type="number" min="1" step="any" value="200" aria-label="X"><input name="y" type="number" min="1" step="any" value="200" aria-label="Y"><input name="z" type="number" min="1" step="any" value="200" aria-label="Z"></div></div>
+      <div class="note err-note" id="pr-err" role="alert"></div>
+      <div class="modal-foot flush"><button type="submit" class="btn primary">Add</button><button type="button" class="btn" id="pr-cancel">Cancel</button></div>
+    </form>`);
+  const form = m.el.querySelector('form'), err = m.el.querySelector('#pr-err');
+  m.el.querySelector('#pr-cancel').onclick = () => m.close();
+  setTimeout(() => form.pname.focus(), 80);
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const name = form.pname.value.trim().replace(/\s+/g, ' '), size = [form.x.value, form.y.value, form.z.value].map(Number);
+    if (!name) { err.textContent = 'Give the printer a name.'; form.pname.focus(); return; }
+    if (PRINTERS[name]) { err.textContent = 'That name is already one of the listed printers.'; return; }
+    if (!size.every((v) => v > 0 && v <= 100000)) { err.textContent = 'Enter the three sizes in millimetres.'; return; }
+    saveCustomPrinters([...customPrinters().filter((x) => x.name !== name), { name, size }]);
+    m.close(); setBed(name, size);
+  };
 }
 function setBed(name, size) { bedName = name; try { localStorage.setItem('sketchy.bed', name); } catch { /* storage unavailable */ } vp.opts.bedSize = size; vp.opts.bed = true; vp.buildBed(); vp.refreshMaterials(); renderRibbon(); toast(`Build volume: ${name}`); }
 function closeDialog(ok, force = false) {
   if (!dialog) return;
+  if (kernelBusy()) { kernelIdle().then(() => closeDialog(ok, force)); return; } // the error check below needs the result of the last change
   if (ok && !force && result.errors[doc.features[dialog.index].id]) { // keep a feature that has an error? ask in-app
     confirmBox({ title: 'This feature has an error', message: `${result.errors[doc.features[dialog.index].id]}\n\nKeep it anyway?`, ok: 'Keep it' }).then((keep) => { if (keep && dialog) closeDialog(true, true); });
     return;
@@ -2195,6 +2306,7 @@ function clearCheck() { pcancel && (pcancel.stop = true); checkGroup.traverse((o
 function closePrintCheck() { clearCheck(); $('#props-wrap').classList.remove('open'); }
 function showPrintCheck() {
   if (dialog || sketch) return;
+  if (kernelBusy()) return toast('Still rebuilding the design. Try again in a moment.', true);
   if (!checkGroup.parent) vp.scene.add(checkGroup);
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id));
   const wrap = $('#props-wrap');
@@ -2265,11 +2377,21 @@ const EXPORT_FORMATS = [
   ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
   ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
 ];
-function exportFile(fmt, name, selectedOnly) {
+function exportFile(fmt, name, selectedOnly, split = false) {
   if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: look((doc.appearance || {})[b.id]).color }));
   if (!bodies.length) return toast('Nothing to export.', true);
   const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
+  if (split && bodies.length > 1) { // one file per body: "Name_v3_Lid.stl", numbered if two bodies share a name
+    const used = new Map();
+    bodies.forEach((b, i) => {
+      const base = fileSafeName(b.name) || `body${i + 1}`, k = (used.get(base) || 0) + 1; used.set(base, k);
+      const file = `${name}_${k > 1 ? base + '_' + k : base}`;
+      setTimeout(() => download(w([b], file), `${file}.${fmt}`), i * 300); // browsers handle a short queue of downloads better than a burst
+    });
+    toast(`Exporting ${bodies.length} ${fmt.toUpperCase()} files, one per body`);
+    return;
+  }
   download(w(bodies, name), `${name}.${fmt}`);
   toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}`);
 }
@@ -2284,12 +2406,13 @@ function isWatertight(b) {
 }
 function exportDialog() {
   if (dialog || sketch) return;
+  if (kernelBusy()) return toast('Still rebuilding the design. Try again in a moment.', true);
   let last = '3mf'; try { last = localStorage.getItem('sketchy.exportFormat') || '3mf'; } catch { /* storage unavailable */ }
   if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = '3mf';
   const hasSel = vp.selected.size > 0;
   /** The design's name, then the body's name when only one body of several is exported, then the version: "Bracket_Lid_v3". */
-  const nameFor = (selectedOnly) => {
-    const ids = [...vp.selected], one = selectedOnly && ids.length === 1 && result.bodies.length > 1 ? result.bodies.find((b) => b.id === ids[0]) : null;
+  const nameFor = (selectedOnly, split = false) => {
+    const ids = [...vp.selected], one = !split && selectedOnly && ids.length === 1 && result.bodies.length > 1 ? result.bodies.find((b) => b.id === ids[0]) : null;
     return (doc.name === 'Untitled' ? 'design' : doc.name) + (one ? '_' + one.name : '') + verSuffix();
   };
   const nm = nameFor(hasSel);
@@ -2300,6 +2423,7 @@ function exportDialog() {
       <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
       <div class="ex-check" id="ex-check" aria-live="polite" hidden></div>
       <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
+      <label class="ex-chk" id="ex-splitrow"><input type="checkbox" id="ex-split"><span>Each body as its own file <small id="ex-splitn"></small></span></label>
       <div class="note err-note" id="ex-err" role="alert"></div>
       <div class="modal-foot flush"><button type="button" class="btn" id="ex-c">Cancel</button><button type="submit" class="btn primary">Export</button></div>
     </form>`);
@@ -2336,8 +2460,17 @@ function exportDialog() {
   m.el.querySelector('.modal-x, .close')?.addEventListener('click', () => { cancelCheck.stop = true; });
   const nameBox = m.el.querySelector('#ex-name'); let typed = false; // keep the suggested name in step with the options until the person types their own
   nameBox.addEventListener('input', () => { typed = true; });
-  const suggest = () => { if (!typed) nameBox.value = nameFor(m.el.querySelector('#ex-sel').checked && fmtSel.value !== 'sketchy'); };
-  fmtSel.onchange = () => { sync(); suggest(); }; m.el.querySelector('#ex-sel').onchange = () => { runChecks(); suggest(); }; sync();
+  const splitBox = m.el.querySelector('#ex-split');
+  const inScope = () => result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!(m.el.querySelector('#ex-sel').checked && fmtSel.value !== 'sketchy') || vp.selected.has(b.id)));
+  const syncSplit = () => { // only meaningful when more than one body would be exported
+    const k = inScope().length, off = fmtSel.value === 'sketchy' || k < 2;
+    splitBox.disabled = off; if (off) splitBox.checked = false;
+    m.el.querySelector('#ex-splitrow').style.opacity = off ? '.55' : '';
+    m.el.querySelector('#ex-splitn').textContent = off ? '' : `(${k} files)`;
+  };
+  const suggest = () => { syncSplit(); if (!typed) nameBox.value = nameFor(m.el.querySelector('#ex-sel').checked && fmtSel.value !== 'sketchy', splitBox.checked); };
+  splitBox.onchange = suggest;
+  fmtSel.onchange = () => { sync(); suggest(); }; m.el.querySelector('#ex-sel').onchange = () => { runChecks(); suggest(); }; sync(); syncSplit();
   m.el.querySelector('#ex-c').onclick = () => m.close();
   setTimeout(() => { const n = m.el.querySelector('#ex-name'); n.focus(); n.select(); }, 0);
   form.onsubmit = (e) => {
@@ -2347,30 +2480,32 @@ function exportDialog() {
     const fmt = fmtSel.value;
     try { localStorage.setItem('sketchy.exportFormat', fmt); } catch { /* storage unavailable */ }
     m.close();
-    exportFile(fmt, name, m.el.querySelector('#ex-sel').checked && fmt !== 'sketchy');
+    exportFile(fmt, name, m.el.querySelector('#ex-sel').checked && fmt !== 'sketchy', m.el.querySelector('#ex-split').checked && fmt !== 'sketchy');
   };
 }
 /** Add one imported piece as a body: try it as it is, and repair it (weld, flip, fill holes) if that doesn't make a solid. */
-function importPart(part) {
+/** Rebuild the design now, and wait for it (the page rebuilds in place; a big design rebuilds in the worker). */
+async function rebuildNow() { refreshNow(); if (kernelHeavy && canWorker) await kernelIdle(); }
+async function importPart(part) {
   let soup = part.soup;
-  const attempt = (data) => {
+  const attempt = async (data) => {
     const pre = snapshot();
     const f = { id: 'f' + doc.nextId++, type: 'import', name: part.name, params: { data: encodeFloats(data), tris: data.length / 9 } };
     doc.features.splice(doc.marker, 0, f); doc.marker++;
     pushUndo(pre);
-    result = rebuild(doc.features, doc.marker);
+    await rebuildNow();
     if (result.errors[f.id]) { restore(pre); undoStack.pop(); return { err: result.errors[f.id] }; }
     if (part.color) doc.appearance = { ...(doc.appearance || {}), [f.id]: part.color };
     return { id: f.id };
   };
-  let r = attempt(soup), note = '';
+  let r = await attempt(soup), note = '';
   if (r.err) {
     const fixed = repairSoup(soup);
-    r = attempt(fixed.soup);
+    r = await attempt(fixed.soup);
     if (r.err) return { err: `${r.err}. Mesh repair could not make it a closed solid (${fixed.report.skippedHoles} unfillable holes)` };
     soup = fixed.soup; note = describeRepair(fixed.report);
   }
-  return { tris: soup.length / 9, note };
+  return { tris: soup.length / 9, note, id: r.id };
 }
 /**
  * Mesh repair dialog: shows what is wrong with a mesh and lets you choose how hard to repair it (weld distance, which holes to
@@ -2405,18 +2540,69 @@ function repairDialog(part, why = '') {
     setTimeout(() => form.tol.focus(), 0);
   });
 }
+// ---- importing big models: say what is happening, offer to cancel, and offer to reduce a very dense mesh
+const IMPORT_WARN = 300000; // triangles: above this a model makes editing noticeably slower
+const IMPORT_TARGET = 250000;
+const tick = () => new Promise((r) => setTimeout(r, 30)); // let the page paint between steps
+function importProgress(name) {
+  const el = document.createElement('div');
+  el.id = 'importbar'; el.setAttribute('role', 'status');
+  el.innerHTML = '<span class="spin"></span><span id="imp-text"></span><button type="button" class="btn small" id="imp-cancel">Cancel</button>';
+  $('#viewport').appendChild(el);
+  const ctl = { cancelled: false, set: (t) => { el.querySelector('#imp-text').textContent = t; }, close: () => el.remove() };
+  el.querySelector('#imp-cancel').onclick = () => { ctl.cancelled = true; ctl.set('Cancelling after this step…'); };
+  ctl.set(`Reading ${name}…`);
+  return ctl;
+}
+/** A very dense model: import as it is, or import and add a Reduce step that brings it near IMPORT_TARGET triangles. */
+function askLargeImport(name, tris) {
+  return new Promise((resolve) => {
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const keep = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / tris) * 100)));
+    const m = modal(`<div class="modal-title">Large model</div>
+      <div class="modal-body"><p class="p0"><b>${esc(name)}</b> has ${tris.toLocaleString()} triangles. Editing and rebuilding get slower the denser a model is, and most designs do not need more than about ${IMPORT_TARGET.toLocaleString()}.</p>
+      <p class="p0">Importing with a <b>Reduce</b> step keeps about ${keep}% of the triangles. It is a step in the timeline, so you can change the amount or turn it off later.</p>
+      <div class="modal-foot flush"><button type="button" class="btn primary" id="li-reduce">Import and reduce to ~${keep}%</button><button type="button" class="btn" id="li-asis">Import as it is</button><button type="button" class="btn" id="li-cancel">Cancel</button></div></div>`);
+    m.el.querySelector('#li-reduce').onclick = () => { m.close(); finish({ keep }); };
+    m.el.querySelector('#li-asis').onclick = () => { m.close(); finish({ keep: 0 }); };
+    m.el.querySelector('#li-cancel').onclick = () => { m.close(); finish(null); };
+    m.el.querySelector('.modal-x')?.addEventListener('click', () => finish(null));
+  });
+}
 async function importModel(file, { always = false } = {}) {
+  const prog = importProgress(file.name);
   try {
+    await tick();
     const parts = await readModelFile(file);
+    if (prog.cancelled) return toast('Import cancelled.');
+    const big = parts.reduce((a, p) => a + p.soup.length / 9, 0);
+    let keep = 0;
+    if (big > IMPORT_WARN) {
+      prog.set('Waiting for your choice…');
+      const choice = await askLargeImport(parts.length > 1 ? `${file.name} (${parts.length} parts)` : parts[0].name, big);
+      if (!choice) return toast('Import cancelled.');
+      keep = choice.keep;
+    }
     let tris = 0, made = 0; const notes = new Set(), errs = [];
     for (const part of parts) {
-      let r = always ? { err: '' } : importPart(part);
+      if (prog.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
+      prog.set(`Checking ${part.name} (${(part.soup.length / 9).toLocaleString()} triangles)…`); await tick();
+      let r = always ? { err: '' } : await importPart(part);
       if (r.err !== undefined && (always || r.err)) { // won't make a solid by itself: let the user steer the repair
         const fixed = await repairDialog(part, r.err);
         if (!fixed) { errs.push(`${part.name}: cancelled`); continue; }
-        r = importPart({ ...part, soup: fixed });
+        prog.set(`Building ${part.name}…`); await tick();
+        r = await importPart({ ...part, soup: fixed });
       }
-      if (r.err) errs.push(`${part.name}: ${r.err}`); else { made++; tris += r.tris; if (r.note) notes.add(`repaired: ${r.note}`); }
+      if (r.err) errs.push(`${part.name}: ${r.err}`); else {
+        made++; tris += r.tris; if (r.note) notes.add(`repaired: ${r.note}`);
+        if (keep && r.id && r.tris > IMPORT_TARGET) { // the dense part gets a Reduce step after it
+          const pre = snapshot(), n = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / r.tris) * 100)));
+          doc.features.splice(doc.marker, 0, { id: 'f' + doc.nextId++, type: 'mreduce', name: `Reduce ${part.name}`.slice(0, 60), params: { body: r.id, keep: n, tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) } });
+          doc.marker++; pushUndo(pre);
+          prog.set(`Reducing ${part.name}…`); await tick(); await rebuildNow();
+        }
+      }
       part.notes?.forEach((n) => notes.add(n));
     }
     vp.fitted = false; refresh();
@@ -2424,6 +2610,13 @@ async function importModel(file, { always = false } = {}) {
     const what = made > 1 ? `${made} bodies from ${file.name}` : parts[0].name;
     toast(`Imported ${what} (${tris.toLocaleString()} triangles)${notes.size ? ' - ' + [...notes].join('; ') : ''}${errs.length ? `. Skipped: ${errs.join('; ')}` : ''}`, !!errs.length);
   } catch (e) { toast('Import failed: ' + e.message, true); }
+  finally { prog.close(); }
+}
+/** Length of the diagonal of a triangle soup's bounding box. */
+function boundsDiag(soup) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < soup.length; i += 3) for (let k = 0; k < 3; k++) { const v = soup[i + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
+  return Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
 }
 function captureThumb() {
   try {
@@ -3595,7 +3788,7 @@ async function boot() {
   $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading">Loading CAD kernel…</div>');
   await initKernel({ locateFile: () => wasmUrl });
   vp = new Viewport($('#gl'), $('#cube'));
-  vp.opts.bedSize = PRINTERS[bedName] || vp.opts.bedSize;
+  vp.opts.bedSize = printerSize(bedName) || vp.opts.bedSize;
   vp.buildBed();
   vp.home();
   vp.fitted = true; // only opening a design re-frames the view; making the first body must not move the camera
@@ -3655,7 +3848,7 @@ async function boot() {
   setAccountChangeHandler(() => { if (dataOpen) renderDataPanel(); });
   startRemotePolling();
   refresh();
-  window.__sketchy = { moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
+  window.__sketchy = { kernelState: () => ({ heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
   openLastOrCreate().then(checkDrafts); // not awaited: the New design dialog must not hold up the rest of start-up
 }
 /** On start: reopen the design you were last in; otherwise restore unsaved work, or ask for a name for a new design. */

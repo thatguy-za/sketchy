@@ -12,7 +12,7 @@ export const initHeadless = () => (ready ||= initKernel());
 const round = (v, n = 3) => +Number(v).toFixed(n);
 
 /** Replay the whole timeline (or up to doc.marker) exactly like the UI does. */
-export function evaluate(doc) {
+export function evaluate(doc, { cache = false } = {}) {
   const ps = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
   const evalErr = {};
   const scope = Object.assign((n) => ps.values[n], { names: () => Object.keys(ps.values) });
@@ -27,7 +27,7 @@ export function evaluate(doc) {
     }
     return ff;
   });
-  const result = rebuild(feats, feats.length, { bodyComp: doc.bodyComp }); // always the full timeline (ignores any UI roll-back marker)
+  const result = rebuild(feats, feats.length, { bodyComp: doc.bodyComp, cache }); // a one-off evaluation (assistants, compare) must not leave a design's shapes in the kernel's cache // always the full timeline (ignores any UI roll-back marker)
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   return { result, resolved: feats, paramErrors: ps.errors || {} };
 }
