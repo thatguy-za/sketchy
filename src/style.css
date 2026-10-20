@@ -154,7 +154,7 @@ svg.fi, svg.ui, .ic { display: block; pointer-events: none; }
 #vc-rolls .ra .i { fill: none; stroke: var(--c-ffffff); stroke-width: 6; stroke-linecap: round; }
 #vc-rolls .ra .h { fill: var(--c-ffffff); stroke: var(--c-8d949e); stroke-width: 1.6; stroke-linejoin: round; }
 #vc-rolls .ra:hover .i { stroke: var(--c-b3e2cb); } #vc-rolls .ra:hover .h { fill: var(--c-b3e2cb); stroke: var(--c-169b62); } #vc-rolls .ra:hover .o { stroke: var(--c-169b62); }
-#hud { position: absolute; left: 14px; bottom: 54px; pointer-events: none; color: var(--c-5a6068); font-size: var(--fs-sm); }
+#hud { position: absolute; left: 14px; bottom: 54px; max-width: min(620px, calc(100% - 420px)); min-width: 240px; line-height: 1.35; pointer-events: none; color: var(--c-5a6068); font-size: var(--fs-sm); }
 #hud b { color: var(--orange); }
 #navbar { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; background: transparent; padding: 0; }
 #navbar .nb { background: none; border: 0; border-radius: 3px; height: 26px; min-width: 26px; padding: 0 3px; display: flex; align-items: center; gap: 1px; color: var(--c-50565e); }
@@ -1054,3 +1054,7 @@ body.touch .row { margin: 10px 0; }
 #busybar[hidden] { display: none; }
 #busybar .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent, #3d8bfd); animation: busyspin .8s linear infinite; }
 @keyframes busyspin { to { transform: rotate(360deg); } }
+.props .row.lt-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+.lt-row .seg { display: flex; gap: 3px; flex-wrap: wrap; width: 100%; }
+.lt-row .seg .btn { padding: 3px 6px; font-size: var(--fs-xs); white-space: nowrap; flex: 0 0 auto; }
+.lt-row .seg .btn.on { background: var(--accent, #3d8bfd); color: #fff; border-color: transparent; }

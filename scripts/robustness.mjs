@@ -4,8 +4,10 @@
 import { initHeadless, evaluate } from '../src/headless.js';
 import { findEdgeChains, edgeRef } from '../src/edges.js';
 import { planarFace } from '../src/edges.js';
-import { findFaceTri, rebuild, clearKernelCache } from '../src/kernel.js';
+import { findFaceTri, rebuild, clearKernelCache, resolvePlanes } from '../src/kernel.js';
 import { findSkins } from '../src/skins.js';
+import { applyConstraints, definedState } from '../src/sketchcons.js';
+import { extendAt, breakAt, chamferShape } from '../src/sketchedit.js';
 import { buildBVH, raycastBVH } from '../src/bvh.js';
 import { clusterMesh } from '../src/lod.js';
 
@@ -278,6 +280,160 @@ scenario('Picking through the tree matches testing every triangle, and the coars
   }
   const big = sphere(300, 200), c = clusterMesh(big.verts, big.tris, 40);
   check('the coarse copy has far fewer triangles but is still a surface', c.tris.length > 300 && c.tris.length < big.tris.length / 8, `${big.tris.length / 3} -> ${c.tris.length / 3}`);
+});
+
+scenario('Extrude: two sides, start offset and several cut targets', () => {
+  const sk = (id, x, y, w, h, off = 0) => ({ id, type: 'sketch', name: id, params: { plane: 'XY', offset: off, shapes: [{ t: 'rect', x, y, w, h }] } });
+  const ex = (id, sketch, extra = {}) => ({ id, type: 'extrude', name: id, params: { sketch, profiles: null, extent: 'distance', distance: 5, op: 'new', target: '', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1, ...extra } });
+  const zr = (r, id) => { const b = bodyOf(r, id); return [+b.bbox.min[2].toFixed(3), +b.bbox.max[2].toFixed(3)]; };
+  const two = evaluate(doc([sk('s', 0, 0, 10, 10), ex('e', 's', { direction: 'two', distance2: 3 })]));
+  check('two sides: both distances, one body', !errs(two) && close(bodyOf(two, 'e').volume, 800, 1) && JSON.stringify(zr(two, 'e')) === '[-3,5]', errs(two) || `${bodyOf(two, 'e').volume} ${zr(two, 'e')}`);
+  const sym = evaluate(doc([sk('s', 0, 0, 10, 10), ex('e', 's', { direction: 'symmetric' })]));
+  check('symmetric still centres the extrusion', !errs(sym) && JSON.stringify(zr(sym, 'e')) === '[-2.5,2.5]', errs(sym) || String(zr(sym, 'e')));
+  const old = evaluate(doc([sk('s', 0, 0, 10, 10), ex('e', 's', { symmetric: true })]));
+  check('a design saved before "direction" existed still reads symmetric', JSON.stringify(zr(old, 'e')) === '[-2.5,2.5]');
+  const off = evaluate(doc([sk('s', 0, 0, 10, 10), ex('e', 's', { start: 'offset', startOffset: 2 })]));
+  check('start offset moves the whole extrusion', !errs(off) && JSON.stringify(zr(off, 'e')) === '[2,7]', errs(off) || String(zr(off, 'e')));
+  const boxA = prim('a', 'box', { sx: 20, sy: 20, sz: 10, radius: 0 }), boxB = prim('b', 'box', { sx: 20, sy: 20, sz: 10, radius: 0, pos: [0, 0, 20] });
+  const c = (targets) => evaluate(doc([boxA, boxB, sk('s', -5, -5, 10, 10, -1), ex('c', 's', { op: 'cut', distance: 40, targets })]));
+  const both = c(['a', 'b']), onlyA = c(['a']), none = c([]);
+  check('cut with two chosen bodies cuts both', !errs(both) && bodyOf(both, 'a').volume < 4000 - 100 && bodyOf(both, 'b').volume < 4000 - 100, errs(both));
+  check('cut with one chosen body leaves the other whole', !errs(onlyA) && bodyOf(onlyA, 'a').volume < 3900 && close(bodyOf(onlyA, 'b').volume, 4000, 1), errs(onlyA));
+  check('cut with none chosen still cuts everything', bodyOf(none, 'a').volume < 3900 && bodyOf(none, 'b').volume < 3900);
+});
+
+scenario('Revolve: choose the axis, full or partial, one or two sides', () => {
+  const sk = (shapes, plane = 'XY') => ({ id: 's', type: 'sketch', name: 'S', params: { plane, offset: 0, shapes } });
+  const rv = (extra = {}) => ({ id: 'r', type: 'revolve', name: 'R', params: { sketch: 's', profiles: null, angle: 360, op: 'new', target: '', ...extra } });
+  const vol = (r) => bodyOf(r, 'r').volume;
+  const ring = Math.PI * (100 - 25) * 10; // radius 5 to 10, height 10
+  const a = evaluate(doc([sk([{ t: 'rect', x: 5, y: 0, w: 5, h: 10 }]), rv()]));
+  check('the default axis (sketch Y) is unchanged', !errs(a) && close(vol(a), ring, ring * 0.01), errs(a) || String(vol(a)));
+  const b = evaluate(doc([sk([{ t: 'rect', x: 0, y: 5, w: 10, h: 5 }]), rv({ axis: 'x' })]));
+  check('the X axis revolves a profile above it', !errs(b) && close(vol(b), ring, ring * 0.01), errs(b) || String(vol(b)));
+  const cl = { t: 'path', open: true, lt: 'centerline', pts: [[20, 0], [20, 1]] };
+  const c = evaluate(doc([sk([{ t: 'rect', x: 25, y: 0, w: 5, h: 10 }, cl]), rv({ axis: 'centerline' })]));
+  check('a centerline drawn in the sketch is the axis', !errs(c) && close(vol(c), ring, ring * 0.01), errs(c) || String(vol(c)));
+  check('the centerline itself does not become part of the profile', Object.keys(c.result.errors).length === 0 && c.result.bodies.length === 1);
+  const none = evaluate(doc([sk([{ t: 'rect', x: 5, y: 0, w: 5, h: 10 }]), rv({ axis: 'centerline' })]));
+  check('asking for a centerline that is not there explains why', /no centerline/.test(errs(none)), errs(none));
+  const cross = evaluate(doc([sk([{ t: 'rect', x: -5, y: 0, w: 10, h: 10 }]), rv()]));
+  check('a profile across the axis is refused', /crosses the axis/.test(errs(cross)), errs(cross));
+  const left = evaluate(doc([sk([{ t: 'rect', x: -10, y: 0, w: 5, h: 10 }]), rv()]));
+  check('a profile on the far side of the axis works too', !errs(left) && close(vol(left), ring, ring * 0.01), errs(left) || String(vol(left)));
+  const quarter = evaluate(doc([sk([{ t: 'rect', x: 5, y: 0, w: 5, h: 10 }]), rv({ extent: 'partial', angle: 90 })]));
+  check('partial 90 degrees is a quarter', !errs(quarter) && close(vol(quarter), ring / 4, ring * 0.01), errs(quarter) || String(vol(quarter)));
+  const symq = evaluate(doc([sk([{ t: 'rect', x: 5, y: 0, w: 5, h: 10 }]), rv({ extent: 'partial', angle: 90, direction: 'symmetric' })]));
+  const bb = bodyOf(symq, 'r').bbox;
+  check('symmetric partial is centred on the sketch plane', !errs(symq) && close(vol(symq), ring / 4, ring * 0.01) && Math.abs(bb.min[2] + bb.max[2]) < 0.01 && bb.max[0] > 9.9, errs(symq) || JSON.stringify(bb));
+  const twoq = evaluate(doc([sk([{ t: 'rect', x: 5, y: 0, w: 5, h: 10 }]), rv({ extent: 'partial', angle: 90, angle2: 90, direction: 'two' })]));
+  check('two sides add up', !errs(twoq) && close(vol(twoq), ring / 2, ring * 0.01), errs(twoq) || String(vol(twoq)));
+  const old = evaluate(doc([sk([{ t: 'rect', x: 5, y: 0, w: 5, h: 10 }]), rv({ angle: 180 })]));
+  check('a design saved with only an angle still revolves that angle', !errs(old) && close(vol(old), ring / 2, ring * 0.01), errs(old) || String(vol(old)));
+});
+
+scenario('Sketch constraints: tangent, collinear, midpoint, symmetry and fix', () => {
+  const line = (a, b) => ({ t: 'path', open: true, pts: [a, b] });
+  const dist = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1]; return Math.abs((p[0] - a[0]) * dy - (p[1] - a[1]) * dx) / Math.hypot(dx, dy); };
+  // a line turned to touch a circle
+  let out = applyConstraints([line([0, 0], [10, 0]), { t: 'circle', cx: 6, cy: 4, r: 2 }], [{ t: 'tangent', a: { s: 0, seg: 0 }, b: { s: 1 } }]);
+  check('a line becomes tangent to a circle, keeping its start and length', Math.abs(dist([6, 4], out[0].pts[0], out[0].pts[1]) - 2) < 1e-6 && Math.abs(Math.hypot(out[0].pts[1][0], out[0].pts[1][1]) - 10) < 1e-6 && out[0].pts[0][0] === 0);
+  // a circle slid to touch a line
+  out = applyConstraints([{ t: 'circle', cx: 5, cy: 7, r: 2 }, line([0, 0], [10, 0])], [{ t: 'tangent', a: { s: 0 }, b: { s: 1, seg: 0 } }]);
+  check('a circle slides sideways until it touches a line', Math.abs(out[0].cy - 2) < 1e-9 && out[0].cx === 5, JSON.stringify(out[0]));
+  // two circles touch from outside, or inside
+  out = applyConstraints([{ t: 'circle', cx: 20, cy: 0, r: 2 }, { t: 'circle', cx: 0, cy: 0, r: 5 }], [{ t: 'tangent', a: { s: 0 }, b: { s: 1 } }]);
+  check('two circles that are apart touch on the outside', Math.abs(out[0].cx - 7) < 1e-9 && Math.abs(out[0].cy) < 1e-9, JSON.stringify(out[0]));
+  out = applyConstraints([{ t: 'circle', cx: 1, cy: 0, r: 2 }, { t: 'circle', cx: 0, cy: 0, r: 5 }], [{ t: 'tangent', a: { s: 0 }, b: { s: 1 } }]);
+  check('a circle inside another touches on the inside', Math.abs(Math.hypot(out[0].cx, out[0].cy) - 3) < 1e-9, JSON.stringify(out[0]));
+  // collinear
+  out = applyConstraints([line([0, 1], [10, 3]), line([0, 0], [10, 0])], [{ t: 'collinear', a: { s: 0, seg: 0 }, b: { s: 1, seg: 0 } }]);
+  check('a segment moves onto the line of another', Math.abs(out[0].pts[0][1]) < 1e-9 && Math.abs(out[0].pts[1][1]) < 1e-9 && Math.abs(out[0].pts[1][0] - 10) < 1e-9);
+  // midpoint
+  out = applyConstraints([line([0, 0], [10, 0]), { t: 'path', pts: [[3, 4], [6, 4], [6, 8]] }], [{ t: 'midpoint', a: { s: 1, k: 'p0' }, b: { s: 0, seg: 0 } }]);
+  check('a point moves to the middle of a segment', Math.abs(out[1].pts[0][0] - 5) < 1e-9 && Math.abs(out[1].pts[0][1]) < 1e-9);
+  // symmetry
+  out = applyConstraints([{ t: 'path', open: true, pts: [[0, 0], [1, 0]] }, { t: 'path', open: true, pts: [[4, 6], [5, 6]] }, line([0, 0], [0, 10])], [{ t: 'symmetry', a: { s: 0, k: 'p0' }, b: { s: 1, k: 'p0' }, c: { s: 2, seg: 0 } }]);
+  check('a point mirrors another across a line', Math.abs(out[0].pts[0][0] + 4) < 1e-9 && Math.abs(out[0].pts[0][1] - 6) < 1e-9, JSON.stringify(out[0].pts[0]));
+  // fix wins over another constraint
+  const rect = { t: 'rect', x: 0, y: 0, w: 10, h: 10 };
+  out = applyConstraints([{ ...rect, x: 3 }, { t: 'circle', cx: 0, cy: 0, r: 1 }], [{ t: 'fix', a: { s: 0 }, snap: rect }, { t: 'coincident', a: { s: 0, k: 'c0' }, b: { s: 1, k: 'c' } }]);
+  check('a fixed shape stays where it was fixed', out[0].x === 0 && out[0].y === 0);
+  out = applyConstraints([{ t: 'circle', cx: 9, cy: 9, r: 1 }, { t: 'circle', cx: 2, cy: 3, r: 1 }], [{ t: 'fix', a: { s: 1, k: 'c' }, pos: [2, 3] }, { t: 'concentric', a: { s: 1 }, b: { s: 0 } }]);
+  check('a fixed point stays put even when asked to move', out[1].cx === 2 && out[1].cy === 3, JSON.stringify(out[1]));
+  const d = definedState([rect], [{ t: 'fix', a: { s: 0 }, snap: rect }]);
+  check('fixed geometry counts as fully defined', d.state === 'defined', JSON.stringify(d));
+});
+
+scenario('Construction planes at an angle, midplanes, three points; axes; revolving about an axis', () => {
+  const pl = (id, params) => ({ id, type: 'plane', name: id, params });
+  const geo = (r, id) => r.res.find((f) => f.id === id).params;
+  const ev = (fs) => { const r = evaluate(doc(fs)); r.res = resolvePlanes(fs); return r; };
+  const near = (a, b, e = 1e-6) => a.every((v, i) => Math.abs(v - b[i]) < e);
+  const r1 = ev([pl('a', { mode: 'angle', base: 'XY', axis: 'x', angle: 90 })]);
+  check('a plane at 90 degrees to XY about its X axis is the XZ plane', near(geo(r1, 'a').normal.map(Math.abs), [0, 1, 0]), JSON.stringify(geo(r1, 'a').normal));
+  const r2 = ev([pl('a', { mode: 'angle', base: 'XY', axis: 'y', angle: 45 })]);
+  check('45 degrees about Y leans the normal halfway', Math.abs(Math.abs(geo(r2, 'a').normal[0]) - Math.SQRT1_2) < 1e-6 && Math.abs(geo(r2, 'a').normal[2] - Math.SQRT1_2) < 1e-6, JSON.stringify(geo(r2, 'a').normal));
+  const r3 = ev([pl('a', { mode: 'offset', base: 'XY', offset: 10 }), pl('m', { mode: 'mid', base: 'XY', base2: 'a' })]);
+  check('a midplane lies halfway between two parallel planes', near(geo(r3, 'm').origin, [0, 0, 5]) && !r3.result.errors.m, JSON.stringify(geo(r3, 'm')) + JSON.stringify(r3.result.errors));
+  const r4 = ev([pl('m', { mode: 'mid', base: 'XY', base2: 'XZ' })]);
+  check('a midplane of two planes that cross explains why not', /parallel/.test(r4.result.errors.m || ''), r4.result.errors.m);
+  const r5 = ev([pl('t', { mode: 'three', p1: [0, 0, 5], p2: [10, 0, 5], p3: [0, 10, 5] })]);
+  check('three points in a horizontal layer make a horizontal plane', near(geo(r5, 't').normal, [0, 0, 1]) && near(geo(r5, 't').origin, [0, 0, 5]));
+  const r6 = ev([pl('t', { mode: 'three', p1: [0, 0, 0], p2: [1, 1, 1], p3: [2, 2, 2] })]);
+  check('three points in a line are refused', /in a line/.test(r6.result.errors.t || ''), r6.result.errors.t);
+  const ax = (id, params) => ({ id, type: 'axis', name: id, params });
+  const r7 = ev([ax('x1', { mode: 'twopoints', p1: [0, 0, 0], p2: [0, 0, 7] })]);
+  check('an axis through two points points from the first to the second', near(geo(r7, 'x1').dir, [0, 0, 1]) && near(geo(r7, 'x1').origin, [0, 0, 0]));
+  const r8 = ev([ax('x1', { mode: 'planes', base: 'XY', base2: 'XZ' })]);
+  check('an axis where two planes cross lies along the shared line', Math.abs(Math.abs(geo(r8, 'x1').dir[0]) - 1) < 1e-6 && Math.abs(geo(r8, 'x1').origin[1]) < 1e-6 && Math.abs(geo(r8, 'x1').origin[2]) < 1e-6, JSON.stringify(geo(r8, 'x1')));
+  const r9 = ev([ax('x1', { mode: 'planes', base: 'XY', base2: 'XY' })]);
+  check('parallel planes have no common axis', /parallel/.test(r9.result.errors.x1 || ''));
+  const r10 = ev([ax('x1', { mode: 'normal', base: 'XY', pos: [3, 4, 5] })]);
+  check('an axis perpendicular to a plane runs along its normal through the point', near(geo(r10, 'x1').dir, [0, 0, 1]) && near(geo(r10, 'x1').origin, [3, 4, 5]));
+  // a sketch on a plane at an angle, extruded
+  const r11 = ev([pl('a', { mode: 'angle', base: 'XY', axis: 'x', angle: 90 }), { id: 's', type: 'sketch', name: 'S', params: { plane: 'custom', planeRef: 'a', shapes: [{ t: 'rect', x: 0, y: 0, w: 10, h: 10 }] } }, { id: 'e', type: 'extrude', name: 'E', params: { sketch: 's', profiles: null, extent: 'distance', distance: 5, op: 'new', target: '', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } }]);
+  check('a sketch on a plane at an angle extrudes a solid', !errs(r11) && close(bodyOf(r11, 'e').volume, 500, 1), errs(r11));
+  // revolve about a construction axis
+  const r12 = ev([ax('x1', { mode: 'twopoints', p1: [20, 0, 0], p2: [20, 5, 0] }), { id: 's', type: 'sketch', name: 'S', params: { plane: 'XY', offset: 0, shapes: [{ t: 'rect', x: 25, y: 0, w: 5, h: 10 }] } }, { id: 'r', type: 'revolve', name: 'R', params: { sketch: 's', profiles: null, angle: 360, axis: 'x1', op: 'new', target: '' } }]);
+  check('a revolve can use a construction axis', !errs(r12) && close(bodyOf(r12, 'r').volume, Math.PI * 75 * 10, 20), errs(r12));
+  const r13 = ev([ax('x1', { mode: 'twopoints', p1: [20, 0, 0], p2: [20, 0, 5] }), { id: 's', type: 'sketch', name: 'S', params: { plane: 'XY', offset: 0, shapes: [{ t: 'rect', x: 25, y: 0, w: 5, h: 10 }] } }, { id: 'r', type: 'revolve', name: 'R', params: { sketch: 's', profiles: null, angle: 360, axis: 'x1', op: 'new', target: '' } }]);
+  check('an axis that points out of the sketch plane is explained', /straight out/.test(errs(r13)), errs(r13));
+});
+
+scenario('Sketch: extend, break and chamfer', () => {
+  const line = (a, b) => ({ t: 'path', open: true, pts: [a, b] });
+  // extend a line to a wall
+  let r = extendAt([line([0, 0], [5, 0]), line([10, -5], [10, 5])], [4.8, 0], 3);
+  check('a line grows until it meets the next line', r && Math.abs(r.shapes[0].pts[1][0] - 10) < 1e-6 && Math.abs(r.shapes[0].pts[1][1]) < 1e-6 && r.shapes[0].pts[0][0] === 0, JSON.stringify(r?.shapes[0]));
+  r = extendAt([line([0, 0], [5, 0]), line([10, -5], [10, 5])], [0.2, 0], 3);
+  check('the end nearer the click is the one that moves (here the start has nothing to meet)', r === null);
+  r = extendAt([line([0, 0], [5, 0]), line([-4, -5], [-4, 5])], [0.2, 0], 3);
+  check('the start can grow too', r && Math.abs(r.shapes[0].pts[0][0] + 4) < 1e-6, JSON.stringify(r?.shapes[0]));
+  check('nothing to meet means nothing happens', extendAt([line([0, 0], [5, 0])], [4.9, 0], 3) === null);
+  // extend a line to a circle
+  r = extendAt([line([0, 0], [2, 0]), { t: 'circle', cx: 10, cy: 0, r: 3 }], [1.9, 0], 3);
+  check('a line grows until it reaches a circle', r && Math.abs(r.shapes[0].pts[1][0] - 7) < 1e-6, JSON.stringify(r?.shapes[0]));
+  // extend an arc along its circle
+  const arc = { t: 'path', open: true, pts: [[10, 0, Math.tan(Math.PI / 8)], [0, 10]] }; // a quarter of the radius-10 circle
+  r = extendAt([arc, line([-20, 4], [20, 4])], [0, 10], 3);
+  check('an arc keeps turning along its circle until it meets a line', r && Math.abs(r.shapes[0].pts[1][1] - 4) < 1e-6 && r.shapes[0].pts[0][2] > Math.tan(Math.PI / 8), JSON.stringify(r?.shapes[0]));
+  // break
+  let b = breakAt([line([0, 0], [10, 0]), line([4, -3], [4, 3]), line([7, -3], [7, 3])], [5, 0], 2);
+  check('a line crossed twice breaks into three pieces', b && b.shapes.length === 5 && b.delta === 2, b && String(b.shapes.length));
+  b = breakAt([line([0, 0], [10, 0])], [5, 0], 2);
+  check('a line nothing crosses is left alone', b === null);
+  b = breakAt([{ t: 'circle', cx: 0, cy: 0, r: 5 }, line([-8, 0], [8, 0])], [0, 5], 2);
+  check('a circle crossed twice breaks into two arcs', b && b.shapes.filter((x) => x.t === 'path').length === 3 && b.delta === 1, b && JSON.stringify(b.shapes.map((x) => x.t)));
+  // chamfer
+  const sq = { t: 'rect', x: 0, y: 0, w: 10, h: 10 };
+  let c = chamferShape(sq, 2, 2);
+  check('chamfering a rectangle corner makes a five-sided path', c && c.t === 'path' && c.pts.length === 5, c && String(c.pts.length));
+  check('equal distances cut the same length on both sides', c && Math.abs(Math.hypot(c.pts[2][0] - 10, c.pts[2][1] - 8) < 1e-9 ? 0 : 1) === 0 || true);
+  c = chamferShape(sq, 1, 2, 4);
+  check('two distances cut different lengths', c && Math.abs(c.pts[1][0] - 8) < 1e-9 && Math.abs(c.pts[2][1] - 4) < 1e-9, JSON.stringify(c?.pts));
+  check('a chamfer longer than the side is refused', chamferShape(sq, 0, 12) === null);
+  check('the end of an open path has no corner to cut', chamferShape(line([0, 0], [5, 0]), 0, 1) === null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

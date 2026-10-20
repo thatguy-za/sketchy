@@ -209,6 +209,7 @@ function refreshNow() {
   });
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
   vp.setCanvases((doc.canvases || []).map((c) => ({ ...c, hidden: canvasHidden.has(c.id) })));
+  vp.setConstructionLines(feats.filter((f, i) => (f.type === 'axis' || f.type === 'cpoint') && !f.suppressed && !f.params.error && i < limit()).map((f) => (f.type === 'axis' ? { id: f.id, kind: 'axis', origin: f.params.origin, dir: f.params.dir, hidden: planeHidden.has(f.id) } : { id: f.id, kind: 'point', origin: (f.params.pos || [0, 0, 0]).map(Number), hidden: planeHidden.has(f.id) })));
   vp.setConstructionPlanes(feats.filter((f, i) => f.type === 'plane' && !f.suppressed && i < limit()).map((f) => ({ id: f.id, name: f.name, origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir, hidden: planeHidden.has(f.id) })));
   const req = { features: feats, count: limit(), opts: { bodyComp: doc.bodyComp, capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null } };
   if (kernelHeavy && canWorker) { rebuildInWorker(req, (res) => { result = res; applyResult(evalErr); }); return; } // a big design: the page stays usable while it rebuilds
@@ -380,7 +381,7 @@ function updateManip() {
   const fr = planeFrame(sk.params);
   const base = [0, 1, 2].map((k) => fr.o[k] + fr.x[k] * u + fr.y[k] * v);
   const dist = +rp[m.key] || 0;
-  vp.setManip(base, fr.n, rp.symmetric ? dist / 2 : dist);
+  vp.setManip(base, fr.n, (rp.direction ? rp.direction === 'symmetric' : rp.symmetric) ? dist / 2 : dist);
   box.hidden = false;
   const inp = box.querySelector('input');
   if (document.activeElement !== inp) inp.value = df.exprs?.[m.key] ?? dispStr(dist);
@@ -410,7 +411,7 @@ function bindManip() {
     const df = doc.features[dialog.index], m = defOf(df).manip, fld = defOf(df).fields.find((x) => x.key === m.key);
     e.stopPropagation();
     vp.controls.enabled = false;
-    const sym = !!(resolvedMap[df.id] || df.params).symmetric;
+    const sym = (rpx => (rpx.direction ? rpx.direction === 'symmetric' : !!rpx.symmetric))(resolvedMap[df.id] || df.params);
     const move = (ev) => {
       let d = vp.manipDistance(ev);
       if (d == null) return;
@@ -523,7 +524,7 @@ function runCommand(id, ev) {
   if (id === 'remove') { lastCmd = id; return deleteSelection(); }
   if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
   if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
-  if (c.feature) { lastCmd = id; return startFeature(c.feature); }
+  if (c.feature) { lastCmd = id; return startFeature(c.feature, c.preset); }
   CUSTOM[id]?.(ev);
   if (!['select', 'finishsketch', 'cancelpick'].includes(id)) lastCmd = id;
 }
@@ -612,8 +613,8 @@ function renderTree() {
       for (const n of ['X', 'Y', 'Z']) R(2, n, { kind: 'axis', dim: true });
       R(2, 'Origin', { kind: 'point', dim: true });
     });
-    const planes = doc.features.map((f, i) => [f, i]).filter(([f, i]) => f.type === 'plane' && i < limit());
-    if (planes.length) folder(1, 'construction', 'Construction', 'folder', {}, () => planes.forEach(([f]) => R(2, f.name, { kind: 'plane', eye: !planeHidden.has(f.id), sel: selSet.has(f.id), onEye: () => { planeHidden.has(f.id) ? planeHidden.delete(f.id) : planeHidden.add(f.id); refresh(); }, click: (ev) => selectFeature(f.id, ev), dbl: () => editFeature(featureIndex(f.id)) })));
+    const planes = doc.features.map((f, i) => [f, i]).filter(([f, i]) => (f.type === 'plane' || f.type === 'axis' || f.type === 'cpoint') && i < limit());
+    if (planes.length) folder(1, 'construction', 'Construction', 'folder', {}, () => planes.forEach(([f]) => R(2, f.name, { kind: f.type === 'plane' ? 'plane' : f.type === 'axis' ? 'axis' : 'point', eye: !planeHidden.has(f.id), sel: selSet.has(f.id), onEye: () => { planeHidden.has(f.id) ? planeHidden.delete(f.id) : planeHidden.add(f.id); refresh(); }, click: (ev) => selectFeature(f.id, ev), dbl: () => editFeature(featureIndex(f.id)) })));
     if ((doc.canvases || []).length) folder(1, 'canvases', 'Canvases', 'folder', {}, () => doc.canvases.forEach((c) => R(2, c.name, { kind: 'camera', ctx: { kind: 'canvas', id: c.id }, eye: !canvasHidden.has(c.id), onEye: () => { canvasHidden.has(c.id) ? canvasHidden.delete(c.id) : canvasHidden.add(c.id); refresh(); }, dbl: () => showCanvasDialog(c) })));
     if ((doc.params || []).length) folder(1, 'params', 'Parameters', 'gear', {}, () => { const ac = (doc.configs || []).find((c) => c.id === doc.activeConfig); if (ac) R(2, `Configuration: ${ac.name}`, { kind: 'file', dim: true }); doc.params.forEach((p) => R(2, p.name, { kind: 'file', val: paramState.errors[p.name] ? '⚠' : `= ${paramShow(p, paramState.values[p.name])}`, click: openParameters })); });
     const bodyRow = (b, d) => R(d, b.name, { kind: 'body', ctx: { kind: 'body', id: b.id }, eye: !hiddenBodies.has(b.id), sel: vp.selected.has(b.id), onEye: () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); refresh(); }, click: (ev) => selectBody(b.id, ev.shiftKey) });
@@ -1149,7 +1150,7 @@ const ctx = () => {
   };
 };
 
-function startFeature(key) {
+function startFeature(key, overrides = {}) {
   if (dialog || sketch) return;
   endMeasure();
   const def = FEATURES[key];
@@ -1161,7 +1162,7 @@ function startFeature(key) {
   if (['move', 'combine', 'mirror', 'pattern', 'remove', 'fillet', 'chamfer'].includes(key) || def.needsBody) { if (!result.bodies.length) return toast('There are no bodies yet — create one first.', true); }
   if (def.needsBodies && result.bodies.length < def.needsBodies) return toast(`${def.label} needs at least ${def.needsBodies} bodies.`, true);
   const pre = snapshot();
-  const params = def.make(c);
+  const params = { ...def.make(c), ...overrides };
   if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
   if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
@@ -1446,18 +1447,19 @@ function renderDialog() {
       const s = document.createElement('select'); s.setAttribute('aria-label', fld.label);
       let opts;
       if (fld.type === 'select') opts = fld.options;
+      else if (fld.type === 'axisref') opts = [...(fld.base || []), ...doc.features.slice(0, idx).filter((q) => q.type === 'axis').map((q) => [q.id, q.name])];
       else if (fld.type === 'planeref') opts = [['XY', 'XY (Top)'], ['XZ', 'XZ (Front)'], ['YZ', 'YZ (Right)'], ...doc.features.slice(0, idx).filter((q) => q.type === 'plane').map((q) => [q.id, q.name])];
       else if (fld.type === 'surface') opts = [['', 'Select surface…'], ...(result.surfSnaps?.[idx] || result.surfaces).map((q) => [q.id, q.name])];
       else if (fld.type === 'body') opts = [['', fld.optional || 'Select body…'], ...bodiesBefore(idx).map((b) => [b.id, b.name])];
       else opts = [['', 'Select sketch…'], ...sketchesBefore(idx, fld.paths).map((k) => [k.id, k.name])];
       s.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
       if (fld.icon && fld.type === 'select') {
-        ctl.appendChild(iconSelect(opts, val, (v) => { if (fld.boolSelect) { set(v === true || v === 'true'); return; } set(v); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype'].includes(fld.key)) rerender(); }, () => DLG_ICON[fld.icon]));
+        ctl.appendChild(iconSelect(opts, val, (v) => { if (fld.boolSelect) { set(v === true || v === 'true'); return; } set(v); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype', 'direction', 'start', 'extent2'].includes(fld.key)) rerender(); }, () => DLG_ICON[fld.icon]));
         body.appendChild(row); continue;
       }
       s.value = String(val ?? '');
       s.onfocus = () => { dialog.focusKey = fld.key; };
-      s.onchange = () => { if (fld.boolSelect) { set(s.value === 'true'); return; } if (fld.key === 'sketch' && 'profiles' in f.params) { patchParams(idx, { sketch: s.value, profiles: null }); rerender(); return; } set(s.value); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype'].includes(fld.key)) rerender(); else if (def.gizmo) setupGizmo(); };
+      s.onchange = () => { if (fld.boolSelect) { set(s.value === 'true'); return; } if (fld.key === 'sketch' && 'profiles' in f.params) { patchParams(idx, { sketch: s.value, profiles: null }); rerender(); return; } set(s.value); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype', 'direction', 'start', 'extent2'].includes(fld.key)) rerender(); else if (def.gizmo) setupGizmo(); };
       ctl.appendChild(s);
       if (fld.type === 'body') ctl.insertAdjacentHTML('beforeend', '<div class="note">…or click a body in the viewport.</div>');
     }
@@ -1728,9 +1730,9 @@ function buildSketchGrid(step = SU?.stepNow() ?? 1) {
 }
 function setSketchTool(t) {
   if (sketch.tool === 'project' && t !== 'project') { edgeHover = null; updateEdgeView(); }
-  sketch.tool = t; sketch.mir = null; sketch.trimPrev = null; sketch.pts = null; sketch.sel = t === 'select' ? sketch.sel : -1; sketch.hover = -1;
+  sketch.tool = t; sketch.mir = null; sketch.trimPrev = null; sketch.extPrev = null; sketch.brkPrev = null; sketch.cham = null; sketch.conPicks = null; sketch.pts = null; sketch.tan = null; sketch.sel = t === 'select' ? sketch.sel : -1; sketch.hover = -1;
   SU.activate();
-  const hints = { mirror: 'Mirror: click the shapes to copy (click again to unselect), press Enter, then click a line to mirror across, or press X / Y for a sketch axis', trim: 'Trim: hover a curve to see the part that will be removed (red), then click it', spline: 'Spline: click points the curve passes through · click the first point to close · Enter or double-click to finish', project: 'Include: click a model edge to copy it onto this sketch · Shift-click copies every edge of that body', offset: 'Offset: click a closed shape, type a distance (negative = inward), press Enter', sfillet: 'Fillet: click a corner of a rectangle or path, type a radius, press Enter', dim: 'Click a shape, then type a value or an expression like width/2', con_coin: 'Coincident: click the point to move, then the point to meet', con_h: 'Horizontal: click a line segment', con_v: 'Vertical: click a line segment', con_conc: 'Concentric: click two shapes', con_equal: 'Equal: click two segments or two circles', con_par: 'Parallel: click the segment to adjust, then the reference', con_perp: 'Perpendicular: click the segment to adjust, then the reference', select: 'Click a shape to select it · drag to move · drag handles to resize · click a dimension to type a value', arc: 'Click the start point, the end point, then a point on the arc · type a radius', rect: 'Click the first corner, then the opposite corner · type a width/height and press Tab / Enter', crect: 'Click the centre, then a corner · type a width/height', rrect: 'Click two corners · type W, H and a corner radius R', slot: 'Click the first centre, then the second · type a length and width', ellipse: 'Click the centre, then drag the radii · type A and B', circle: 'Click the centre, then drag out the radius · type a diameter and press Enter', ngon: 'Click the centre, then a vertex · type a radius and press Enter', path: 'Click points of an open path · press A for a tangent arc · Enter or double-click to finish', line: 'Click points · press A for a tangent arc · type a length and angle · click the first point, press Enter or double-click to close' };
+  const hints = { mirror: 'Mirror: click the shapes to copy (click again to unselect), press Enter, then click a line to mirror across, or press X / Y for a sketch axis', trim: 'Trim: hover a curve to see the part that will be removed (red), then click it', spline: 'Spline: click points the curve passes through · click the first point to close · Enter or double-click to finish', project: 'Include: click a model edge to copy it onto this sketch · Shift-click copies every edge of that body', offset: 'Offset: click a closed shape, type a distance (negative = inward), press Enter', sfillet: 'Fillet: click a corner of a rectangle or path, type a radius, press Enter', dim: 'Click a shape, then type a value or an expression like width/2', con_coin: 'Coincident: click the point to move, then the point to meet', con_h: 'Horizontal: click a line segment', con_v: 'Vertical: click a line segment', con_conc: 'Concentric: click two shapes', con_equal: 'Equal: click two segments or two circles', con_par: 'Parallel: click the segment to adjust, then the reference', con_perp: 'Perpendicular: click the segment to adjust, then the reference', con_coll: 'Collinear: click the segment to move, then the one to line up with', con_mid: 'Midpoint: click the point to move, then the segment', con_tan: 'Tangent: click a line or circle to adjust, then the circle, arc or line to touch', con_sym: 'Symmetry: click the point to move, the point to mirror, then the line to mirror across', con_fix: 'Fix: click a shape or a corner to lock it; click it again to unlock', select: 'Click a shape to select it · drag to move · drag handles to resize · click a dimension to type a value', arc: 'Click the start point, the end point, then a point on the arc · type a radius', extend: 'Extend: hover near the end of an open line or arc to see where it will grow to (green), then click', break: 'Break: hover a curve to see where it will split (red squares), then click', schamfer: 'Chamfer: click a corner of a rectangle or path, type a distance (D2 for a different second side), press Enter', rect3: 'Click two corners of one side, then a point for the other side', circle2: 'Click two points on opposite sides of the circle · type a diameter', circle3: 'Click three points on the circle', arcc: 'Click the centre, the start of the arc, then the end', tarc: 'Click the end of an open line or arc, then the end of the new arc', slotO: 'Click one end, then the other end · type the overall length and width', slotM: 'Click the centre of the slot, then the centre of one end · type a length and width', point: 'Click to place a point', rect: 'Click the first corner, then the opposite corner · type a width/height and press Tab / Enter', crect: 'Click the centre, then a corner · type a width/height', rrect: 'Click two corners · type W, H and a corner radius R', slot: 'Click the first centre, then the second · type a length and width', ellipse: 'Click the centre, then drag the radii · type A and B', circle: 'Click the centre, then drag out the radius · type a diameter and press Enter', ngon: 'Click the centre, then a vertex · type a radius and press Enter', path: 'Click points of an open path · press A for a tangent arc · Enter or double-click to finish', line: 'Click points · press A for a tangent arc · type a length and angle · click the first point, press Enter or double-click to close' };
   $('#hud').innerHTML = `<b>Sketch · ${curSketch().name}</b> — ${hints[t]} · Esc to ${t === 'select' ? 'deselect' : 'stop drawing'}`;
   drawSketches();
   renderRibbon(); renderSketchPanel();
@@ -1748,7 +1750,7 @@ function renderSketchPanel() {
   const p = curSketch().params;
   const wrap = $('#props-wrap');
   const sh = p.shapes;
-  const fieldsFor = (s) => ({ rect: ['x', 'y', 'w', 'h'], circle: ['cx', 'cy', 'r'], ngon: ['cx', 'cy', 'r', 'n', 'rot'], rrect: ['x', 'y', 'w', 'h', 'r'], slot: ['x1', 'y1', 'x2', 'y2', 'w'], ellipse: ['cx', 'cy', 'rx', 'ry'], path: [] }[s.t]);
+  const fieldsFor = (s) => ({ rect: ['x', 'y', 'w', 'h'], circle: ['cx', 'cy', 'r'], ngon: ['cx', 'cy', 'r', 'n', 'rot'], rrect: ['x', 'y', 'w', 'h', 'r'], slot: ['x1', 'y1', 'x2', 'y2', 'w'], ellipse: ['cx', 'cy', 'rx', 'ry'], point: ['x', 'y'], path: [] }[s.t]);
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('sketch', 20)}SKETCH PALETTE</div><div class="body">
     <div class="mh strong mb4">Options</div>
     <div class="row"><label>Sketch plane</label><select id="sp-plane">${[...['XY', 'XZ', 'YZ'].map((k) => [k, k]), ...doc.features.filter((q, qi) => q.type === 'plane' && qi < sketch.index).map((q) => ['ref:' + q.id, q.name]), ...(p.plane === 'custom' && !p.planeRef ? [['custom', 'custom']] : [])].map(([k, l]) => `<option value="${esc(k)}" ${(k === p.plane && !p.planeRef) || k === 'ref:' + p.planeRef ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
@@ -1758,6 +1760,12 @@ function renderSketchPanel() {
     <label class="chk"><input type="checkbox" id="sp-grid" ${sketch.grid?.visible === false ? '' : 'checked'}> Sketch Grid</label>
     <label class="chk"><input type="checkbox" id="sp-showprof" ${sketch.showProfile === false ? '' : 'checked'}> Show Profile</label>
     <label class="chk"><input type="checkbox" id="sp-snapon" ${sketch.snapOn === false ? '' : 'checked'}> Snap</label>
+    <div class="row lt-row"><label>Line type</label><div class="seg" id="sp-lt" role="group" aria-label="Line type">${[['', 'Normal'], ['construction', 'Construction'], ['centerline', 'Centerline']].map(([v, l]) => `<button type="button" class="btn sm${(sketch.sel >= 0 ? (sh[sketch.sel]?.lt || '') : (sketch.lineType || '')) === v ? ' on' : ''}" data-lt="${v}">${l}</button>`).join('')}</div></div>
+    <label class="chk"><input type="checkbox" id="sp-slice" ${sketch.slice ? 'checked' : ''}> Slice</label>
+    <label class="chk"><input type="checkbox" id="sp-showdim" ${sketch.showDims === false ? '' : 'checked'}> Show Dimensions</label>
+    <label class="chk"><input type="checkbox" id="sp-showcons" ${sketch.showCons === false ? '' : 'checked'}> Show Constraints</label>
+    <label class="chk"><input type="checkbox" id="sp-showconstr" ${sketch.showConstr === false ? '' : 'checked'}> Show Construction Geometries</label>
+    <label class="chk"><input type="checkbox" id="sp-showpts" ${sketch.showPoints === false ? '' : 'checked'}> Show Points</label>
     <div class="my6"><button class="btn" id="sp-lookat">Look At</button></div>
     <div class="sep"></div>${(p.cons || []).length ? `<div class="mh strong mb4">Constraints (${p.cons.length})</div><div id="sp-cons"></div><div class="sep"></div>` : ''}<div class="mh strong mb4">Shapes (${sh.length})</div>${sketchStateChip(sh, p.cons)}<div id="sp-list"></div>
     <div class="note">Nested shapes become holes. To sketch on a body, start a new sketch and click one of its flat faces.</div></div>
@@ -1774,7 +1782,7 @@ function renderSketchPanel() {
   sh.forEach((s, i) => {
     const item = document.createElement('div');
     item.className = 'shape-item' + (i === sketch.sel ? ' sel' : '');
-    item.innerHTML = `${ficon({ rect: 'rect', circle: 'circle', ngon: 'ngon', rrect: 'rrect', slot: 'slot', ellipse: 'ellipse', path: s.open ? 'path' : 'line' }[s.t], 18)}<span>${s.open ? 'Path' : { rect: 'Rectangle', circle: 'Circle', ngon: 'Polygon', rrect: 'Rounded Rect', slot: 'Slot', ellipse: 'Ellipse', path: 'Polyline' }[s.t]} ${i + 1}</span><button class="x" title="Delete">✕</button>`;
+    item.innerHTML = `${ficon({ rect: 'rect', circle: 'circle', ngon: 'ngon', rrect: 'rrect', slot: 'slot', ellipse: 'ellipse', point: 'point', path: s.open ? 'path' : 'line' }[s.t], 18)}<span>${s.open ? 'Path' : { rect: 'Rectangle', circle: 'Circle', ngon: 'Polygon', rrect: 'Rounded Rect', slot: 'Slot', ellipse: 'Ellipse', point: 'Point', path: 'Polyline' }[s.t]} ${i + 1}${s.lt ? ` <small class="muted">(${s.lt})</small>` : ''}</span><button class="x" title="Delete">✕</button>`;
     item.onclick = () => { sketch.sel = i; if (sketch.tool !== 'select') setSketchTool('select'); renderSketchPanel(); drawSketches(); SU.redraw(); renderRibbon(); };
     item.querySelector('.x').onclick = (e) => { e.stopPropagation(); setSketchShapes(sh.filter((_, k) => k !== i)); sketch.sel = -1; renderSketchPanel(); };
     list.appendChild(item);
@@ -1804,6 +1812,17 @@ function renderSketchPanel() {
   $('#sp-grid').onchange = (e) => { sketch.gridVisible = e.target.checked; if (sketch.grid) sketch.grid.visible = e.target.checked; };
   $('#sp-showprof').onchange = (e) => { sketch.showProfile = e.target.checked; updateProfileView(); };
   $('#sp-snapon').onchange = (e) => { sketch.snapOn = e.target.checked; };
+  $('#sp-lt').querySelectorAll('button').forEach((b) => (b.onclick = () => { // the line type of the selected shape; with nothing selected, of the shapes drawn next
+    const lt = b.dataset.lt || null;
+    if (sketch.sel >= 0 && sh[sketch.sel]) setSketchShapes(sh.map((o, j) => { if (j !== sketch.sel) return o; const n = { ...o }; if (lt) n.lt = lt; else delete n.lt; return n; }));
+    else sketch.lineType = lt;
+    renderSketchPanel(); drawSketches(); SU.redraw();
+  }));
+  $('#sp-slice').onchange = (e) => { sketch.slice = e.target.checked; drawSketches(); };
+  $('#sp-showdim').onchange = (e) => { sketch.showDims = e.target.checked; };
+  $('#sp-showcons').onchange = (e) => { sketch.showCons = e.target.checked; };
+  $('#sp-showconstr').onchange = (e) => { sketch.showConstr = e.target.checked; drawSketches(); };
+  $('#sp-showpts').onchange = (e) => { sketch.showPoints = e.target.checked; drawSketches(); };
   $('#sp-lookat').onclick = () => vp.lookAtPlane(curSketch().params);
   $('#sp-ok').onclick = finishSketch;
   $('#sp-cancel').onclick = cancelSketch;
@@ -1815,9 +1834,9 @@ function setSketchParam(patch) {
 }
 /** After a shape was replaced by `delta + 1` shapes (trim), drop its constraints and shift the later shape indices. */
 function remapSketchCons(si, delta) {
-  const cons = (curSketch().params.cons || []).filter((c) => c.a?.s !== si && c.b?.s !== si).map((c) => {
+  const cons = (curSketch().params.cons || []).filter((c) => c.a?.s !== si && c.b?.s !== si && c.c?.s !== si).map((c) => {
     const sh = (r) => (r && r.s > si ? { ...r, s: r.s + delta } : r);
-    return { ...c, a: sh(c.a), ...(c.b ? { b: sh(c.b) } : {}) };
+    return { ...c, a: sh(c.a), ...(c.b ? { b: sh(c.b) } : {}), ...(c.c ? { c: sh(c.c) } : {}) };
   });
   if (cons.length !== (curSketch().params.cons || []).length || delta) setSketchCons(cons);
 }
@@ -1882,9 +1901,13 @@ const sketchMat = fatMat(0x2b6cb0, 2.8);         // a finished sketch
 const sketchMatActive = fatMat(0x0b6bcb, 3.2);   // the sketch you are editing
 const sketchMatSel = fatMat(0xf08c00, 3.6);
 const sketchMatHover = fatMat(0x00a2ff, 3.6);
+const dashed = (m, dash, gap) => { m.dashed = true; m.dashSize = dash; m.gapSize = gap; m.needsUpdate = true; return m; };
+const constrMat = dashed(fatMat(0x8a94a6, 2.2), 3, 2);    // construction geometry: reference only
+const centerMat = dashed(fatMat(0xb06ad4, 2.4), 8, 2.5); // a centerline: the axis of a revolve
 function drawSketches() {
   if (!vp) return;
   vp.sketchGroup.clear();
+  if (sketch && !sketch.picking && sketch.slice) { const fr = planeFrame(resolvedMap[curSketch().id] || curSketch().params); vp.setSlice(fr); } else vp.setSlice(null); // Slice: cut the bodies at the sketch plane so the inside shows
   doc.features.forEach((f, i) => {
     if (f.type === 'sketch3d' && !f.suppressed && (i < limit() || (dialog && dialog.index === i)) && (sketchVis[f.id] ?? !result.sketchUsed.has(f.id) ?? true)) { // a 3D sketch: a line through points in space
       const raw = (resolvedMap[f.id] || f.params).points || [];
@@ -1901,11 +1924,20 @@ function drawSketches() {
     if (!active && (i >= limit() || !(sketchVis[f.id] ?? !result.sketchUsed.has(f.id)))) return;
     const rp = resolvedMap[f.id] || f.params;
     rp.shapes.forEach((s, k) => {
+      if (s.t === 'point') { // a sketch point: a dot
+        if (active && sketch.showPoints === false) return;
+        const q = vp.planeTo3D(rp, [s.x, s.y]).addScaledVector(new THREE.Vector3(...planeFrame(rp).n), 0.06);
+        const dot = new THREE.Points(new THREE.BufferGeometry().setFromPoints([q]), new THREE.PointsMaterial({ color: active && k === sketch.sel ? 0xf08c00 : 0x2b6cb0, size: active && k === sketch.sel ? 9 : 7, sizeAttenuation: false, depthTest: false }));
+        dot.renderOrder = 20; dot.raycast = () => {}; vp.sketchGroup.add(dot);
+        return;
+      }
+      if (s.lt === 'construction' && !active) return; // construction geometry is reference only: shown while editing the sketch
+      if (s.lt && active && sketch.showConstr === false) return;
       const poly = shapeToPolygon(s);
       if (poly.length < 2) return;
       const nrm = planeFrame(rp).n; // lift the lines a hair off the plane so a face lying in it can't break them up
       const pts = poly.map((q) => vp.planeTo3D(rp, q).addScaledVector(new THREE.Vector3(...nrm), 0.06));
-      const m = active ? (k === sketch.sel ? sketchMatSel : k === sketch.hover ? sketchMatHover : sketchMatActive) : sketchMat;
+      const m = s.lt ? (k === sketch?.sel && active ? sketchMatSel : s.lt === 'centerline' ? centerMat : constrMat) : active ? (k === sketch.sel ? sketchMatSel : k === sketch.hover ? sketchMatHover : sketchMatActive) : sketchMat;
       vp.sketchGroup.add(vp.fatLine(pts, m, !s.open));
     });
   });
@@ -3736,6 +3768,7 @@ function bindKeys() {
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     if (!$('#marking').hidden) { if (e.key === 'Escape') closeMarking(); return; }
+    if (e.key === 'Escape' && !$('#menu').hidden) { e.preventDefault(); $('#menu').hidden = true; return; } // an open menu takes Esc first, before it cancels a sketch or dialog
     if (mod && key === 's') { e.preventDefault(); save(e.shiftKey); return; }
     if (mod && key === 'n') { e.preventDefault(); newDoc(); return; }
     if (typing) {

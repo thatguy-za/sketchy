@@ -89,6 +89,22 @@ const FI = {
   conequal: `<path d="M5 12H27M5 20H27" stroke="#1f4f93" stroke-width="2"/><path d="M12 8V24M20 8V24" stroke="#e0453a" stroke-width="1.2" stroke-dasharray="1.5 1.5"/>`,
   conpar: `<path d="M6 24L18 6M14 26L26 8" stroke="#1f4f93" stroke-width="2"/>`,
   conperp: `<path d="M5 26H27M10 26V6" stroke="#1f4f93" stroke-width="2"/><path d="M10 20H16V26" fill="none" stroke="#e0453a" stroke-width="1.4"/>`,
+  // sketch point, extend/break, extra constraints, construction axes and points
+  point: `<path d="M9 16H23M16 9V23" stroke="#1f4f93" stroke-width="1.6"/><circle cx="16" cy="16" r="3.2" fill="#4f9be8" stroke="#1f4f93" stroke-width="1.2"/>`,
+  extend: `<path d="M5 22H16" stroke="#1f4f93" stroke-width="2"/><path d="M16 22H24" stroke="#4f9be8" stroke-width="2" stroke-dasharray="2.2 2"/><path d="M27 6V26" stroke="#1f4f93" stroke-width="2"/>${pt(5, 22)}<path d="M21 18L25 22L21 26" fill="none" stroke="${GREEN}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
+  brk: `<path d="M5 25L13.5 16.5M18.5 11.5L27 3" stroke="#1f4f93" stroke-width="2"/><path d="M5 7L27 29" stroke="#1f4f93" stroke-width="1.6" opacity=".55"/><circle cx="16" cy="14" r="3" fill="#fff" stroke="${RED}" stroke-width="1.6"/>`,
+  contan: `<circle cx="16" cy="20" r="8" fill="none" stroke="#1f4f93" stroke-width="2"/><path d="M3 12H29" stroke="#1f4f93" stroke-width="2"/>${pt(16, 12)}`,
+  concoll: `<path d="M3 24L12 17M20 11L29 4" stroke="#1f4f93" stroke-width="2"/><path d="M12 17L20 11" stroke="#e0453a" stroke-width="1.4" stroke-dasharray="1.8 1.8"/>`,
+  conmid: `<path d="M4 20H28" stroke="#1f4f93" stroke-width="2"/>${pt(16, 20)}<path d="M16 8V14" stroke="#e0453a" stroke-width="1.6"/><circle cx="16" cy="7" r="2.4" fill="#fff" stroke="#1f4f93" stroke-width="1.4"/>`,
+  consym: `<path d="M16 3V29" stroke="#e0453a" stroke-width="1.4" stroke-dasharray="2.4 2"/>${pt(8, 11)}${pt(24, 11)}${pt(8, 23)}${pt(24, 23)}<path d="M8 11L24 11M8 23L24 23" stroke="#1f4f93" stroke-width="1.2" opacity=".6"/>`,
+  confix: `<path d="M6 24L26 8" stroke="#1f4f93" stroke-width="2"/>${pt(6, 24)}${pt(26, 8)}<rect x="12" y="4" width="9" height="7" rx="1.2" fill="#fff" stroke="${RED}" stroke-width="1.3"/><path d="M14 4V3A2.5 2.5 0 0 1 19 3V4" fill="none" stroke="${RED}" stroke-width="1.3"/>`,
+  rect3: `<path d="M4 20L13 6L28 12L19 26Z" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(4, 20)}${pt(13, 6)}${pt(28, 12)}`,
+  circle3: `<circle cx="16" cy="16" r="10.5" fill="#e6f1fc" stroke="#1f4f93" stroke-width="2"/>${pt(16, 5.5)}${pt(5.5, 16)}${pt(24, 23)}`,
+  axis: `<path d="M5 27L26 6" stroke="${RED}" stroke-width="1.8" stroke-dasharray="4 2 1.5 2"/><path d="M21 5H27V11" fill="none" stroke="${RED}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>${poly('M4 6L14 4L14 14L4 16Z', '#79c68d', '#3a8a50')}`,
+  cpoint: `<path d="M16 6V26M6 16H26" stroke="${RED}" stroke-width="1.6"/><circle cx="16" cy="16" r="3.6" fill="#f2a65a" stroke="#b8691d" stroke-width="1.2"/>`,
+  planeangle: `${poly('M4 22L28 22L28 27L4 27Z', '#79c68d', '#3a8a50')}${poly('M6 21L24 6L28 11L10 21Z', '#f2a65a', '#b8691d')}<path d="M10 17A8 8 0 0 1 12 21" fill="none" stroke="${RED}" stroke-width="1.2"/>`,
+  planemid: `${poly('M4 6L26 6L28 10L6 10Z', '#79c68d', '#3a8a50')}${poly('M4 22L26 22L28 26L6 26Z', '#79c68d', '#3a8a50')}${poly('M5 14L27 14L29 18L7 18Z', '#f2a65a', '#b8691d')}`,
+  planethree: `${poly('M5 20L15 6L28 14L18 27Z', '#f2a65a', '#b8691d')}${pt(5, 20)}${pt(15, 6)}${pt(18, 27)}`,
   disabled: `<rect x="5" y="5" width="22" height="22" rx="3" fill="${G.l}" stroke="${G.r}" stroke-width="1"/>`,
 };
 

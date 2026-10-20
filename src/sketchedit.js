@@ -104,7 +104,11 @@ export function intersectParams(P, Q) {
 
 const subPrim = (p, t0, t1) => (p.k === 'L' ? { k: 'L', a: ptAt(p, t0), b: ptAt(p, t1) } : { k: 'A', c: p.c, r: p.r, a0: p.a0 + p.sw * t0, sw: p.sw * (t1 - t0) });
 /** Sample a primitive as a polyline (for previews). */
-export const primPoints = (p, n = 32) => (p.k === 'L' ? [p.a, p.b] : Array.from({ length: Math.max(4, Math.ceil((n * Math.abs(p.sw)) / TAU) + 1) }, (_, i, a) => ptAt(p, i / (a.length - 1))));
+export const primPoints = (p, n = 32) => {
+  if (p.k === 'L') return [p.a, p.b];
+  const m = Math.max(4, Math.ceil((n * Math.abs(p.sw)) / TAU) + 1);
+  return Array.from({ length: m }, (_, i) => ptAt(p, i / (m - 1)));
+};
 const primLen = (p) => (p.k === 'L' ? Math.hypot(p.b[0] - p.a[0], p.b[1] - p.a[1]) : p.r * Math.abs(p.sw));
 
 /** A chain of connected primitives as an open path shape. */
@@ -249,4 +253,90 @@ export function shapeCentre(sh) {
   let lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
   for (const [x, y] of pts) { lo = [Math.min(lo[0], x), Math.min(lo[1], y)]; hi = [Math.max(hi[0], x), Math.max(hi[1], y)]; }
   return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2];
+}
+
+// ------------------------------------------------------------------ extend
+/**
+ * Extend the end of the open line or arc nearest to q until it meets another curve.
+ * Returns { shapes, index, preview } (preview: the part that is added, as points) or null when nothing can be extended there.
+ */
+export function extendAt(shapes, q, tol = Infinity) {
+  let best = null;
+  shapes.forEach((sh, si) => {
+    if (sh.t !== 'path' || !sh.open || sh.pts.length < 2) return;
+    const { prims } = primitivesOf(sh);
+    if (prims.length !== sh.pts.length - 1) return; // a zero-length segment is in the way
+    for (const end of ['start', 'end']) {
+      const pi = end === 'start' ? 0 : prims.length - 1, E = ptAt(prims[pi], end === 'start' ? 0 : 1), d = Math.hypot(E[0] - q[0], E[1] - q[1]);
+      if (d <= tol && (!best || d < best.d)) best = { si, pi, end, d, prims };
+    }
+  });
+  if (!best) return null;
+  const { si, pi, end, prims } = best, P = prims[pi], sh = shapes[si];
+  const others = [];
+  shapes.forEach((o, oi) => primitivesOf(o).prims.forEach((Q, qi) => { if (!(oi === si && qi === pi)) others.push(Q); }));
+  const pts = sh.pts.map((p) => [...p]), n = pts.length;
+  if (P.k === 'L') {
+    const E = end === 'start' ? P.a : P.b, O = end === 'start' ? P.b : P.a, len = Math.hypot(E[0] - O[0], E[1] - O[1]) || 1, d = [(E[0] - O[0]) / len, (E[1] - O[1]) / len];
+    const BIG = 1e6, ray = { k: 'L', a: E, b: [E[0] + d[0] * BIG, E[1] + d[1] * BIG] };
+    let dist = Infinity;
+    for (const Q of others) for (const t of intersectParams(ray, Q)) if (t * BIG > 1e-6 && t * BIG < dist) dist = t * BIG;
+    if (!isFinite(dist)) return null;
+    const np = [E[0] + d[0] * dist, E[1] + d[1] * dist];
+    if (end === 'end') pts[n - 1] = [np[0], np[1]]; else pts[0] = pts[0][2] ? [np[0], np[1], pts[0][2]] : [np[0], np[1]];
+    return { shapes: shapes.map((o, i) => (i === si ? { ...o, pts } : o)), index: si, preview: [E, np] };
+  }
+  const sgn = Math.sign(P.sw) || 1, aE = end === 'start' ? P.a0 : P.a0 + P.sw, dirSign = end === 'end' ? sgn : -sgn;
+  const full = { k: 'A', c: P.c, r: P.r, a0: aE, sw: dirSign * TAU };
+  let extra = Infinity;
+  for (const Q of others) for (const t of intersectParams(full, Q)) if (t > 1e-6 && t < 1 - 1e-6 && t * TAU < extra) extra = t * TAU;
+  if (!isFinite(extra) || Math.abs(P.sw) + extra >= TAU - 1e-6) return null;
+  const aNew = aE + dirSign * extra, np = [P.c[0] + P.r * Math.cos(aNew), P.c[1] + P.r * Math.sin(aNew)], bulge = Math.tan((sgn * (Math.abs(P.sw) + extra)) / 4);
+  if (end === 'end') { pts[n - 2] = [pts[n - 2][0], pts[n - 2][1], bulge]; pts[n - 1] = [np[0], np[1]]; } else pts[0] = [np[0], np[1], bulge];
+  return { shapes: shapes.map((o, i) => (i === si ? { ...o, pts } : o)), index: si, preview: primPoints({ k: 'A', c: P.c, r: P.r, a0: aE, sw: dirSign * extra }) };
+}
+
+// ------------------------------------------------------------------ break
+/**
+ * Split the curve under q wherever other curves cross it. The pieces become separate open paths.
+ * Returns { shapes, index, delta, points } (points: where it was split) or null when nothing crosses it there.
+ */
+export function breakAt(shapes, q, tol = Infinity) {
+  const hit = nearestPrim(shapes, q);
+  if (!hit || hit.dist > tol) return null;
+  const { si, pi } = hit, sh = shapes[si], { closed, prims } = primitivesOf(sh), P = prims[pi];
+  const ts = [];
+  shapes.forEach((o, oi) => primitivesOf(o).prims.forEach((Q, qi) => { if (!(oi === si && qi === pi)) for (const t of intersectParams(P, Q)) ts.push(t); }));
+  const uniq = (a) => [...new Set(a.map((t) => +t.toFixed(9)))].sort((x, y) => x - y);
+  const full = P.k === 'A' && Math.abs(P.sw) >= TAU - 1e-9 && prims.length === 1;
+  let cuts;
+  if (full) cuts = uniq(ts.map((t) => t % 1));
+  else cuts = uniq(ts).filter((t) => t > 1e-7 && t < 1 - 1e-7);
+  if (full ? cuts.length < 2 : !cuts.length) return null;
+  let pieces; // the chain of primitives after the split, and where it is cut
+  if (full) { const b = [...cuts, cuts[0] + 1]; pieces = cuts.map((t, i) => [subPrim(P, t, b[i + 1])]); } else {
+    const bounds = [0, ...cuts, 1], parts = bounds.slice(0, -1).map((t, i) => subPrim(P, t, bounds[i + 1])).filter((p) => primLen(p) > 1e-9);
+    const before = prims.slice(0, pi), after = prims.slice(pi + 1);
+    if (!closed) pieces = [[...before, parts[0]], ...parts.slice(1, -1).map((p) => [p]), [parts.at(-1), ...after]].filter((c) => c.length && c.every((p) => primLen(p) > 1e-9));
+    else pieces = [[...after, ...before, parts[0]], ...parts.slice(1).map((p) => [p])].filter((c) => c.length);
+    if (!closed && parts.length === 1) return null;
+  }
+  const out = pieces.map(chainToPath);
+  return { shapes: [...shapes.slice(0, si), ...out, ...shapes.slice(si + 1)], index: si, delta: out.length - 1, points: cuts.map((t) => ptAt(P, t)) };
+}
+
+// ------------------------------------------------------------------ chamfer
+/** Cut the corner at vertex vi of a rectangle or path: d1 along the segment before it and d2 along the one after. Null if it does not fit. */
+export function chamferShape(sh, vi, d1, d2 = d1) {
+  let pts, closed;
+  if (sh.t === 'rect') { pts = [[sh.x, sh.y], [sh.x + sh.w, sh.y], [sh.x + sh.w, sh.y + sh.h], [sh.x, sh.y + sh.h]]; closed = true; } else if (sh.t === 'path') { pts = sh.pts.map((p) => [...p]); closed = !sh.open; } else return null;
+  const n = pts.length;
+  if (vi < 0 || vi >= n || (!closed && (vi === 0 || vi === n - 1)) || !(d1 > 0) || !(d2 > 0)) return null;
+  const prev = pts[(vi - 1 + n) % n], V = pts[vi], next = pts[(vi + 1) % n];
+  if (prev[2] || V[2]) return null; // both neighbouring segments must be straight lines
+  const l1 = Math.hypot(prev[0] - V[0], prev[1] - V[1]), l2 = Math.hypot(next[0] - V[0], next[1] - V[1]);
+  if (d1 >= l1 - 1e-9 || d2 >= l2 - 1e-9) return null;
+  const A = [V[0] + ((prev[0] - V[0]) / l1) * d1, V[1] + ((prev[1] - V[1]) / l1) * d1], B = [V[0] + ((next[0] - V[0]) / l2) * d2, V[1] + ((next[1] - V[1]) / l2) * d2];
+  const np = [...pts.slice(0, vi), A, V[2] ? [B[0], B[1], V[2]] : B, ...pts.slice(vi + 1)];
+  return closed ? { t: 'path', pts: np } : { ...sh, pts: np };
 }

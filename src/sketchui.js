@@ -8,8 +8,46 @@ import { shapeToPolygon, offsetPolygon } from './kernel.js';
 import { setDim, getDim } from './sketchdims.js';
 import { keyPoints, segOf, conAnchor, CON_GLYPH, CON_LABEL } from './sketchcons.js';
 import { filletVertex } from './sketchgeo.js';
-import { mirrorShape, trimAt, fitSpline, primitivesOf, patternShapes, shapeCentre } from './sketchedit.js';
+import { mirrorShape, trimAt, extendAt, breakAt, chamferShape, fitSpline, primitivesOf, patternShapes, shapeCentre } from './sketchedit.js';
 import { arcOf, bulgeFrom3, bulgeFromTangent, endTangent, bulgeFromRadius, pathPolygon } from './sketchgeo.js';
+
+/** Tools that take several clicks, each just a point, with no typed values: the shape comes from the points alone. */
+const MULTI = { rect3: 3, circle3: 3, arcc: 3 };
+const wrapPi = (a) => { while (a > Math.PI) a -= 2 * Math.PI; while (a <= -Math.PI) a += 2 * Math.PI; return a; };
+/** The path with its points in the opposite order (the bulge of each segment changes sign and moves with it). */
+export function reversePath(pts) {
+  const n = pts.length;
+  return pts.map((_, j) => { const p = pts[n - 1 - j]; const b = j < n - 1 ? -(pts[n - 2 - j][2] || 0) : 0; return b ? [p[0], p[1], b] : [p[0], p[1]]; });
+}
+/** The shape the clicks so far make with the cursor as the last point: { shape } when complete, { line } while still partial. */
+export function multiShape(tool, pts, cur) {
+  const q = [...pts, cur];
+  if (tool === 'rect3') {
+    if (q.length < 3) return { line: q };
+    const [a, b, c] = q, dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+    if (L < 1e-9) return {};
+    const nx = -dy / L, ny = dx / L, h = (c[0] - b[0]) * nx + (c[1] - b[1]) * ny;
+    if (Math.abs(h) < 1e-9) return { line: [a, b] };
+    return { shape: { t: 'path', pts: [a, b, [b[0] + nx * h, b[1] + ny * h], [a[0] + nx * h, a[1] + ny * h]] } };
+  }
+  if (tool === 'circle3') {
+    if (q.length < 3) return { line: q };
+    const [a, b, c] = q, d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+    if (Math.abs(d) < 1e-9) return { line: q };
+    const ux = ((a[0] ** 2 + a[1] ** 2) * (b[1] - c[1]) + (b[0] ** 2 + b[1] ** 2) * (c[1] - a[1]) + (c[0] ** 2 + c[1] ** 2) * (a[1] - b[1])) / d;
+    const uy = ((a[0] ** 2 + a[1] ** 2) * (c[0] - b[0]) + (b[0] ** 2 + b[1] ** 2) * (a[0] - c[0]) + (c[0] ** 2 + c[1] ** 2) * (b[0] - a[0])) / d;
+    return { shape: { t: 'circle', cx: ux, cy: uy, r: Math.hypot(a[0] - ux, a[1] - uy) } };
+  }
+  if (tool === 'arcc') { // centre, start (sets the radius), then the end: the arc runs the short way round
+    if (q.length < 3) return { line: q };
+    const [c, p0, e] = q, r = Math.hypot(p0[0] - c[0], p0[1] - c[1]);
+    if (r < 1e-9) return {};
+    const a0 = Math.atan2(p0[1] - c[1], p0[0] - c[0]), a1 = Math.atan2(e[1] - c[1], e[0] - c[0]), sweep = wrapPi(a1 - a0);
+    if (Math.abs(sweep) < 1e-6) return { line: [c, p0] };
+    return { shape: { t: 'path', open: true, pts: [[p0[0], p0[1], Math.tan(sweep / 4)], [c[0] + r * Math.cos(a1), c[1] + r * Math.sin(a1)]] } };
+  }
+  return {};
+}
 
 import { UNIT_TABLE, getUnits, lenF, dispStr } from './units.js';
 const fmt = (v) => (Math.abs(v) < 1e-9 ? '0' : String(+v.toFixed(3)));
@@ -24,8 +62,8 @@ export function createSketchUI(app) {
   const shapes = () => P().shapes;
 
   let dimbox = null, labels = [], drag = null, lastInfer = null, badges = [];
-  const CON = { con_h: 'horizontal', con_v: 'vertical', con_coin: 'coincident', con_conc: 'concentric', con_equal: 'equal', con_par: 'parallel', con_perp: 'perpendicular' };
-  const CON_HINT = { horizontal: ['a line segment'], vertical: ['a line segment'], parallel: ['the segment to adjust', 'the reference segment'], perpendicular: ['the segment to adjust', 'the reference segment'], coincident: ['the point to move', 'the point to meet'], concentric: ['the shape to move', 'the reference shape'], equal: ['the first segment or circle', 'the second (same kind)'] };
+  const CON = { con_h: 'horizontal', con_v: 'vertical', con_coin: 'coincident', con_conc: 'concentric', con_equal: 'equal', con_par: 'parallel', con_perp: 'perpendicular', con_coll: 'collinear', con_mid: 'midpoint', con_tan: 'tangent', con_sym: 'symmetry', con_fix: 'fix' };
+  const CON_HINT = { horizontal: ['a line segment'], vertical: ['a line segment'], parallel: ['the segment to adjust', 'the reference segment'], perpendicular: ['the segment to adjust', 'the reference segment'], coincident: ['the point to move', 'the point to meet'], concentric: ['the shape to move', 'the reference shape'], equal: ['the first segment or circle', 'the second (same kind)'], collinear: ['the segment to move', 'the segment to line up with'], midpoint: ['the point to move', 'the segment whose middle it sits on'], tangent: ['the line or circle to adjust', 'the circle, arc or line it should touch'], symmetry: ['the point to move', 'the point to mirror', 'the line to mirror across'], fix: ['a shape or a point to lock in place'] };
 
   // ------------------------------------------------------------ coordinates
   const evPx = (ev) => { const r = canvas.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; };
@@ -51,6 +89,8 @@ export function createSketchUI(app) {
         [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].forEach((p) => out.push({ p, kind: 'Endpoint' }));
         [[x + w / 2, y], [x + w, y + h / 2], [x + w / 2, y + h], [x, y + h / 2]].forEach((p) => out.push({ p, kind: 'Midpoint' }));
         out.push({ p: [x + w / 2, y + h / 2], kind: 'Center' });
+      } else if (s.t === 'point') {
+        out.push({ p: [s.x, s.y], kind: 'Endpoint' });
       } else if (s.t === 'slot') {
         out.push({ p: [s.x1, s.y1], kind: 'Center' }, { p: [s.x2, s.y2], kind: 'Center' });
       } else if (s.t === 'ellipse') {
@@ -96,10 +136,14 @@ export function createSketchUI(app) {
     crect: [{ k: 'w', l: 'W' }, { k: 'h', l: 'H' }],
     rrect: [{ k: 'w', l: 'W' }, { k: 'h', l: 'H' }, { k: 'r', l: 'R' }],
     slot: [{ k: 'len', l: 'L' }, { k: 'w', l: 'W' }],
+    slotO: [{ k: 'len', l: 'L' }, { k: 'w', l: 'W' }],
+    slotM: [{ k: 'len', l: 'L' }, { k: 'w', l: 'W' }],
+    circle2: [{ k: 'd', l: 'Ø' }],
     ellipse: [{ k: 'a', l: 'A' }, { k: 'b', l: 'B' }],
     arc: [{ k: 'len', l: 'L' }, { k: 'ang', l: '∠' }],
     offset: [{ k: 'd', l: 'D' }],
     sfillet: [{ k: 'r', l: 'R' }],
+    schamfer: [{ k: 'd', l: 'D' }, { k: 'd2', l: 'D2' }],
     line: [{ k: 'len', l: 'L' }, { k: 'ang', l: '∠' }],
     path: [{ k: 'len', l: 'L' }, { k: 'ang', l: '∠' }],
   };
@@ -107,12 +151,13 @@ export function createSketchUI(app) {
   function live(tool, pts, cur) {
     if (tool === 'offset') return { d: S().offD ?? 2 };
     if (tool === 'sfillet') return { r: S().filR ?? 2 };
+    if (tool === 'schamfer') return { d: S().chamD ?? 2, d2: S().chamD2 ?? S().chamD ?? 2 };
     if (tool === 'arc' && pts.length === 2) { const b = bulgeFrom3(pts[0], cur, pts[1]); return { r: b ? arcOf(pts[0], pts[1], b).r : 0 }; }
     const a = pts[pts.length - 1];
     const dx = cur[0] - a[0], dy = cur[1] - a[1];
     const sess = S();
     const isC = tool === 'crect';
-    return { w: Math.abs(dx) * (isC ? 2 : 1), h: Math.abs(dy) * (isC ? 2 : 1), d: Math.hypot(dx, dy) * 2, a: Math.abs(dx), b: Math.abs(dy), len: Math.hypot(dx, dy), ang: ((Math.atan2(dy, dx) / D2R) + 360) % 360, ...(tool === 'slot' ? { w: sess.slotW ?? 6 } : {}), ...(tool === 'ngon' ? { r: Math.hypot(dx, dy) } : tool === 'rrect' ? { r: sess.cornerR ?? 3 } : {}) };
+    return { w: Math.abs(dx) * (isC ? 2 : 1), h: Math.abs(dy) * (isC ? 2 : 1), d: Math.hypot(dx, dy) * 2, a: Math.abs(dx), b: Math.abs(dy), len: Math.hypot(dx, dy), ang: ((Math.atan2(dy, dx) / D2R) + 360) % 360, ...(tool === 'circle2' ? { d: Math.hypot(dx, dy) } : {}), ...(tool === 'slot' || tool === 'slotO' || tool === 'slotM' ? { w: sess.slotW ?? 6 } : {}), ...(tool === 'ngon' ? { r: Math.hypot(dx, dy) } : tool === 'rrect' ? { r: sess.cornerR ?? 3 } : {}) };
   }
   function drawnShape(tool, pts, cur, typed) {
     const a = pts[0], dx = cur[0] - a[0], dy = cur[1] - a[1];
@@ -133,6 +178,13 @@ export function createSketchUI(app) {
       const len = typed.len ?? Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
       return { t: 'slot', x1: a[0], y1: a[1], x2: a[0] + len * Math.cos(ang), y2: a[1] + len * Math.sin(ang), w: typed.w ?? S().slotW ?? 6 };
     }
+    if (tool === 'slotO' || tool === 'slotM') {
+      const w = typed.w ?? S().slotW ?? 6, ang = Math.atan2(dy, dx), len = typed.len ?? Math.hypot(dx, dy), c = Math.cos(ang), sn = Math.sin(ang);
+      if (tool === 'slotO') { const L = Math.max(len - w, 0); return { t: 'slot', x1: a[0] + (c * w) / 2, y1: a[1] + (sn * w) / 2, x2: a[0] + (c * w) / 2 + c * L, y2: a[1] + (sn * w) / 2 + sn * L, w }; } // overall length: the ends of the slot, not its centres
+      const half = len / 2; // from the middle: the first click is the centre, the second the centre of one end
+      return { t: 'slot', x1: a[0] - c * half, y1: a[1] - sn * half, x2: a[0] + c * half, y2: a[1] + sn * half, w };
+    }
+    if (tool === 'circle2') { const d = typed.d ?? Math.hypot(dx, dy), ang = Math.atan2(dy, dx); return { t: 'circle', cx: a[0] + (Math.cos(ang) * d) / 2, cy: a[1] + (Math.sin(ang) * d) / 2, r: d / 2 }; }
     if (tool === 'ellipse') return { t: 'ellipse', cx: a[0], cy: a[1], rx: typed.a ?? Math.abs(dx), ry: typed.b ?? Math.abs(dy), rot: 0 };
     if (tool === 'circle') return { t: 'circle', cx: a[0], cy: a[1], r: typed.d != null ? typed.d / 2 : Math.hypot(dx, dy) };
     if (tool === 'ngon') return { t: 'ngon', cx: a[0], cy: a[1], r: typed.r ?? Math.hypot(dx, dy), n: S().sides, rot: Math.atan2(dy, dx) / D2R };
@@ -216,11 +268,21 @@ export function createSketchUI(app) {
       const typed = s.dim?.typed || {};
       if (s.tool === 'line' || s.tool === 'path') {
         vp.overlay.add(line3(pathPolygon(previewPathPts(s, cur, typed), false), (vp.dark ? 0xe6e8eb : 0x2d3138)));
+      } else if (MULTI[s.tool]) {
+        const r = multiShape(s.tool, s.pts, cur);
+        if (r.shape) vp.overlay.add(line3(shapeToPolygon(r.shape), (vp.dark ? 0xe6e8eb : 0x2d3138), r.shape.t !== 'path' || !r.shape.open));
+        else if (r.line?.length > 1) vp.overlay.add(line3(r.line, (vp.dark ? 0xe6e8eb : 0x2d3138)));
+      } else if (s.tool === 'tarc' && s.tan) {
+        const b = bulgeFromTangent(s.pts[0], s.tan.t, cur);
+        vp.overlay.add(line3(pathPolygon([[s.pts[0][0], s.pts[0][1], b], cur], false), (vp.dark ? 0xe6e8eb : 0x2d3138)));
       } else if (s.tool === 'arc') {
         vp.overlay.add(line3(pathPolygon(arcPreviewPts(s, cur, typed), false), (vp.dark ? 0xe6e8eb : 0x2d3138)));
       } else if (s.tool === 'offset' && s.off) {
         const res = offsetShape(shapes()[s.off.idx], typed.d ?? s.offD ?? 2);
         if (res) vp.overlay.add(line3(shapeToPolygon(res), 0xf08c00, true));
+      } else if (s.tool === 'schamfer' && s.cham) {
+        const res = chamferShape(shapes()[s.cham.s], s.cham.vi, typed.d ?? s.chamD ?? 2, typed.d2 ?? (typed.d != null ? typed.d : s.chamD2 ?? s.chamD ?? 2));
+        if (res) vp.overlay.add(line3(shapeToPolygon(res), 0xf08c00, !res.open));
       } else if (s.tool === 'sfillet' && s.fil) {
         const res = filletedShape(shapes()[s.fil.s], s.fil.vi, typed.r ?? s.filR ?? 2);
         if (res) vp.overlay.add(line3(shapeToPolygon(res), 0xf08c00, res.t !== 'path' || !res.open));
@@ -358,10 +420,26 @@ export function createSketchUI(app) {
 
   // ------------------------------------------------------------ commit / cancel
   function addShape(sh) {
+    if (S().lineType && sh.t !== 'point') sh = { ...sh, lt: S().lineType }; // drawn with the current line type: construction or centerline
     app.setShapes([...shapes(), sh]);
     app.renderPanel();
   }
-  function resetDraw() { const s = S(); s.pts = null; s.dim = { typed: {} }; s.arcMode = false; s.off = null; s.fil = null; closeDimbox(); redraw(); }
+  /** An end of an open path under the cursor: { s, end: 'first' | 'last', p, t } where t is the direction the path is heading there. */
+  function pathEndAt(px) {
+    let best = null, bd = 12;
+    shapes().forEach((sh, i) => {
+      if (sh.t !== 'path' || !sh.open || sh.pts.length < 2) return;
+      const n = sh.pts.length;
+      for (const end of ['first', 'last']) {
+        const p = end === 'last' ? sh.pts[n - 1] : sh.pts[0], q = scr(p), d = Math.hypot(q.x - px.x, q.y - px.y);
+        if (d >= bd) continue;
+        const ordered = end === 'last' ? sh.pts : reversePath(sh.pts), m = ordered.length;
+        bd = d; best = { s: i, end, p: [p[0], p[1]], t: endTangent(ordered[m - 2], ordered[m - 1], ordered[m - 2][2] || 0) };
+      }
+    });
+    return best;
+  }
+  function resetDraw() { const s = S(); s.cham = null; s.tan = null; s.pts = null; s.dim = { typed: {} }; s.arcMode = false; s.off = null; s.fil = null; closeDimbox(); redraw(); }
   function cancelShape() { resetDraw(); }
   function commit(cursorOverride) {
     const s = S();
@@ -374,6 +452,18 @@ export function createSketchUI(app) {
       if (!res) { app.toast?.('That offset is not possible for this shape.'); return; }
       if (typed.d != null) s.offD = typed.d;
       resetDraw(); addShape(res);
+      return;
+    }
+    if (s.tool === 'schamfer' && s.cham) {
+      const d1 = typed.d ?? s.chamD ?? 2, d2 = typed.d2 ?? (typed.d != null ? typed.d : s.chamD2 ?? s.chamD ?? 2); // one distance cuts both sides equally; type D2 for a different second side
+      const res = chamferShape(shapes()[s.cham.s], s.cham.vi, d1, d2);
+      if (!res) { app.toast?.('The chamfer does not fit on those segments.'); return; }
+      if (typed.d != null) s.chamD = typed.d;
+      if (typed.d2 != null) s.chamD2 = typed.d2; else if (typed.d != null) s.chamD2 = typed.d;
+      const idx = s.cham.s;
+      resetDraw();
+      app.setShapes(shapes().map((o, i) => (i === idx ? res : o)));
+      app.renderPanel();
       return;
     }
     if (s.tool === 'sfillet' && s.fil) {
@@ -453,6 +543,7 @@ export function createSketchUI(app) {
     if (sh.t === 'circle') return [{ id: 'r', p: [sh.cx + sh.r, sh.cy] }];
     if (sh.t === 'ngon') { const a = sh.rot * D2R; return [{ id: 'v', p: [sh.cx + sh.r * Math.cos(a), sh.cy + sh.r * Math.sin(a)] }]; }
     if (sh.t === 'path') return sh.pts.map((p, i) => ({ id: 'p' + i, p }));
+    if (sh.t === 'point') return [{ id: 'p', p: [sh.x, sh.y] }];
     return [];
   }
   function applyHandle(sh, id, uv) {
@@ -476,10 +567,12 @@ export function createSketchUI(app) {
     if (sh.t === 'circle') { const r = Math.hypot(u - sh.cx, v - sh.cy); return r > 1e-3 ? { ...sh, r } : sh; }
     if (sh.t === 'ngon') { const r = Math.hypot(u - sh.cx, v - sh.cy); return r > 1e-3 ? { ...sh, r, rot: Math.atan2(v - sh.cy, u - sh.cx) / D2R } : sh; }
     if (sh.t === 'path') { const i = +id.slice(1); return { ...sh, pts: sh.pts.map((p, k) => (k === i ? (p[2] ? [u, v, p[2]] : [u, v]) : p)) }; }
+    if (sh.t === 'point') return { ...sh, x: u, y: v };
     return sh;
   }
-  const anchorOf = (sh) => (sh.t === 'rect' || sh.t === 'rrect' ? [sh.x, sh.y] : sh.t === 'slot' ? [sh.x1, sh.y1] : sh.t === 'path' ? sh.pts[0] : [sh.cx, sh.cy]);
+  const anchorOf = (sh) => (sh.t === 'point' ? [sh.x, sh.y] : sh.t === 'rect' || sh.t === 'rrect' ? [sh.x, sh.y] : sh.t === 'slot' ? [sh.x1, sh.y1] : sh.t === 'path' ? sh.pts[0] : [sh.cx, sh.cy]);
   function translate(sh, du, dv) {
+    if (sh.t === 'point') return { ...sh, x: sh.x + du, y: sh.y + dv };
     if (sh.t === 'slot') return { ...sh, x1: sh.x1 + du, y1: sh.y1 + dv, x2: sh.x2 + du, y2: sh.y2 + dv };
     if (sh.t === 'rect' || sh.t === 'rrect') return { ...sh, x: sh.x + du, y: sh.y + dv };
     if (sh.t === 'path') return { ...sh, pts: sh.pts.map(([a, b, c]) => (c ? [a + du, b + dv, c] : [a + du, b + dv])) };
@@ -500,6 +593,7 @@ export function createSketchUI(app) {
   function hitShape(px) {
     let best = -1, bd = Infinity;
     shapes().forEach((sh, i) => {
+      if (sh.t === 'point') { const q = scr([sh.x, sh.y]), d = Math.hypot(q.x - px.x, q.y - px.y); if (d <= 9 && d < bd) { bd = d; best = i; } return; }
       const poly = shapeToPolygon(sh).map(scr);
       if (poly.length < 2) return;
       let d = Infinity;
@@ -541,7 +635,7 @@ export function createSketchUI(app) {
   }
   function syncLabels() {
     const s = S();
-    const sh = s && s.tool === 'select' && s.sel >= 0 ? shapes()[s.sel] : null;
+    const sh = s && s.tool === 'select' && s.sel >= 0 && s.showDims !== false ? shapes()[s.sel] : null;
     if (!sh) { if (labels.length) clearLabels(); return; }
     const specs = labelSpecs(sh);
     const key = specs.map((x) => x.id).join(',') + ':' + s.sel;
@@ -609,14 +703,44 @@ export function createSketchUI(app) {
     const s = S();
     document.getElementById('statusbar').textContent = `${CON_LABEL[type]}: select ${CON_HINT[type][s.conA ? 1 : 0]}`;
   }
+  /** A line or arc segment of a path, or else a whole circle, under the cursor (for Tangent). */
+  function hitCurve(px) { return hitSegment(px) || (() => { const i = hitShape(px); return i >= 0 && shapes()[i].t === 'circle' ? { s: i } : null; })(); }
+  const curveKind = (r) => (r.seg != null ? (segOf(shapes()[r.s], r.seg)?.[0]?.[2] ? 'arc' : 'line') : 'circle');
   function conPick(px) {
     const s = S(), type = CON[s.tool];
+    if (type === 'fix') { // lock a point or a whole shape where it is; clicking something already fixed unlocks it
+      const kp = hitKeyPoint(px), whole = kp ? -1 : hitShape(px);
+      const target = kp ? { s: kp.s, k: kp.k } : whole >= 0 ? { s: whole } : null;
+      if (!target) return;
+      const existing = app.cons().findIndex((c) => c.t === 'fix' && c.a?.s === target.s && (c.a.k ?? null) === (target.k ?? null));
+      if (existing >= 0) { app.setCons(app.cons().filter((_, i) => i !== existing)); document.getElementById('statusbar').textContent = 'Unfixed'; redraw(); return; }
+      const sh = shapes()[target.s];
+      addCon(target.k ? { t: 'fix', a: target, pos: keyPoints(sh).find((q) => q.k === target.k)?.p } : { t: 'fix', a: target, snap: JSON.parse(JSON.stringify(sh)) });
+      return;
+    }
+    if (type === 'symmetry') { // three picks: the point to move, the point to mirror, then the line
+      const picks = s.conPicks || (s.conPicks = []);
+      const hit = picks.length < 2 ? hitKeyPoint(px) : hitSegment(px);
+      if (!hit) return;
+      picks.push(hit);
+      if (picks.length < 3) { document.getElementById('statusbar').textContent = `${CON_LABEL.symmetry}: select ${CON_HINT.symmetry[picks.length]}`; redraw(); return; }
+      s.conPicks = null;
+      addCon({ t: 'symmetry', a: picks[0], b: picks[1], c: picks[2] });
+      return;
+    }
     const two = !['horizontal', 'vertical'].includes(type);
     let hit = null;
     if (type === 'coincident') hit = hitKeyPoint(px);
     else if (type === 'concentric') { const i = hitShape(px); hit = i >= 0 ? { s: i } : null; }
     else if (type === 'equal') { hit = hitSegment(px) || (() => { const i = hitShape(px); return i >= 0 && ['circle', 'ngon'].includes(shapes()[i].t) ? { s: i } : null; })(); }
-    else hit = hitSegment(px);
+    else if (type === 'midpoint') hit = s.conA ? hitSegment(px) : hitKeyPoint(px);
+    else if (type === 'tangent') {
+      hit = hitCurve(px);
+      if (hit && s.conA) { // a line meets a circle or arc, or a circle meets a line, circle or arc
+        const a = curveKind(s.conA), b = curveKind(hit);
+        if (!((a === 'line' && b !== 'line') || (a === 'circle'))) { app.toast?.('Tangent works between a line and a circle or arc, or from a circle to a line, circle or arc.'); s.conA = null; redraw(); return; }
+      }
+    } else hit = hitSegment(px); // horizontal, vertical, parallel, perpendicular, collinear
     if (!hit) return;
     if (!two) { addCon({ t: type, a: hit }); return; }
     if (!s.conA) { s.conA = hit; conStatus(type); redraw(); return; }
@@ -631,7 +755,7 @@ export function createSketchUI(app) {
   }
   function syncBadges() {
     const s = S();
-    const cons = s ? app.cons() : [];
+    const cons = s && s.showCons !== false ? app.cons() : [];
     const sh = s ? shapes() : [];
     const key = JSON.stringify(cons);
     if (badges.key !== key) {
@@ -678,6 +802,10 @@ export function createSketchUI(app) {
     } else if ((s.tool === 'rpat' || s.tool === 'cpat') && s.pat) {
       for (const i of s.pat.sel) { const sh = shapes()[i]; if (sh) vp.overlay.add(line3(shapeToPolygon(sh), 0xf08c00, !sh.open)); }
       if (s.pat.preview) for (const m of s.pat.preview) vp.overlay.add(line3(shapeToPolygon(m), 0xf08c00, !m.open, true));
+    } else if (s.tool === 'extend' && s.extPrev) {
+      vp.overlay.add(line3(s.extPrev, 0x1d9a57));
+    } else if (s.tool === 'break' && s.brkPrev) {
+      for (const q of s.brkPrev) { const z = 4 / ppmAt(q); vp.overlay.add(line3([[q[0] - z, q[1] - z], [q[0] + z, q[1] - z], [q[0] + z, q[1] + z], [q[0] - z, q[1] + z]], 0xe0453a, true)); }
     } else if (s.tool === 'trim' && s.trimPrev) {
       for (const pl of s.trimPrev) if (pl.length > 1) vp.overlay.add(line3(pl, 0xe0453a));
     } else if (s.tool === 'spline' && s.pts?.length && cur) {
@@ -746,10 +874,31 @@ export function createSketchUI(app) {
       const tol = 12 / ppmAt(raw), res = trimAt(shapes(), raw, tol);
       if (kind === 'move') { s.trimPrev = res?.removed || null; canvas.style.cursor = res ? 'pointer' : ''; redraw(); return; }
       if (kind !== 'down' || !res) return;
-      const delta = res.shapes.length - shapes().length + 1;
+      const delta = res.shapes.length - shapes().length; // how many shapes later ones move by
       app.setShapes(res.shapes);
       app.remapCons?.(res.index, delta);
       s.trimPrev = null; s.sel = -1;
+      app.renderPanel(); redraw();
+      return;
+    }
+    if (s.tool === 'extend') { // grow the end of a line or arc to the next curve
+      const res = extendAt(shapes(), raw, 12 / ppmAt(raw));
+      if (kind === 'move') { s.extPrev = res?.preview || null; canvas.style.cursor = res ? 'pointer' : ''; redraw(); return; }
+      if (kind !== 'down') return;
+      if (!res) { app.toast?.('Nothing to extend to there. Click near the end of an open line or arc that would meet another curve.'); return; }
+      app.setShapes(res.shapes); s.extPrev = null;
+      app.renderPanel(); redraw();
+      return;
+    }
+    if (s.tool === 'break') { // split a curve where others cross it
+      const res = breakAt(shapes(), raw, 12 / ppmAt(raw));
+      if (kind === 'move') { s.brkPrev = res?.points || null; canvas.style.cursor = res ? 'pointer' : ''; redraw(); return; }
+      if (kind !== 'down') return;
+      if (!res) { app.toast?.('No other curve crosses that one.'); return; }
+      const delta = res.shapes.length - shapes().length;
+      app.setShapes(res.shapes);
+      app.remapCons?.(res.index, delta);
+      s.brkPrev = null; s.sel = -1;
       app.renderPanel(); redraw();
       return;
     }
@@ -787,8 +936,10 @@ export function createSketchUI(app) {
     if (s.tool === 'select') {
       if (kind === 'down') {
         const h = hitHandle(px);
+        if (h && app.cons().some((c) => c.t === 'fix' && c.a?.s === s.sel)) { app.toast?.('That shape is fixed. Use the Fix tool on it again to unlock it.'); return; }
         if (h) { drag = { type: 'handle', id: h.id, idx: s.sel }; return; }
         const i = hitShape(px);
+        if (i >= 0 && app.cons().some((c) => c.t === 'fix' && c.a?.s === i && c.a.k === undefined)) { s.sel = i; app.toast?.('That shape is fixed. Use the Fix tool on it again to unlock it.'); app.redrawSketch(); app.renderPanel(); redraw(); return; }
         if (i >= 0) {
           s.sel = i; drag = { type: 'move', idx: i, start: raw, orig: shapes()[i], anchor: anchorOf(shapes()[i]) };
           app.redrawSketch(); app.renderPanel(); redraw();
@@ -823,18 +974,18 @@ export function createSketchUI(app) {
       return;
     }
 
-    if (['mirror', 'trim', 'spline', 'project', 'rpat', 'cpat'].includes(s.tool)) { editPointer(ev, kind, raw, px); return; }
+    if (['mirror', 'trim', 'extend', 'break', 'spline', 'project', 'rpat', 'cpat'].includes(s.tool)) { editPointer(ev, kind, raw, px); return; }
     if (s.tool?.startsWith('con_')) {
       if (kind === 'down') conPick(px);
       else if (kind === 'move') { const type = CON[s.tool]; conStatus(type); }
       return;
     }
-    if (s.tool === 'offset' || s.tool === 'sfillet') {
+    if (s.tool === 'offset' || s.tool === 'sfillet' || s.tool === 'schamfer') {
       const sn0 = snapPoint(ev, raw);
       s.cursor = sn0.pt;
       if (kind === 'move') { if (s.pts?.length) updateDimbox(); redraw(); return; }
       if (kind !== 'down') return;
-      if (s.tool === 'offset' ? s.off : s.fil) { commit(); return; }
+      if (s.tool === 'offset' ? s.off : s.tool === 'schamfer' ? s.cham : s.fil) { commit(); return; }
       if (s.tool === 'offset') {
         const i = hitShape(px);
         if (i < 0) return;
@@ -844,7 +995,7 @@ export function createSketchUI(app) {
         const h = hitKeyPoint(px);
         const sh = h && shapes()[h.s];
         if (!sh || !['rect', 'path'].includes(sh.t) || h.k === 'ctr') { app.toast?.('Click a corner of a rectangle or path.'); return; }
-        s.fil = { s: h.s, vi: vertexIndex(h.k) };
+        if (s.tool === 'schamfer') s.cham = { s: h.s, vi: vertexIndex(h.k) }; else s.fil = { s: h.s, vi: vertexIndex(h.k) };
       }
       s.pts = [[0, 0]]; s.dim = { typed: {} };
       openDimbox(); redraw();
@@ -867,6 +1018,33 @@ export function createSketchUI(app) {
     if (kind !== 'down') return;
     lastInfer = sn; s.cursor = sn.pt;
     if (!s.dim) s.dim = { typed: {} };
+    if (s.tool === 'point') { addShape({ t: 'point', x: sn.pt[0], y: sn.pt[1] }); return; }
+    if (MULTI[s.tool]) { // clicks only: the third click completes the shape
+      if (!s.pts) { s.pts = [sn.pt]; redraw(); return; }
+      if (s.pts.length + 1 === MULTI[s.tool]) {
+        const r = multiShape(s.tool, s.pts, sn.pt);
+        if (!r.shape) { app.toast?.('Those points do not make a shape. Move the last point.'); return; }
+        resetDraw(); addShape(r.shape); return;
+      }
+      s.pts.push(sn.pt); redraw(); return;
+    }
+    if (s.tool === 'tarc') { // continue an open path with an arc that leaves its end smoothly
+      if (!s.tan) {
+        const hit = pathEndAt(px);
+        if (!hit) { app.toast?.('Click the end of an open line or arc.'); return; }
+        s.tan = hit; s.pts = [hit.p]; redraw(); return;
+      }
+      const sh = shapes()[s.tan.s];
+      let pts = s.tan.end === 'first' ? reversePath(sh.pts) : sh.pts.map((q) => [...q]);
+      const n = pts.length, last = pts[n - 1], b = bulgeFromTangent(last, endTangent(pts[n - 2], last, pts[n - 2][2] || 0), sn.pt);
+      if (!b || Math.hypot(sn.pt[0] - last[0], sn.pt[1] - last[1]) < 1e-9) { app.toast?.('The arc end must be off the line the path is heading along.'); return; }
+      pts[n - 1] = [last[0], last[1], b]; pts.push(sn.pt);
+      const idx = s.tan.s; s.tan = null;
+      resetDraw();
+      app.setShapes(shapes().map((o, i) => (i === idx ? { ...o, pts } : o)));
+      app.renderPanel();
+      return;
+    }
     if (s.tool === 'line' || s.tool === 'path') {
       if (!s.pts) { s.pts = [sn.pt]; openDimbox(); redraw(); return; }
       const first = s.pts[0];

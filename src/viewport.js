@@ -276,6 +276,41 @@ export class Viewport {
     }
   }
   /** Offset-plane features drawn as translucent squares; clickable while picking a sketch plane. items: [{id,name,origin,normal,xdir,hidden}] */
+  /** Slice (while sketching): hide the part of every body on the viewer's side of a plane, so the sketch sits on the cut. fr = { o, n } or null. */
+  setSlice(fr) {
+    let plane = null;
+    if (fr) {
+      const n = new THREE.Vector3(...fr.n).normalize(), o = new THREE.Vector3(...fr.o), toCam = this.camera.position.clone().sub(o);
+      if (n.dot(toCam) > 0) n.negate(); // keep the side away from the camera
+      plane = new THREE.Plane(n, -n.dot(o));
+    }
+    if (plane && this.slicePlane && plane.equals(this.slicePlane)) return; // nothing moved
+    const was = !!this.slicePlane;
+    this.slicePlane = plane;
+    if (plane || was) this.refreshMaterials();
+  }
+  /** Construction axes (a long line through a point) and construction points (a small cross). */
+  setConstructionLines(items) {
+    if (!this.constructionLines) { this.constructionLines = new THREE.Group(); this.scene.add(this.constructionLines); }
+    for (const c of [...this.constructionLines.children]) { c.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); }); this.constructionLines.remove(c); }
+    const size = Math.max(this.bounds().getSize(new THREE.Vector3()).length(), 60), half = size * 0.75;
+    for (const it of items) {
+      const o = new THREE.Vector3(...it.origin), g = new THREE.Group();
+      if (it.kind === 'axis') {
+        const d = new THREE.Vector3(...it.dir).normalize();
+        const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([o.clone().addScaledVector(d, -half), o.clone().addScaledVector(d, half)]), new THREE.LineDashedMaterial({ color: 0xd2691e, dashSize: size / 60, gapSize: size / 120 }));
+        line.computeLineDistances(); line.raycast = () => {}; g.add(line);
+        const tip = new THREE.Mesh(new THREE.ConeGeometry(size / 90, size / 30, 10), new THREE.MeshBasicMaterial({ color: 0xd2691e }));
+        tip.position.copy(o).addScaledVector(d, half); tip.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d); tip.raycast = () => {}; g.add(tip);
+      } else {
+        const r = size / 70, pts = [[-r, 0, 0], [r, 0, 0], [0, -r, 0], [0, r, 0], [0, 0, -r], [0, 0, r]].map((q) => new THREE.Vector3(...q).add(o));
+        const cross = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0xd2691e, depthTest: false }));
+        cross.renderOrder = 12; cross.raycast = () => {}; g.add(cross);
+      }
+      g.userData.ref = it.id; g.visible = !it.hidden;
+      this.constructionLines.add(g);
+    }
+  }
   setConstructionPlanes(items) {
     if (!this.constructionGroup) { this.constructionGroup = new THREE.Group(); this.scene.add(this.constructionGroup); }
     for (const c of [...this.constructionGroup.children]) { c.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); }); this.constructionGroup.remove(c); }
@@ -479,7 +514,7 @@ export class Viewport {
       e.visible = this.opts.edges && !this.opts.render;
       e.material = sel ? this.mats.edgeSel : this.mats.edge;
     }
-    const clip = this.section ? [this.section.plane] : null;
+    const clip = this.section ? [this.section.plane] : this.slicePlane ? [this.slicePlane] : null;
     for (const mm of [this.mats.surface, this.mats.body, this.mats.sel, this.mats.hover, this.mats.edge, this.mats.edgeSel, ...Object.values(this.colorMats || {})]) {
       if ((mm.clippingPlanes === null) !== (clip === null)) mm.needsUpdate = true;
       mm.clippingPlanes = clip;

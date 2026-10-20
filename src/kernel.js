@@ -80,9 +80,11 @@ function shapeToCS(s, t) {
  */
 function profileCells(f, t) {
   const items = [];
-  f.params.shapes.forEach((s, i) => { if (s.open) return; const cs = shapeToCS(s, t); if (cs && cs.area() > 1e-9) items.push({ i, cs, area: cs.area() }); });
+  // Construction and centerline shapes and points are for reference only: they never form a profile.
+  const solid = (sh) => !sh.lt && sh.t !== 'point';
+  f.params.shapes.forEach((s, i) => { if (s.open || !solid(s)) return; const cs = shapeToCS(s, t); if (cs && cs.area() > 1e-9) items.push({ i, cs, area: cs.area() }); });
   // closed loops formed by open lines/arcs that meet end to end are profiles too
-  openLoops(f.params.shapes).forEach((poly, k) => {
+  openLoops(f.params.shapes.filter(solid)).forEach((poly, k) => {
     const a = poly.reduce((acc, [x1, y1], i) => { const [x2, y2] = poly[(i + 1) % poly.length]; return acc + (x1 * y2 - x2 * y1); }, 0);
     const cs = t(K.CrossSection.ofPolygons([a < 0 ? [...poly].reverse() : poly]));
     if (cs.area() > 1e-9) items.push({ i: 1000 + k, cs, area: cs.area() });
@@ -404,7 +406,8 @@ function sketchPath3D(sk) {
     const closed = !!sk.params.closed && pts.length > 2;
     return { closed, pts: sk.params.smooth && !closed ? smoothPath(pts, 3) : pts };
   }
-  const sh = sk.params.shapes.find((s) => s.t === 'path' && s.open) || sk.params.shapes.find((s) => s.t === 'path' || s.t === 'circle' || s.t === 'rect' || s.t === 'ngon');
+  const drawn = sk.params.shapes.filter((s) => !s.lt && s.t !== 'point'); // construction and centerline shapes and points are not geometry to follow
+  const sh = drawn.find((s) => s.t === 'path' && s.open) || drawn.find((s) => s.t === 'path' || s.t === 'circle' || s.t === 'rect' || s.t === 'ngon');
   if (!sh) throw new Error(`${sk.name} has no path (draw a Path or any shape)`);
   const closed = !sh.open;
   const pts2 = shapeToPolygon(sh);
@@ -415,7 +418,7 @@ function sketchPath3D(sk) {
 /** Every shape of a sketch as a 3D polyline: [{pts, closed}] (open paths and closed shapes alike). */
 function sketchCurves3D(sk) {
   const { o, x, y } = planeFrame(sk.params);
-  const out = sk.params.shapes.map((sh) => ({ closed: !sh.open, pts: shapeToPolygon(sh).map(([u, v]) => [o[0] + x[0] * u + y[0] * v, o[1] + x[1] * u + y[1] * v, o[2] + x[2] * u + y[2] * v]) })).filter((c) => c.pts.length >= 2);
+  const out = sk.params.shapes.filter((sh) => !sh.lt && sh.t !== 'point').map((sh) => ({ closed: !sh.open, pts: shapeToPolygon(sh).map(([u, v]) => [o[0] + x[0] * u + y[0] * v, o[1] + x[1] * u + y[1] * v, o[2] + x[2] * u + y[2] * v]) })).filter((c) => c.pts.length >= 2);
   if (!out.length) throw new Error(`${sk.name} has no shapes (draw a path, rectangle, circle...)`);
   return out;
 }
@@ -676,15 +679,61 @@ export function bboxOf(m) {
  * Plane features get origin/normal/xdir filled in so the UI can draw them.
  */
 export function resolvePlanes(features) {
-  const frames = {};
+  const frames = {}, axes = {};
   const same = (a, b) => a && b && a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+  const V = { sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]], scl: (a, k) => [a[0] * k, a[1] * k, a[2] * k], dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2] };
+  const frameOf = (ref) => (frames[ref] ? planeFrame({ plane: 'custom', ...frames[ref], offset: 0 }) : planeFrame({ plane: ref || 'XY', offset: 0 }));
+  const bad = (f, msg) => ({ ...f, params: { ...f.params, error: msg } });
+  /** Rotate point q about the line through a with unit direction d by deg degrees (Rodrigues). */
+  const spin = (q, a, d, deg) => { const t = (deg * Math.PI) / 180, c = Math.cos(t), sn = Math.sin(t), r = V.sub(q, a), kx = v3cross(d, r); return V.add(a, V.add(V.add(V.scl(r, c), V.scl(kx, sn)), V.scl(d, V.dot(d, r) * (1 - c)))); };
+  const turn = (v, d, deg) => V.sub(spin(v, [0, 0, 0], d, deg), [0, 0, 0]);
   return features.map((f) => {
     if (f.type === 'plane') {
-      const base = frames[f.params.base] ? { plane: 'custom', ...frames[f.params.base], offset: 0 } : { plane: f.params.base || 'XY', offset: 0 };
-      const fr = planeFrame(base), d = +f.params.offset || 0;
-      const geo = { origin: fr.o.map((c, k) => c + fr.n[k] * d), normal: fr.n, xdir: fr.x };
+      const mode = f.params.mode || 'offset';
+      let geo;
+      if (mode === 'offset') {
+        const fr = frameOf(f.params.base), d = +f.params.offset || 0;
+        geo = { origin: fr.o.map((c, k) => c + fr.n[k] * d), normal: fr.n, xdir: fr.x };
+      } else if (mode === 'angle') {
+        const fr = frameOf(f.params.base), ax = f.params.axis || 'x';
+        let a = fr.o, d = fr.x;
+        if (ax === 'y') d = fr.y;
+        else if (axes[ax]) { a = axes[ax].origin; d = axes[ax].dir; }
+        const deg = +f.params.angle || 0;
+        geo = { origin: spin(fr.o, a, d, deg), normal: v3norm(turn(fr.n, d, deg)), xdir: v3norm(turn(fr.x, d, deg)) };
+      } else if (mode === 'mid') {
+        const f1 = frameOf(f.params.base), f2 = frameOf(f.params.base2);
+        if (Math.hypot(...v3cross(f1.n, f2.n)) > 1e-6) return bad(f, 'A midplane needs two parallel planes. These two are not parallel.');
+        const gap = V.dot(V.sub(f2.o, f1.o), f1.n);
+        geo = { origin: V.add(f1.o, V.scl(f1.n, gap / 2)), normal: f1.n, xdir: f1.x };
+      } else if (mode === 'three') {
+        const [p1, p2, p3] = [f.params.p1, f.params.p2, f.params.p3].map((q) => (Array.isArray(q) ? q.map((v) => +v || 0) : [0, 0, 0]));
+        const n = v3cross(V.sub(p2, p1), V.sub(p3, p1));
+        if (Math.hypot(...n) < 1e-9) return bad(f, 'Those three points are in a line, so they do not define a plane.');
+        geo = { origin: p1, normal: v3norm(n), xdir: v3norm(V.sub(p2, p1)) };
+      } else return f;
       frames[f.id] = geo;
-      return { ...f, params: { ...f.params, ...geo } };
+      return { ...f, params: { ...f.params, ...geo, error: undefined } };
+    }
+    if (f.type === 'axis') { // construction axis: a point and a direction
+      const mode = f.params.mode || 'twopoints';
+      let geo;
+      if (mode === 'twopoints') {
+        const p1 = (f.params.p1 || [0, 0, 0]).map((v) => +v || 0), p2 = (f.params.p2 || [0, 0, 1]).map((v) => +v || 0), d = V.sub(p2, p1);
+        if (Math.hypot(...d) < 1e-9) return bad(f, 'The two points are the same point.');
+        geo = { origin: p1, dir: v3norm(d) };
+      } else if (mode === 'planes') {
+        const f1 = frameOf(f.params.base), f2 = frameOf(f.params.base2), d = v3cross(f1.n, f2.n), L2 = V.dot(d, d);
+        if (L2 < 1e-12) return bad(f, 'Those two planes are parallel, so they do not cross in a line.');
+        const d1 = V.dot(f1.n, f1.o), d2 = V.dot(f2.n, f2.o);
+        const o = V.scl(V.add(V.scl(v3cross(f2.n, d), d1), V.scl(v3cross(d, f1.n), d2)), 1 / L2);
+        geo = { origin: o, dir: v3norm(d) };
+      } else { // perpendicular to a plane, through a point
+        const fr = frameOf(f.params.base);
+        geo = { origin: (f.params.pos || [0, 0, 0]).map((v) => +v || 0), dir: fr.n };
+      }
+      axes[f.id] = geo;
+      return { ...f, params: { ...f.params, ...geo, error: undefined } };
     }
     if (f.type === 'sketch' && f.params.planeRef && frames[f.params.planeRef]) {
       const g = frames[f.params.planeRef];
@@ -795,8 +844,9 @@ export function rebuild(features, count, opts = {}) {
       else { addBody(f.id, solid, f.name); notes[f.id] = { op: 'new', bodies: [], text: 'Automatic: makes a new body (it does not touch anything)' }; }
       return;
     }
+    const picked = (f.params?.targets || []).filter((id) => live.has(id)); // objects to cut: several bodies chosen in the dialog
     if (op === 'cut') {
-      const ids = !target || target === 'all' ? [...live.keys()] : [target];
+      const ids = picked.length ? picked : !target || target === 'all' ? [...live.keys()] : [target];
       const hit = [];
       for (const id of ids) {
         const b = getBody(id), before = b.m.volume();
@@ -807,8 +857,11 @@ export function rebuild(features, count, opts = {}) {
       const all = ids.map((id) => live.get(id) || { name: 'a removed body' });
       notes[f.id] = { op: 'cut', bodies: hit.map((b) => b.id), text: hit.length ? `Cuts from ${names(hit)}` : `Cuts from ${!target || target === 'all' ? 'all bodies' : names(all)}` };
       if (!hit.length) warnings[f.id] = [{ text: 'The cut does not touch any body, so nothing was removed. Move or extend it so it overlaps the body.' }];
+    } else if (op === 'intersect' && picked.length > 1) {
+      for (const id of picked) { const b = getBody(id); b.m = t(b.m.intersect(solid)); }
+      notes[f.id] = { op, bodies: picked, text: `Intersects ${names(picked.map((id) => live.get(id)))}` };
     } else if (op === 'join' || op === 'intersect') {
-      const b = (target && live.get(target)) || [...live.values()][0];
+      const b = (target && live.get(target)) || (picked.length === 1 && live.get(picked[0])) || [...live.values()][0];
       if (!b) { addBody(f.id, solid, f.name); notes[f.id] = { op: 'new', bodies: [], text: 'No body to join, so this makes a new body' }; }
       else {
         b.m = t(op === 'join' ? b.m.add(solid) : b.m.intersect(solid));
@@ -877,7 +930,8 @@ export function rebuild(features, count, opts = {}) {
           sketches[f.id] = f; break;
         }
         case 'sketch3d': sketches[f.id] = f; break; // used as a path by Sweep, Pipe and Pattern
-        case 'plane': break; // construction geometry only (see resolvePlanes)
+        case 'plane': case 'axis': if (p.error) throw new Error(p.error); break; // construction geometry only (see resolvePlanes)
+        case 'cpoint': break;
         case 'extrude': {
           let { cs, sk } = solidFromSketch(f);
           if (p.thin) { // thin extrude: only a wall of the given thickness around each profile outline
@@ -903,34 +957,76 @@ export function rebuild(features, count, opts = {}) {
             dist = dirSign * (near <= 1e-6 || p.op === 'cut' ? far : near);
           }
           const d = Math.abs(dist) || 1e-3;
-          let m;
-          if (p.taper) {
-            if (p.symmetric) throw new Error('Taper cannot be combined with Symmetric');
-            const polys = cs.toPolygons();
+          const dirMode = p.direction || (p.symmetric ? 'symmetric' : 'one'); // one side, both sides equally, or two sides with their own distance and taper
+          const symmetric = dirMode === 'symmetric';
+          const lift = (pl, z) => pl.map(([u, v]) => [u, v, z]);
+          /** A prism of this profile from z = 0 to sgn * dd, tapered inwards by `angle` degrees if given. */
+          const prism = (cs0, dd, angle, sgn) => {
+            if (!angle) { const q = t(cs0.extrude(dd)); return sgn < 0 ? t(q.translate([0, 0, -dd])) : q; }
+            const polys = cs0.toPolygons();
             if (polys.length !== 1) throw new Error('Taper needs a single closed profile without holes');
-            const off = t(cs.offset(-d * Math.tan((p.taper * Math.PI) / 180), 'Miter'));
+            const off = t(cs0.offset(-dd * Math.tan((angle * Math.PI) / 180), 'Miter'));
             const polys2 = off.toPolygons();
             if (polys2.length !== 1) throw new Error('Taper angle too large for this profile');
-            const lift = (pl, z) => pl.map(([u, v]) => [u, v, z]);
-            const rings = loftRings([lift(polys[0], 0), lift(polys2[0], dirSign * d)]);
-            m = solidFromRings(rings, false, t);
+            return solidFromRings(loftRings([lift(polys[0], 0), lift(polys2[0], sgn * dd)]), false, t);
+          };
+          let m;
+          if (p.taper) {
+            if (symmetric) throw new Error('Taper cannot be combined with Symmetric');
+            m = prism(cs, d, p.taper, dirSign);
           } else {
             m = p.twist || (p.scaleTop ?? 1) !== 1
               ? t(cs.extrude(d, p.twist ? 32 : 1, p.twist || 0, p.scaleTop ?? 1))
               : t(cs.extrude(d));
-            if (p.symmetric) m = t(m.translate([0, 0, -d / 2]));
+            if (symmetric) m = t(m.translate([0, 0, -d / 2]));
             else if (dist < 0) m = t(m.translate([0, 0, -d]));
           }
-          if (p.taper) { /* rings already carry the sign */ }
+          if (dirMode === 'two') { // the other side of the profile plane, with its own distance and taper
+            const d2 = p.extent2 === 'all' ? BIGDIST : Math.abs(p.distance2 ?? 0);
+            if (!(d2 > 0)) throw new Error('Side 2 needs a distance');
+            const m2 = prism(cs, d2, p.taper2 || 0, -dirSign);
+            m = t(m.add(m2));
+          }
+          if (p.start === 'offset' && p.startOffset) m = t(m.translate([0, 0, p.startOffset])); // begin the extrusion off the profile plane
           applyOp(f, toPlane(m, sk.params, t), p.op, p.target);
           break;
         }
         case 'revolve': {
           const { cs, sk } = solidFromSketch(f);
-          const full = p.angle >= 360;
-          let m = t(cs.revolve(SEG, p.angle));
-          m = t(m.rotate([-90, 0, 0])); // axis (local Y of sketch)
-          void full;
+          // The axis: the sketch's Y axis (the default), its X axis, or the first centerline drawn in the sketch.
+          let o2 = [0, 0], th = 90; // a point on the axis, and the axis direction in degrees
+          if (p.axis === 'x') th = 0;
+          else if (p.axis && !['x', 'y', 'centerline'].includes(p.axis)) { // a construction axis: its direction in the sketch plane
+            const ax = features.find((x) => x.id === p.axis && x.type === 'axis');
+            if (!ax || ax.params.error) throw new Error('The axis you picked no longer exists or could not be built');
+            const fr = planeFrame(sk.params), dd = ax.params.dir, rel = sub(ax.params.origin, fr.o);
+            const dir2 = [dot(dd, fr.x), dot(dd, fr.y)];
+            if (Math.hypot(...dir2) < 1e-6) throw new Error('That axis points straight out of the sketch plane, so it cannot be a revolve axis.');
+            o2 = [dot(rel, fr.x), dot(rel, fr.y)];
+            th = (Math.atan2(dir2[1], dir2[0]) * 180) / Math.PI;
+          } else if (p.axis === 'centerline') {
+            const cl = (sk.params.shapes || []).find((x) => x.lt === 'centerline' && x.t === 'path' && x.pts?.length >= 2);
+            if (!cl) throw new Error('This sketch has no centerline. Draw a line and set its line type to Centerline, or choose another axis.');
+            o2 = [cl.pts[0][0], cl.pts[0][1]];
+            th = (Math.atan2(cl.pts[1][1] - cl.pts[0][1], cl.pts[1][0] - cl.pts[0][0]) * 180) / Math.PI;
+          }
+          let c2 = cs;
+          if (th !== 90 || o2[0] || o2[1]) c2 = t(t(cs.translate([-o2[0], -o2[1]])).rotate(90 - th)); // axis along +Y, as the revolve wants it
+          const bb = c2.bounds();
+          if (bb.min[0] < -1e-6 && bb.max[0] <= 1e-6) c2 = t(c2.mirror([1, 0])); // the profile lies on the other side of the axis
+          else if (bb.min[0] < -1e-6) throw new Error('The profile crosses the axis. Move it to one side, or choose another axis.');
+          const partial = (p.extent || (p.angle >= 360 ? 'full' : 'partial')) === 'partial';
+          const ang = partial ? Math.min(Math.max(p.angle || 0, 1e-3), 360) : 360;
+          const mode = p.direction || 'one';
+          let m;
+          if (!partial || ang >= 360) m = t(c2.revolve(SEG, 360));
+          else if (mode === 'symmetric') m = t(t(c2.revolve(SEG, ang)).rotate([0, 0, -ang / 2]));
+          else if (mode === 'two') {
+            const a2 = Math.min(Math.max(p.angle2 ?? 0, 1e-3), 360 - ang);
+            m = t(t(c2.revolve(SEG, ang)).add(t(t(c2.revolve(SEG, a2)).rotate([0, 0, -a2]))));
+          } else m = t(c2.revolve(SEG, ang));
+          m = t(m.rotate([-90, 0, 0])); // the axis becomes the sketch's local Y
+          if (th !== 90 || o2[0] || o2[1]) m = t(t(m.rotate([0, 0, th - 90])).translate([o2[0], o2[1], 0]));
           applyOp(f, toPlane(m, sk.params, t), p.op, p.target);
           break;
         }
