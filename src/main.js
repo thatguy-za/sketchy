@@ -539,7 +539,7 @@ function runCommand(id, ev) {
   if (c.skAction === 'delete') return sketchDeleteSelected();
   if (sketch && !['select', 'finishsketch', 'cancelpick', 'svg', 'dxf', 'sk_text'].includes(id)) return toast('Finish the sketch first.');
   if (id === 'remove') { lastCmd = id; return deleteSelection(); }
-  if (selFace?.curved && (id === 'extrude' || id === 'sketch')) return toast('A sketch or Press/Pull needs a flat face. Pick a flat face, or use a plane.', true);
+  if (selFace?.curved && id === 'extrude') return toast('Press/Pull needs a flat face. Pick a flat face, or use a plane.', true);
   if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
   if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
   if (c.addinCommand) { lastCmd = id; return runAddinCommand(c); }
@@ -568,6 +568,16 @@ function selectionMenu(anchor) {
   ]);
 }
 function sketchOnSelectedFace() {
+  if (selFace.curved) { // a curved face: the sketch lies on the plane that touches the surface at the clicked point
+    const n0 = selFace.tangent || selFace.normal, nl = Math.hypot(...n0), nn = n0.map((c) => +(c / nl).toFixed(6)), h = Math.hypot(nn[0], nn[1]);
+    const xdir = h < 0.01 ? [1, 0, 0] : [-nn[1] / h, nn[0] / h, 0].map((q) => +q.toFixed(6)); // along the surface's horizontal when it has one
+    const origin = selFace.point.map((c) => +c.toFixed(4));
+    selFace = null; vp.showFaces([], null);
+    sketch = { picking: true, index: doc.marker };
+    toast('Sketch placed on the plane touching the curved face at the point you clicked.');
+    enterSketch(sketch.index, true, { plane: 'custom', origin, normal: nn, xdir });
+    return;
+  }
   const n = selFace.normal.map((c) => (Math.abs(c) < 1e-6 ? 0 : +c.toFixed(6)));
   const d = n[0] * selFace.point[0] + n[1] * selFace.point[1] + n[2] * selFace.point[2];
   const nl = Math.hypot(...n), nn = n.map((c) => c / nl);
@@ -3267,8 +3277,7 @@ function bindViewport() {
       const tg = vp.pickSketchTarget(e);
       if (tg?.ref) enterSketch(sketch.index, true, { planeRef: tg.ref, plane: 'custom', origin: tg.geo.origin, normal: tg.geo.normal, xdir: tg.geo.xdir });
       else if (tg?.plane) enterSketch(sketch.index, true, tg.plane);
-      else if (tg?.face) { vp.highlightFace(null); enterSketch(sketch.index, true, tg.face); }
-      else if (tg?.curved) toast('Pick a flat (planar) face.', true);
+      else if (tg?.face) { vp.highlightFace(null); if (tg.curvedPlane) toast('Sketch placed on the plane touching the curved face at the point you clicked.'); enterSketch(sketch.index, true, tg.face); }
       return;
     }
     if (measure) { measureClick(e); return; }
@@ -3300,7 +3309,7 @@ function bindViewport() {
       const tg = vp.pickFace(e);
       vp.selected.clear(); vp.refreshMaterials();
       if (add && selFace && tg?.face && !tg.curved && !selFace.curved && !faceB()) selFaceB = { id: tg.id, point: tg.point, normal: tg.normal, base: selFace }; // a second flat face: measure between them
-      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}), ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) } : null;
+      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true, tangent: tg.tangent } : {}), ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) } : null;
       vp.showFaces(shownFaces(), null);
       renderTree(); renderRibbon();
       return;

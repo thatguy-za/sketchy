@@ -9,7 +9,7 @@ import { findFaceTri, rebuild, clearKernelCache, resolvePlanes } from '../src/ke
 import { findSkins } from '../src/skins.js';
 import { applyConstraints, definedState } from '../src/sketchcons.js';
 import { solveSketch } from '../src/sketchsolve.js';
-import { extendAt, breakAt, chamferShape } from '../src/sketchedit.js';
+import { extendAt, breakAt, chamferShape, fitSpline } from '../src/sketchedit.js';
 import { buildBVH, raycastBVH } from '../src/bvh.js';
 import { look, TEXTURES, textureById } from '../src/materials.js';
 import { clusterMesh } from '../src/lod.js';
@@ -723,8 +723,97 @@ scenario('Shell hollows bodies swept along corners and splines: closed on corner
   }
   const hollowed = (r) => !errs(r) && r.result.bodies[0]?.volume > solid * 0.15 && r.result.bodies[0].volume < solid * 0.6;
   const one = shellOf(true, 'inside', 0.4, [ends(true)[0]]), whole = shellOf(true, 'inside', 0.3, []);
-  check('a spline sweep with one end open is hollowed', hollowed(one), errs(one) + ' ' + one.result.bodies[0]?.volume);
-  check('a closed hollow of a spline sweep is hollowed (faceted wall)', hollowed(whole), errs(whole) + ' ' + whole.result.bodies[0]?.volume);
+  check('a spline sweep with one end open is hollowed (the other end stays closed)', hollowed(one), errs(one) + ' ' + one.result.bodies[0]?.volume);
+  check('a closed hollow of a spline sweep is hollowed', hollowed(whole), errs(whole) + ' ' + whole.result.bodies[0]?.volume);
+  const solidS = evaluate(sw(true, []), { backend: 'brep' }).result.bodies[0].volume, lenS = solidS / (Math.PI * 4);
+  for (const [side, th] of [['inside', 0.3], ['inside', 0.5], ['inside', 1], ['outside', 0.5], ['both', 0.5]]) {
+    for (const smooth of [true, false]) {
+      const sol = smooth ? solidS : solid, len = sol / (Math.PI * 4), r = shellOf(smooth, side, th, []), b = r.result.bodies[0];
+      const [r0, r1] = side === 'inside' ? [2 - th, 2] : side === 'outside' ? [2, 2 + th] : [2 - th / 2, 2 + th / 2];
+      const want = Math.PI * (r1 * r1 - r0 * r0) * len + 2 * Math.PI * (side === 'inside' ? 4 : r1 * r1) * th * (side === 'both' ? 0.5 : 1); // the wall plus the two end caps
+      check(`an exact closed hollow of a ${smooth ? 'spline' : 'cornered'} sweep, ${side} ${th} mm`, !errs(r) && b && Math.abs(b.volume - want) < want * 0.15 && b.faces.length < 40, errs(r) + ' ' + b?.volume + ' vs ' + want.toFixed(0) + ' faces ' + b?.faces.length);
+    }
+  }
+  const thick = shellOf(true, 'inside', 2.5, []);
+  check('a wall as thick as the tube radius says so', /too large/i.test(errs(thick)), errs(thick));
+});
+scenario('Shell hollows lofted bodies: closed and with the top opened, inside, outside and centred', () => {
+  const lofts = {
+    'square to square': [skch('a1', [{ t: 'rect', x: -10, y: -10, w: 20, h: 20 }]), skch('a2', [{ t: 'rect', x: -5, y: -5, w: 10, h: 10 }], 'XY', { offset: 20 })],
+    'square to circle': [skch('a1', [{ t: 'rect', x: -10, y: -10, w: 20, h: 20 }]), skch('a2', [{ t: 'circle', cx: 0, cy: 0, r: 6 }], 'XY', { offset: 20 })],
+    'three sections': [skch('a1', [{ t: 'rect', x: -10, y: -10, w: 20, h: 20 }]), skch('a2', [{ t: 'rect', x: -5, y: -5, w: 10, h: 10 }], 'XY', { offset: 20 }), skch('a3', [{ t: 'rect', x: -8, y: -8, w: 16, h: 16 }], 'XY', { offset: 40 })],
+  };
+  for (const [name, sks] of Object.entries(lofts)) {
+    const feats = [...sks, { id: 'lf', type: 'loft', name: 'Loft1', params: { sketches: sks.map((k) => k.id), op: 'new', target: '' } }];
+    const solid = evaluate(doc(feats), { backend: 'brep' }).result.bodies[0];
+    const top = solid.faces.filter((f) => f.type === 'PLANE').map((f) => ({ point: f.centroid, normal: f.normal })).sort((a, b) => b.point[2] - a.point[2])[0];
+    const shell = (side, open) => evaluate(doc([...feats, { id: 'sh', type: 'shell', name: 'Shell1', params: { body: 'lf', thickness: 1, open, side } }]), { backend: 'brep' });
+    const vols = {};
+    for (const side of ['inside', 'outside', 'both']) for (const opened of [false, true]) {
+      const r = shell(side, opened ? [top] : []), v = r.result.bodies[0]?.volume;
+      vols[side + opened] = v;
+      const wall = side === 'inside' ? v < solid.volume * 0.9999 && v > solid.volume * 0.1 : v > solid.volume * 0.05 && v < solid.volume * 1.5;
+      check(`${name}: ${side} wall, ${opened ? 'top open' : 'closed'}`, !errs(r) && wall, errs(r) + ' ' + v + ' of ' + solid.volume);
+    }
+    check(`${name}: opening the top leaves less material than closed`, vols.insidetrue < vols.insidefalse && vols.outsidetrue < vols.outsidefalse, JSON.stringify(vols));
+  }
+});
+scenario('Fit-point splines are exact curves in profiles, extrudes, revolves, sweep paths and lofts', () => {
+  const fit = [[0, 0], [20, 10], [40, -5], [60, 10], [60, 30], [30, 40], [0, 30]];
+  const sp = (f, closed = true) => ({ t: 'path', open: !closed, spline: true, pts: fitSpline(f, closed) });
+  const polyArea = (pts) => { let a = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p[0] * q[1] - q[0] * p[1]; } return Math.abs(a / 2); };
+  const run = (feats) => evaluate(doc(feats), { backend: 'brep' });
+  const ex = (id, sk, d) => ({ id, type: 'extrude', name: id, params: { sketch: sk, distance: d, symmetric: false, op: 'new', target: '' } });
+  const A = polyArea(sp(fit).pts);
+  const e = run([skch('s', [sp(fit)]), ex('e', 's', 10)]), eb = e.result.bodies[0];
+  check('a closed spline extrudes to one curved face between two flat ones', !errs(e) && eb.faces.length === 3 && eb.faces.some((f) => f.type !== 'PLANE'), errs(e) + ' ' + eb?.faces.map((f) => f.type));
+  check('its volume is the area of the curve times the height', Math.abs(eb.volume - A * 10) < A * 10 * 0.01, eb.volume + ' vs ' + A * 10);
+  check('and it does not tessellate into thousands of triangles', eb.tris.length / 3 < 3000, String(eb.tris.length / 3));
+  const hole = run([skch('s', [{ t: 'rect', x: -20, y: -20, w: 120, h: 80 }, sp(fit)]), ex('e', 's', 10)]), hb = hole.result.bodies[0];
+  check('a spline inside a rectangle is a hole (nested shapes alternate)', !errs(hole) && hb && Math.abs(hb.volume - (120 * 80 - A) * 10) < A * 10 * 0.02, errs(hole) + ' ' + hb?.volume);
+  const half = { t: 'path', open: true, spline: true, pts: fitSpline([[0, 0], [20, 10], [40, 0]], false) }, closer = { t: 'path', open: true, pts: [[40, 0], [0, 0]] };
+  const j = run([skch('s', [half, closer]), ex('e', 's', 5)]), jb = j.result.bodies[0];
+  check('an open spline closed by a line makes a region with a curved face, not facets', !errs(j) && jb && jb.faces.length <= 8 && jb.faces.some((f) => f.type !== 'PLANE'), errs(j) + ' ' + jb?.faces.length);
+  const rv = run([skch('s', [sp([[10, 0], [20, 5], [25, 15], [15, 25], [10, 20]]), { t: 'path', open: true, lt: 'centerline', pts: [[0, -5], [0, 40]] }]), { id: 'r', type: 'revolve', name: 'R', params: { sketch: 's', profiles: null, angle: 360, op: 'new', target: '' } }]);
+  check('a closed spline revolves into one surface of revolution', !errs(rv) && rv.result.bodies[0].faces.length === 1 && rv.result.bodies[0].faces[0].type !== 'PLANE', errs(rv) + ' ' + rv.result.bodies[0]?.faces.length);
+  const path = { t: 'path', open: true, spline: true, pts: fitSpline([[0, 0], [15, 0], [45, 12], [75, -12], [100, 0]], false) }; // leaves the start along X, square to the profile
+  const sw = run([skch('p', [{ t: 'circle', cx: 0, cy: 0, r: 3 }], 'YZ'), skch('w', [path]), { id: 'sw', type: 'sweep', name: 'S', params: { profile: 'p', path: 'w', smooth: false, op: 'new', target: '' } }]);
+  let plen = 0; for (let i = 1; i < path.pts.length; i++) plen += Math.hypot(path.pts[i][0] - path.pts[i - 1][0], path.pts[i][1] - path.pts[i - 1][1]);
+  check('a sweep along a spline path keeps the path length (volume of a 3 mm radius tube)', !errs(sw) && Math.abs(sw.result.bodies[0].volume - Math.PI * 9 * plen) < Math.PI * 9 * plen * 0.04, errs(sw) + ' ' + sw.result.bodies[0]?.volume + ' vs ' + Math.PI * 9 * plen);
+  const lf = run([skch('a', [sp(fit)]), skch('b', [sp(fit.map(([x, y]) => [x * 0.5 + 15, y * 0.5 + 5]))], 'XY', { offset: 30 }), { id: 'lf', type: 'loft', name: 'L', params: { sketches: ['a', 'b'], op: 'new', target: '' } }]);
+  check('a loft between two spline sections builds', !errs(lf) && lf.result.bodies[0].volume > A * 30 * 0.2, errs(lf) + ' ' + lf.result.bodies[0]?.volume);
+  const pp = run([skch('w', [path]), { id: 'pp', type: 'pipe', name: 'P', params: { path: 'w', smooth: false, diameter: 6, wall: 0, op: 'new', target: '' } }]);
+  check('a pipe along a spline path builds', !errs(pp) && pp.result.bodies[0].volume > 0, errs(pp));
+  check('the exact kernel supports a design with splines', brepSupport(run([skch('s', [sp(fit)]), ex('e', 's', 10)]).resolved).ok);
+});
+scenario('Restored features: Extend Surface, Thicken on curved surfaces and mitred sweep corners', () => {
+  const run = (feats) => evaluate(doc(feats), { backend: 'brep' });
+  const areaOf = (s) => { let a = 0; const V = s.verts, T = s.tris; for (let i = 0; i < T.length; i += 3) { const A = T[i] * 3, B = T[i + 1] * 3, C = T[i + 2] * 3; const u = [V[B] - V[A], V[B + 1] - V[A + 1], V[B + 2] - V[A + 2]], w = [V[C] - V[A], V[C + 1] - V[A + 1], V[C + 2] - V[A + 2]]; a += Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]) / 2; } return a; };
+  const arc = skch('s', [{ t: 'path', open: true, pts: [[0, 0, 0.5], [30, 0]] }]); // 30 mm chord, 106 degree arc: radius 18.75, 34.77 long
+  const X = { id: 'x', type: 'sextrude', name: 'X', params: { sketch: 's', distance: 20, symmetric: false } };
+  const R0 = 18.75, theta = 4 * Math.atan(0.5), L = R0 * theta;
+  const ext = run([arc, X, { id: 'ex', type: 'sextend', name: 'E', params: { surface: 'x', distance: 5 } }]);
+  check('Extend Surface grows a curved surface by a strip along every open edge', !errs(ext) && ext.result.surfaces.length === 1 && Math.abs(areaOf(ext.result.surfaces[0]) - (L * 20 + 5 * (2 * L + 2 * 20))) < 25, errs(ext) + ' ' + (ext.result.surfaces[0] && areaOf(ext.result.surfaces[0])) + ' vs ' + (L * 20 + 5 * (2 * L + 40)));
+  const flat = run([skch('s', [{ t: 'path', open: true, pts: [[0, 0], [20, 0]] }]), X, { id: 'ex', type: 'sextend', name: 'E', params: { surface: 'x', distance: 5 } }]);
+  check('and a flat one', !errs(flat) && Math.abs(areaOf(flat.result.surfaces[0]) - (20 * 20 + 5 * (2 * 20 + 2 * 20))) < 2, errs(flat) + ' ' + areaOf(flat.result.surfaces[0]));
+  const closedSurf = run([skch('s', [{ t: 'circle', cx: 0, cy: 0, r: 10 }]), X, { id: 'ex', type: 'sextend', name: 'E', params: { surface: 'x', distance: 5 } }]);
+  check('a surface with no open edge says so', !errs(closedSurf) || /open edge|closed/i.test(errs(closedSurf)), errs(closedSurf));
+  for (const [both, want] of [[false, theta / 2 * 20 * (R0 * R0 - (R0 - 2) ** 2)], [true, theta / 2 * 20 * ((R0 + 1) ** 2 - (R0 - 1) ** 2)]]) {
+    const th = run([arc, X, { id: 'th', type: 'sthicken', name: 'T', params: { surface: 'x', thickness: 2, both } }]), b = th.result.bodies[0];
+    check(`Thicken a curved (cylindrical) surface ${both ? 'to both sides' : 'to one side'}`, !errs(th) && b && Math.abs(b.volume - want) < want * 0.01, errs(th) + ' ' + b?.volume + ' vs ' + want);
+  }
+  const sp = skch('s', [{ t: 'path', open: true, spline: true, pts: fitSpline([[0, 0], [20, 10], [40, -5], [60, 10]], false) }]);
+  const ts = run([sp, X, { id: 'th', type: 'sthicken', name: 'T', params: { surface: 'x', thickness: 2, both: false } }]), tb = ts.result.bodies[0];
+  check('Thicken a surface of free-form curves gives a closed solid of about area times thickness', !errs(ts) && tb && tb.volume > 1000 && tb.volume < 4000, errs(ts) + ' ' + tb?.volume);
+  const elbow = (corner, pts) => run([skch('p', [{ t: 'circle', cx: 0, cy: 0, r: 3 }], 'YZ'), skch('w', [{ t: 'path', open: true, pts }]), { id: 'sw', type: 'sweep', name: 'S', params: { profile: 'p', path: 'w', smooth: false, corner, op: 'new', target: '' } }]);
+  for (const pts of [[[0, 0], [40, 0], [40, 40]], [[0, 0], [40, 0], [60, 30], [60, 70]]]) {
+    let len = 0; for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    const m = elbow('mitre', pts), f = elbow('full', pts);
+    check(`a mitred sweep keeps the full tube width at ${pts.length - 2} corner${pts.length > 3 ? 's' : ''} (volume is the centre-line length times the section)`, !errs(m) && Math.abs(m.result.bodies[0].volume - Math.PI * 9 * len) < Math.PI * 9 * len * 0.01, errs(m) + ' ' + m.result.bodies[0]?.volume + ' vs ' + Math.PI * 9 * len);
+    check('and the default sweep still builds', !errs(f) && f.result.bodies[0].volume > 0);
+  }
+  const mArc = elbow('mitre', [[0, 0, 0.4], [40, 0]]);
+  check('mitred corners on an arc path say lines are needed', /straight/i.test(errs(mArc)), errs(mArc));
 });
 const swProf = (id, shapes, plane) => skch(id, shapes, plane);
 bothBackends('Both backends: sweep a circle and a rectangle along lines and arcs', doc([

@@ -7,11 +7,30 @@ import { shapeToPolygon } from './kernel.js';
 
 const isSolid = (sh) => !sh.lt && sh.t !== 'point';
 
+/** A fit-point spline is stored as the points of its curve (see fitSpline in sketchedit.js). */
+export const isSplineShape = (s, pts = s.pts) => !!s.spline && pts.length >= 4 && pts.every((q) => !q[2]);
+/**
+ * Continue `pen` along the curve through `pts` as smooth cubic pieces, about one per 14 samples (the spacing fitSpline uses), ending at
+ * `end`. The tangent at each knot is the direction of the curve there, so the pieces join smoothly and follow the sampled curve closely.
+ */
+function splineTo(pen, pts, end) {
+  const n = pts.length, K = 14, spans = Math.max(1, Math.round((n - 1) / K));
+  const knot = (i) => Math.round((i * (n - 1)) / spans);
+  const tan = (i) => { const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)], l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1; return [(b[0] - a[0]) / l, (b[1] - a[1]) / l]; };
+  for (let k = 0; k < spans; k++) {
+    const i0 = knot(k), i1 = knot(k + 1), P0 = pts[i0], P1 = k === spans - 1 ? end : pts[i1], t0 = tan(i0), t1 = tan(i1);
+    const d = Math.hypot(P1[0] - P0[0], P1[1] - P0[1]) / 3;
+    pen = pen.cubicBezierCurveTo([P1[0], P1[1]], [P0[0] + t0[0] * d, P0[1] + t0[1] * d], [P1[0] - t1[0] * d, P1[1] - t1[1] * d]);
+  }
+  return pen;
+}
+
 /** Closed shapes drawn from open lines and arcs that meet end to end, as exact drawings. */
 export function openLoopDrawings(R, shapes, track) {
   const segs = [];
   for (const s of shapes) {
     if (s.t !== 'path' || !s.open) continue;
+    if (isSplineShape(s)) { segs.push({ a: s.pts[0], b: s.pts.at(-1), bulge: 0, curve: s.pts }); continue; } // a fit-point spline is one edge, not its sample segments
     for (let i = 0; i < s.pts.length - 1; i++) segs.push({ a: s.pts[i], b: s.pts[i + 1], bulge: s.pts[i][2] || 0 });
   }
   if (segs.length < 2) return [];
@@ -21,7 +40,7 @@ export function openLoopDrawings(R, shapes, track) {
   const used = new Set(), out = [];
   for (let s0 = 0; s0 < segs.length; s0++) {
     if (used.has(s0)) continue;
-    const chain = [{ p0: segs[s0].a, p1: segs[s0].b, b: segs[s0].bulge }], startKey = key(segs[s0].a), idxs = [s0];
+    const chain = [{ p0: segs[s0].a, p1: segs[s0].b, b: segs[s0].bulge, curve: segs[s0].curve }], startKey = key(segs[s0].a), idxs = [s0];
     let cur = s0, endKey = key(segs[s0].b), ok = false;
     for (let guard = 0; guard < segs.length + 2; guard++) {
       if (endKey === startKey) { ok = true; break; }
@@ -30,7 +49,7 @@ export function openLoopDrawings(R, shapes, track) {
       const nx = nb[0] === cur ? nb[1] : nb[0];
       if (idxs.includes(nx)) break;
       const sg = segs[nx];
-      chain.push(key(sg.a) === endKey ? { p0: sg.a, p1: sg.b, b: sg.bulge } : { p0: sg.b, p1: sg.a, b: -sg.bulge });
+      chain.push(key(sg.a) === endKey ? { p0: sg.a, p1: sg.b, b: sg.bulge, curve: sg.curve } : { p0: sg.b, p1: sg.a, b: -sg.bulge, curve: sg.curve && [...sg.curve].reverse() });
       idxs.push(nx); cur = nx;
       endKey = key(chain.at(-1).p1);
     }
@@ -39,7 +58,7 @@ export function openLoopDrawings(R, shapes, track) {
     let pen = R.draw([chain[0].p0[0], chain[0].p0[1]]);
     chain.forEach((c, i) => {
       const end = i === chain.length - 1 ? chain[0].p0 : c.p1; // the last segment ends exactly where the first began
-      pen = Math.abs(c.b) > 1e-9 ? pen.bulgeArcTo([end[0], end[1]], c.b) : pen.lineTo([end[0], end[1]]);
+      pen = c.curve ? splineTo(pen, c.curve, end) : Math.abs(c.b) > 1e-9 ? pen.bulgeArcTo([end[0], end[1]], c.b) : pen.lineTo([end[0], end[1]]);
     });
     out.push(track(pen.close()));
   }

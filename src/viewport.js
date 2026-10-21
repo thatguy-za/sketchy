@@ -611,13 +611,22 @@ export class Viewport {
       const gi = src.faceOf[hit.faceIndex], meta = src.faces[gi], tris = this.brepFaceTris(src, gi);
       if (meta && tris.length) {
         const curved = meta.type !== 'PLANE';
-        return { face: true, ...(curved ? { curved: true } : {}), brepFace: meta.key, id, point: hit.point.toArray().map(r4), normal: hit.face.normal.toArray().map((c) => +c.toFixed(6)), tris, mesh: hit.object };
+        return { face: true, ...(curved ? { curved: true, tangent: this.smoothNormalAt(hit) } : {}), brepFace: meta.key, id, point: hit.point.toArray().map(r4), normal: hit.face.normal.toArray().map((c) => +c.toFixed(6)), tris, mesh: hit.object };
       }
     }
     const face = faceOf(src.verts, src.tris, hit.faceIndex);
     if (!face) return null;
     if (face.curved) return { face: true, curved: true, id, point: face.point, normal: face.normal, tris: face.tris, mesh: hit.object };
     return { face: true, id, point: hit.point.toArray().map(r4), normal: face.normal.map((c) => +c.toFixed(6)), tris: face.tris, mesh: hit.object };
+  }
+  /** The surface normal at a ray hit, interpolated from the smoothed vertex normals of its triangle (the flat triangle normal is up to the tessellation angle off the true surface). */
+  smoothNormalAt(hit) {
+    const g = hit.object.geometry, nA = g.attributes.normal, pA = g.attributes.position, f = hit.face;
+    if (!nA || !f) return hit.face.normal.toArray().map((c) => +c.toFixed(6));
+    const a = new THREE.Vector3().fromBufferAttribute(pA, f.a), b = new THREE.Vector3().fromBufferAttribute(pA, f.b), c = new THREE.Vector3().fromBufferAttribute(pA, f.c);
+    const bary = new THREE.Vector3(); THREE.Triangle.getBarycoord(hit.point, a, b, c, bary);
+    const n = new THREE.Vector3().fromBufferAttribute(nA, f.a).multiplyScalar(bary.x).add(new THREE.Vector3().fromBufferAttribute(nA, f.b).multiplyScalar(bary.y)).add(new THREE.Vector3().fromBufferAttribute(nA, f.c).multiplyScalar(bary.z));
+    return n.lengthSq() > 1e-12 ? n.normalize().toArray().map((q) => +q.toFixed(6)) : hit.face.normal.toArray().map((q) => +q.toFixed(6));
   }
   /** The triangles of B-rep face number `gi` of a body mesh. */
   brepFaceTris(src, gi) {
@@ -942,7 +951,10 @@ export class Viewport {
     if (hit.object.userData.plane) return { plane: hit.object.userData.plane };
     const src = hit.object.userData.src;
     const face = planarFace(src.verts, src.tris, hit.faceIndex);
-    if (!face) return { curved: true };
+    if (!face) { // a curved face: the plane that touches the surface where the ray hit it
+      const nn = this.smoothNormalAt(hit), h = Math.hypot(nn[0], nn[1]);
+      return { face: { plane: 'custom', origin: hit.point.toArray().map((c) => +c.toFixed(4)), normal: nn, xdir: h < 0.01 ? [1, 0, 0] : [-nn[1] / h, nn[0] / h, 0].map((q) => +q.toFixed(6)) }, curvedPlane: true, tris: [], mesh: hit.object };
+    }
     const n = face.normal.map((c) => (Math.abs(c) < 1e-6 ? 0 : +c.toFixed(6)));
     const d = n[0] * face.point[0] + n[1] * face.point[1] + n[2] * face.point[2];
     const origin = n.map((c) => +(c * d).toFixed(4));

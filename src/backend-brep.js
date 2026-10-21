@@ -8,7 +8,7 @@
 import { smoothPath } from './solids.js';
 import { planeFrame, shapeToPolygon, findFaceTri, PLANES, sameValue, sketchPath3D, decodeMesh, connectedChains } from './kernel.js';
 import { planarFace, findCurvedTri, findEdgeChains, matchChainNear } from './edges.js';
-import { profileCells, regionDrawing, outlinesOf } from './sketch-brep.js';
+import { profileCells, regionDrawing, outlinesOf, isSplineShape } from './sketch-brep.js';
 import { sewMesh, weldSoup } from './sew.js';
 import { edgeCutter } from './edgecutter.js';
 import { reduceMesh, pieces, soupOfMesh } from './meshtools.js';
@@ -143,6 +143,14 @@ function sweepCheck(prof, path, p) {
 const DEG = Math.PI / 180;
 const dupe = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9;
 
+/** The exact kernel turns the stored points of a fit-point spline back into one B-spline edge. */
+const SPLINE_FIT = { tolerance: 5e-3, degMin: 3, degMax: 5 }; // a few knots: every knot is a seam the mesher and the booleans pay for
+const isSpline = (s, pts) => isSplineShape(s, pts); // (a function, not an alias: sketch-brep and this file import each other)
+function splineDrawing(pts, closed) {
+  const xy = pts.map((q) => [q[0], q[1]]);
+  if (closed) { xy.push(xy[0]); return R.drawPointsInterpolation(xy, SPLINE_FIT, { closeShape: true }); }
+  return R.drawPointsInterpolation(xy, SPLINE_FIT);
+}
 function shapeDrawing(s) {
   const { draw, drawCircle, drawEllipse, drawRoundedRectangle } = R;
   switch (s.t) {
@@ -176,6 +184,7 @@ function shapeDrawing(s) {
       const pts = s.pts.filter((q, i, a) => !i || !dupe(q, a[i - 1]));
       if (pts.length > 1 && dupe(pts[0], pts[pts.length - 1])) pts.pop();
       if (pts.length < 3) return null;
+      if (isSpline(s, pts)) return splineDrawing(pts, !s.open);
       let pen = draw([pts[0][0], pts[0][1]]);
       for (let i = 1; i <= pts.length; i++) {
         const a = pts[i - 1], b = pts[i % pts.length], bulge = a[2] || 0;
@@ -204,6 +213,43 @@ export function profilesOfExact(sk) {
   try {
     return profileCells(R, sk, (s) => shapeDrawing(s), track).map((c) => ({ id: c.id, defaultOn: c.defaultOn, area: c.area, polys: outlinesOf(R, c.face, track) }));
   } finally { for (const o of garbage) { try { o.delete(); } catch { /* already freed */ } } }
+}
+
+/**
+ * Fuse or cut two shapes. Plain OpenCascade builders instead of replicad's fuse/cut: replicad simplifies the result inside the builder
+ * and the code here used to simplify it again afterwards, and it leaves the builder filling a history (which shape came from which) and
+ * checking for inverted solids, none of which is used. About 12 % faster on the 41-feature bench, with the same faces in the result.
+ */
+function boolean(kind, a, b) {
+  const oc = R.getOC();
+  const builder = kind === 'fuse' ? new oc.BRepAlgoAPI_Fuse(a.wrapped, b.wrapped) : new oc.BRepAlgoAPI_Cut(a.wrapped, b.wrapped);
+  try {
+    builder.SetToFillHistory(false);
+    builder.SetCheckInverted(false);
+    builder.Build(new oc.Message_ProgressRange());
+    if (builder.HasErrors()) throw new Error(`The ${kind === 'fuse' ? 'join' : 'cut'} could not be computed`);
+    builder.SimplifyResult(true, true, 0.001); // merge faces that now lie on one surface
+    const out = R.cast(builder.Shape());
+    if (!R.isShape3D?.(out)) throw new Error(`The ${kind === 'fuse' ? 'join' : 'cut'} did not give a solid`);
+    return out;
+  } finally { builder.delete(); }
+}
+
+// ---------- volume ----------
+const ANALYTIC = new Set(['PLANE', 'CYLINDRE', 'CONE', 'SPHERE', 'TORUS']);
+/**
+ * The volume of a shape. OpenCascade integrates planes, cylinders, cones, spheres and tori exactly, but its default integration of a
+ * free-form surface (a spline extrusion, a sweep along a curve) is off by a percent or more, so those shapes are measured over
+ * their triangulation instead (`meshed` is true when the shape has just been meshed; otherwise it is meshed here, finely).
+ */
+function volumeOf(shape, meshed = false, hint) {
+  const oc = R.getOC();
+  let free = hint;
+  if (free === undefined) { free = false; try { free = shape.faces.some((f) => !ANALYTIC.has(f.geomType)); } catch { /* a shape without faces */ } }
+  if (!free) return R.measureVolume(shape);
+  if (!meshed) { const [lo, hi] = shape.boundingBox.bounds; shape.mesh({ tolerance: Math.max(0.004, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 1.5e-4), angularTolerance: 0.15 }); }
+  const props = new oc.GProp_GProps();
+  try { oc.BRepGProp.VolumeProperties(shape.wrapped, props, false, false, true); return props.Mass(); } finally { props.delete(); }
 }
 
 // ---------- meshing ----------
@@ -250,7 +296,7 @@ function meshShape(shape) {
     const g = acc[i] || { a: 0, c: [0, 0, 0], n: [0, 0, 0] }, c = g.a ? g.c.map((v) => v / g.a) : [0, 0, 0], nl = Math.hypot(...g.n);
     return { id: i, type: f.geomType, area: g.a, centroid: c, normal: g.a && nl > 0.9 * g.a ? g.n.map((v) => v / nl) : null, key: `${f.geomType}@${c.map((v) => v.toFixed(2)).join(',')}/${g.a.toFixed(2)}` };
   });
-  const o = { key: 'b' + ++meshKey, verts: V, tris: new Uint32Array(tris), faceOf: new Uint32Array(faceOf), faces, volume: (() => { try { const v = R.measureVolume(shape); return Number.isFinite(v) ? v : 0; } catch { return 0; } })(), area: (() => { try { return R.measureArea(shape); } catch { return 0; } })(), bbox: { min: lo, max: hi } };
+  const o = { key: 'b' + ++meshKey, verts: V, tris: new Uint32Array(tris), faceOf: new Uint32Array(faceOf), faces, volume: (() => { try { const v = volumeOf(shape, true, faces.some((f) => !ANALYTIC.has(f.type))); return Number.isFinite(v) ? v : 0; } catch { return 0; } })(), area: (() => { try { return R.measureArea(shape); } catch { return 0; } })(), bbox: { min: lo, max: hi } };
   meshCache.set(shape, o);
   shapeByKey.set(o.key, new WeakRef(shape)); // so a body shown in the viewport can be found again by its key (interference checks)
   if (shapeByKey.size > 4000) for (const [k, w] of shapeByKey) if (!w.deref()) shapeByKey.delete(k);
@@ -306,8 +352,8 @@ export function rebuildBrep(features, count, opts = {}) {
   const empty = (s) => !s || vol(s) < 1e-9;
   // merge faces that lie on the same surface after a boolean (the 'optimisation' option of fuse/cut dropped volume in tests)
   const tidy = (s) => { try { return s.simplify(); } catch { return s; } };
-  const fuse = (a, b) => track(tidy(track(a.fuse(b))));
-  const cut = (a, b) => track(tidy(track(a.cut(b))));
+  const fuse = (a, b) => track(boolean('fuse', a, b));
+  const cut = (a, b) => track(boolean('cut', a, b));
   const union = (list) => list.reduce((a, b) => fuse(a, b));
   const faceNow = (s, ref) => {
     const m = meshShape(s), tri = findFaceTri(m.verts, m.tris, ref.point, ref.normal);
@@ -790,9 +836,14 @@ export function rebuildBrep(features, count, opts = {}) {
           if (p.wall > 0 && p.wall * 2 >= p.diameter) throw new Error('Wall thickness is too large for this diameter');
           const spine = spineFor(path, p, track, planeOf);
           const t0 = spine.tangentAt(0), start = spine.startPoint;
-          const tube = (r) => { const circle = track(R.makeCircle(r, [start.x, start.y, start.z], [t0.x, t0.y, t0.z])); return track(R.genericSweep(track(R.assembleWire([circle])), spine, { transitionMode: 'right' })); };
+          const tube = (r) => { const circle = track(R.makeCircle(r, [start.x, start.y, start.z], [t0.x, t0.y, t0.z])), ring = track(R.assembleWire([circle])); return p.corner === 'mitre' ? mitreSweep(ring, spine, track) : track(R.genericSweep(ring, spine, { transitionMode: 'right' })); };
           let m = tube(p.diameter / 2);
           if (p.wall > 0) m = cut(m, tube(p.diameter / 2 - p.wall));
+          else { // a solid pipe can be shelled exactly, like a sweep (see the Shell feature)
+            const t1 = spine.tangentAt(1), e = spine.endPoint, u = (v, k) => { const n = Math.hypot(v.x, v.y, v.z) || 1; return [k * v.x / n, k * v.y / n, k * v.z / n]; };
+            m._hollow = (dt) => tube(p.diameter / 2 + dt);
+            m._hollowEnds = [{ at: [start.x, start.y, start.z], dir: u(t0, -1) }, { at: [e.x, e.y, e.z], dir: u(t1, 1) }];
+          }
           applyOp(f, m, p.op || 'new', p.target);
           break;
         }
@@ -867,10 +918,43 @@ export function rebuildBrep(features, count, opts = {}) {
           if (!(p.thickness > 0)) throw new Error('Thickness must be positive');
           const side = p.side || 'inside';
           const open = (p.open || []).map((r) => faceFromRef(b.s, r)).filter(Boolean);
+          if (b.s._hollow && b.s._hollowEnds && open.length === (p.open || []).length) { // a swept body: an exact wall from sweeps of the offset profile; the ends are closed by caps unless picked
+            const ends = b.s._hollowEnds, near = (fc, e) => Math.hypot(fc.center.x - e.at[0], fc.center.y - e.at[1], fc.center.z - e.at[2]) < 1e-3 + 1e-4 * Math.hypot(...b.s.boundingBox.bounds[1].map((v, k) => v - b.s.boundingBox.bounds[0][k]));
+            const openEnd = ends.map((e) => open.some((fc) => fc.geomType === 'PLANE' && near(fc, e)));
+            if (open.every((fc) => ends.some((e) => fc.geomType === 'PLANE' && near(fc, e)))) {
+              const rawCut = (x, y) => track(x.cut(y)), t = p.thickness, sub = (u, v) => u.map((x, k) => x - v[k]);
+              const cavity = (d) => { // the inner sweep, cut back by d from each closed end so the wall closes there
+                let c = b.s._hollow(-d);
+                ends.forEach((e, i) => { if (!openEnd[i]) c = rawCut(c, halfSpace(sub(e.at, scl(e.dir, d)), e.dir, track)); });
+                return c;
+              };
+              const outer = (d) => { // the sweep of the profile moved out by d, with each closed end face pushed out by d
+                let c = b.s._hollow(d);
+                const caps = []; // the end faces are found on the plain sweep, before anything is fused to it
+                ends.forEach((e, i) => {
+                  if (openEnd[i]) return;
+                  const face = c.faces.find((fc) => fc.geomType === 'PLANE' && Math.hypot(fc.center.x - e.at[0], fc.center.y - e.at[1], fc.center.z - e.at[2]) < d + 1e-3 + 1e-3 * Math.abs(d));
+                  if (!face) throw new Error('The end of the sweep could not be closed');
+                  caps.push(track(R.basicFaceExtrusion(face, track(new R.Vector(scl(e.dir, d))))));
+                });
+                for (const cap of caps) c = track(c.fuse(cap));
+                return c;
+              };
+              let r, failed;
+              for (const k of [1, 1.002, 0.998]) { // a boolean between surfaces that nearly coincide sometimes fails; a hair more or less thickness gets round it
+                try { r = side === 'inside' ? rawCut(b.s, cavity(t * k)) : side === 'outside' ? rawCut(outer(t * k), b.s) : rawCut(outer(t * k / 2), cavity(t * k / 2)); failed = null; break; } // plain booleans: simplifying spline faces costs seconds
+                catch (e) { failed = e; if (/closed|end of the sweep/.test(e?.message || '')) throw e; }
+              }
+              if (failed) throw new Error('Wall thickness is too large for this body, or its sections cannot be moved by this amount.');
+              if (empty(r) || (side === 'inside' && volumeOf(r) > volumeOf(b.s) * 0.9999)) throw new Error('Wall thickness is too large for this body'); // an offset profile that folds over itself leaves the body whole
+              open.forEach(track);
+              b.s = r; break;
+            }
+          }
           if (!open.length) { // no open face: a closed hollow, the wall between the surface and its offset
             if (!(p.open || []).length) {
               const off = (d) => offsetSolid(b.s, d, track);
-              const hollow = (shape, d) => offsetByMesh(shape, d, track); // faceted fallback for surfaces OpenCascade cannot offset
+              const hollow = (shape, d) => offsetByMesh(shape, d, track); // faceted fallback for surfaces OpenCascade cannot offset (lofts, 3D paths)
               let out = null;
               for (const grow of [off, hollow]) {
                 try {
@@ -886,19 +970,10 @@ export function rebuildBrep(features, count, opts = {}) {
             }
             throw new Error('The picked faces to open no longer exist on this body');
           }
-          const wall = (t) => {
-            try { return track(b.s.shell(t, (fnd) => fnd.when(({ element }) => open.some((g) => g.isSame(element))))); }
-            catch {
-              if (!b.s._pipe) throw new Error('Wall thickness is too large for this body');
-              const pipe = b.s._pipe; // a swept body with both ends opened: the outer sweep less the inner sweep
-              if (open.length < 2) throw new Error('Open both ends of the swept body, or the wall cannot be made');
-              try { return t > 0 ? cut(b.s, pipe(-t)) : cut(pipe(-t), b.s); } catch { throw new Error('Wall thickness is too large for this body'); }
-            }
-          };
+          const wall = (t) => { try { return track(b.s.shell(t, (fnd) => fnd.when(({ element }) => open.some((g) => g.isSame(element))))); } catch { throw new Error('Wall thickness is too large for this body'); } };
           // inward: the wall lies inside the surface; outward: outside it; centred: half on each side
-          const centred = b.s._pipe && open.length >= 2 && side === 'both' ? cut(b.s._pipe(p.thickness / 2), b.s._pipe(-p.thickness / 2)) : null; // a swept body: the wall between two sweeps
-          const out = centred ? centred : side === 'inside' ? wall(p.thickness) : side === 'outside' ? wall(-p.thickness) : fuse(wall(-p.thickness / 2), wall(p.thickness / 2));
-          if (empty(out)) throw new Error('Wall thickness is too large for this body');
+          const out = side === 'inside' ? wall(p.thickness) : side === 'outside' ? wall(-p.thickness) : fuse(wall(-p.thickness / 2), wall(p.thickness / 2));
+          if (empty(out) || (side === 'inside' && vol(out) >= vol(b.s) * 0.9999)) throw new Error('Wall thickness is too large for this body'); // OpenCascade sometimes hands back the whole body
           open.forEach(track);
           b.s = out;
           break;
@@ -1018,7 +1093,7 @@ export function rebuildBrep(features, count, opts = {}) {
           const q = getSurface(p.surface);
           if (!(p.thickness > 0)) throw new Error('Thickness must be positive');
           const slabs = q.s.faces.map((face) => {
-            if (face.geomType !== 'PLANE') throw new Error('Thicken works on flat surfaces in the exact kernel; a curved surface cannot be offset yet');
+            if (face.geomType !== 'PLANE') return thickenCurved(face, p.thickness, !!p.both, track); // an offset surface with ruled walls
             const nv = face.normalAt(), n = [nv.x, nv.y, nv.z], lo = p.both ? -p.thickness / 2 : 0;
             const base = lo ? track(R.makeCompound([track(face.clone().translate(scl(n, lo)))]).faces[0]) : face;
             return track(R.basicFaceExtrusion(base, track(new R.Vector(scl(n, p.thickness)))));
@@ -1095,11 +1170,12 @@ export function rebuildBrep(features, count, opts = {}) {
           if (why) throw new Error(`Not in the exact kernel: ${why}`);
           const sh = (prof.params.shapes || []).find((x) => !x.open && isSolidShape(x));
           const wire = track(track(shapeDrawing(sh).sketchOnPlane(planeOf(prof.params).plane)).wire);
-          const spine = spineFor(path, p, track, planeOf);
-          let m = track(R.genericSweep(wire, spine, { transitionMode: 'right' }));
+          const spine = spineFor(path, p, track, planeOf), t0v = spine.tangentAt(0);
+          let m = p.corner === 'mitre' ? mitreSweep(wire, spine, track) : track(R.genericSweep(wire, spine, { transitionMode: 'right' }));
           if (R.measureVolume(m) < 0) throw new Error('The sweep came out inside out; flip the profile or the path');
           // OpenCascade cannot offset a sweep's surface, so Shell builds the wall from the same sweep with the profile moved in or out
-          m._pipe = (dt) => track(R.genericSweep(track(track(shapeDrawing(sh).offset(dt).sketchOnPlane(planeOf(prof.params).plane)).wire), spineFor(path, p, track, planeOf), { transitionMode: 'right' }));
+          m._hollow = (dt) => track(R.genericSweep(track(track(shapeDrawing(sh).offset(dt).sketchOnPlane(planeOf(prof.params).plane)).wire), spineFor(path, p, track, planeOf), { transitionMode: 'right' }));
+          { const t1 = spine.tangentAt(1), e = spine.endPoint, u = (v, k) => { const n = Math.hypot(v.x, v.y, v.z) || 1; return [k * v.x / n, k * v.y / n, k * v.z / n]; }; m._hollowEnds = [{ at: [spine.startPoint.x, spine.startPoint.y, spine.startPoint.z], dir: u(t0v, -1) }, { at: [e.x, e.y, e.z], dir: u(t1, 1) }]; } // outward direction at each end
           applyOp(f, m, p.op, p.target);
           break;
         }
@@ -1114,6 +1190,15 @@ export function rebuildBrep(features, count, opts = {}) {
             return track(shapeDrawing(shp).sketchOnPlane(planeOf(k.params).plane));
           });
           const m = track(faces[0].loftWith(faces.slice(1), { ruled: true }));
+          // Shell builds the wall from the same loft with every section moved in or out in its own plane, and closes the two ends with caps
+          const secs = sks.map((k) => ({ k, shp: (k.params.shapes || []).find((x) => !x.open && isSolidShape(x)) }));
+          m._hollow = (dt) => {
+            const fs = secs.map(({ k, shp }) => track(shapeDrawing(shp).offset(dt).sketchOnPlane(planeOf(k.params).plane)));
+            return track(fs[0].loftWith(fs.slice(1), { ruled: true }));
+          };
+          { const endFace = (face) => m.faces.filter((q) => q.geomType === 'PLANE').sort((a, c) => Math.hypot(a.center.x - face.center.x, a.center.y - face.center.y, a.center.z - face.center.z) - Math.hypot(c.center.x - face.center.x, c.center.y - face.center.y, c.center.z - face.center.z))[0];
+            const ends = [secs[0], secs[secs.length - 1]].map(({ k }) => { const o = planeOf(k.params).plane.origin, q = endFace({ center: o }), n = q.normalAt(); return { at: [q.center.x, q.center.y, q.center.z], dir: [n.x, n.y, n.z] }; });
+            if (ends.every((e) => Math.hypot(...e.dir) > 0.5)) m._hollowEnds = ends; }
           applyOp(f, m, p.op, p.target);
           break;
         }
@@ -1124,7 +1209,12 @@ export function rebuildBrep(features, count, opts = {}) {
           break;
         }
         case 'remove': getBody(p.body); live.delete(p.body); break;
-        case 'sextend': throw new Error('Extend surface is not available in the exact kernel yet (OpenCascade has no equivalent); use Trim, or draw a longer surface');
+        case 'sextend': {
+          const q = getSurface(p.surface);
+          if (!(p.distance > 0)) throw new Error('Distance must be positive');
+          q.s = extendSurface(q.s, p.distance, track);
+          break;
+        }
         default: throw new Error('Unknown feature ' + f.type);
       }
     } catch (e) { errors[f.id] = (e && e.message) || String(e); }
@@ -1141,6 +1231,80 @@ export function rebuildBrep(features, count, opts = {}) {
   const out = { bodies, surfaces: surfList, surfSnaps, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted, stats: { from: start, steps: n - start, total: n }, backend: { kind: 'brep' } };
   if (shapes) { out.shapes = shapes; out.dispose = () => { for (const s of shapes.values()) { try { s.delete(); } catch { /* already freed */ } } }; } // functions cannot cross to a worker, so only an export gets one
   return out;
+}
+
+/**
+ * A surface grown outward from every open edge by a strip of `dist` that continues the surface straight along its tangent. Each strip is
+ * a ruled surface between the edge and the same edge moved out along the in-surface direction at right angles to it, and the strips are
+ * sewn to the faces. (Strips of neighbouring edges meet only at the corner point, as the strips of a flat surface extended edge by edge do.)
+ */
+function extendSurface(shape, dist, track) {
+  const oc = R.getOC(), faces = shape.faces, N = 16;
+  const owners = []; // each edge with the face that has it, counting how many faces share it
+  faces.forEach((fc) => { fc.edges.forEach((e) => { const hit = owners.find((o) => o.e.isSame(e)); if (hit) hit.n++; else owners.push({ e, fc, n: 1 }); }); });
+  const free = owners.filter((o) => o.n === 1);
+  if (!free.length) throw new Error('The surface has no open edge to extend (it is closed)');
+  const strips = [];
+  for (const { e, fc } of free) {
+    const centre = fc.center, rows = [];
+    let side = 0;
+    for (let i = 0; i <= N; i++) {
+      const u = i / N, pt = e.pointAt(u), tg = e.tangentAt(u), nv = fc.normalAt(pt);
+      const out = [tg.y * nv.z - tg.z * nv.y, tg.z * nv.x - tg.x * nv.z, tg.x * nv.y - tg.y * nv.x], l = Math.hypot(...out) || 1;
+      const dir = out.map((v) => v / l);
+      side += dir[0] * (pt.x - centre.x) + dir[1] * (pt.y - centre.y) + dir[2] * (pt.z - centre.z);
+      rows.push({ p: [pt.x, pt.y, pt.z], dir });
+    }
+    const sgn = side >= 0 ? 1 : -1; // away from the middle of the face
+    const moved = rows.map(({ p: q, dir }) => q.map((v, k) => v + sgn * dir[k] * dist));
+    const far = e.geomType === 'LINE' ? track(R.makeLine(moved[0], moved[N])) : track(R.makeBSplineApproximation(moved, { tolerance: 1e-4, degMin: 3, degMax: 5 }));
+    const th = new oc.BRepOffsetAPI_ThruSections(false, true, 1e-6);
+    try {
+      th.AddWire(track(R.assembleWire([track(e.clone())])).wrapped); th.AddWire(track(R.assembleWire([far])).wrapped); th.Build(new oc.Message_ProgressRange());
+      if (!th.IsDone()) throw new Error('strip failed');
+      strips.push(...track(R.cast(th.Shape())).faces);
+    } catch { throw new Error('The surface could not be extended along one of its edges'); } finally { th.delete(); }
+  }
+  return track(R.weldShellsAndFaces([...faces.map((f) => track(f.clone())), ...strips], true));
+}
+
+/**
+ * A curved face (a cylinder, a sphere, a swept or lofted surface) thickened into a solid: the face and its offset along the normal
+ * (OpenCascade offsets the surface itself), joined along every boundary edge by a ruled wall, and sewn. `both` splits the thickness
+ * over the two sides of the face. Throws when the offset cannot be made (a surface tighter than the thickness).
+ */
+function thickenCurved(face, t, both, track) {
+  const oc = R.getOC();
+  const offsetFace = (d) => {
+    const o = new oc.BRepOffsetAPI_MakeOffsetShape();
+    try {
+      o.PerformByJoin(face.wrapped, d, 1e-4, oc.BRepOffset_Mode.BRepOffset_Skin, false, false, oc.GeomAbs_JoinType.GeomAbs_Arc, false, new oc.Message_ProgressRange());
+      if (!o.IsDone()) throw new Error('offset failed');
+      const out = track(R.cast(o.Shape()));
+      const f = out.faces;
+      if (f.length !== 1) throw new Error('offset split the face');
+      return f[0];
+    } catch { throw new Error('This curved surface cannot be thickened by that much (it is tighter than the thickness). Try a smaller thickness.'); } finally { o.delete(); }
+  };
+  const lo = both ? offsetFace(-t / 2) : track(face.clone()), hi = offsetFace(both ? t / 2 : t);
+  const wiresOf = (f) => [track(f.clone().outerWire()), ...f.clone().innerWires().map(track)];
+  const w1 = wiresOf(lo), w2 = wiresOf(hi);
+  if (w1.length !== w2.length) throw new Error('The surface could not be thickened');
+  const faces = [lo, hi];
+  w1.forEach((w, k) => {
+    const th = new oc.BRepOffsetAPI_ThruSections(false, true, 1e-6);
+    try {
+      th.AddWire(w.wrapped); th.AddWire(w2[k].wrapped); th.Build(new oc.Message_ProgressRange());
+      if (!th.IsDone()) throw new Error('walls failed');
+      faces.push(...track(R.cast(th.Shape())).faces);
+    } finally { th.delete(); }
+  });
+  const welded = track(R.weldShellsAndFaces(faces));
+  let solid, v;
+  try { solid = track(R.makeSolid([welded])); v = R.measureVolume(solid); } catch { throw new Error('This surface closes on itself (a full revolve, a tube) or has a seam, so it cannot be thickened here; use a part revolve or Shell the solid instead.'); }
+  if (v < 0) solid = track(R.makeSolid([track(welded.flipOrientation?.() ?? welded)]));
+  if (!(Math.abs(R.measureVolume(solid)) > 1e-9)) throw new Error('The thickened surface is not a closed solid');
+  return solid;
 }
 
 /**
@@ -1192,6 +1356,35 @@ function offsetByMesh(shape, d, track) {
   const w = weldSoup(soup, 1e-6);
   return sewMesh(R, w.verts, w.tris, { track, maxFaces: 4000 }).solid;
 }
+/**
+ * A sweep along a path of straight segments with mitred corners: each segment is its own straight sweep of the profile (turned with the
+ * path, so it stays square to the segment) cut at the plane that bisects the corner, and the pieces are joined. Full width is kept at every
+ * corner, which is what a mitred pipe fitting looks like; the default sweep instead rounds the corner as OpenCascade sweeps it.
+ */
+function mitreSweep(wire, spine, track) {
+  const edges = spine.edges;
+  if (!edges.length || edges.some((e) => e.geomType !== 'LINE')) throw new Error('Mitred corners need a path made of straight segments (lines); arcs and splines sweep smoothly');
+  const pt = (v) => [v.x, v.y, v.z], sub = (a, b) => a.map((x, k) => x - b[k]), norm = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+  const P = [pt(edges[0].startPoint), ...edges.map((e) => pt(e.endPoint))], T = edges.map((_, i) => norm(sub(P[i + 1], P[i])));
+  const [lo, hi] = wire.boundingBox.bounds, ext = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 3 + 1;
+  const bis = (i) => (i === 0 ? T[0] : i === T.length ? T[T.length - 1] : norm(add(T[i - 1], T[i]))); // the plane through corner i, as its normal
+  const pieces = [];
+  let w = wire;
+  T.forEach((t, i) => {
+    if (i > 0) { // turn the profile with the path
+      const prev = T[i - 1], axis = cross(prev, t), sin = Math.hypot(...axis), ang = Math.atan2(sin, dot(prev, t)) * 180 / Math.PI;
+      w = track(w.clone().translate(sub(P[i], P[i - 1])));
+      if (sin > 1e-9) w = track(w.rotate(ang, P[i], norm(axis))); // rotate consumes its source (it is a clone already)
+    }
+    const back = scl(t, -ext), a = add(P[i], back), b = add(P[i + 1], scl(t, ext));
+    const start = track(w.clone().translate(back)), line = track(R.assembleWire([track(R.makeLine(a, b))]));
+    let prism = track(R.genericSweep(start, line, { transitionMode: 'right' }));
+    prism = track(track(prism.intersect(halfSpace(P[i], bis(i), track))).intersect(halfSpace(P[i + 1], scl(bis(i + 1), -1), track)));
+    pieces.push(prism);
+  });
+  return pieces.slice(1).reduce((acc, q) => track(acc.fuse(q)), pieces[0]);
+}
+
 /** A solid grown (d > 0) or shrunk (d < 0) by `d` on every side. */
 function offsetSolid(shape, d, track) {
   const oc = R.getOC(), o = new oc.BRepOffsetAPI_MakeOffsetShape();
@@ -1241,7 +1434,7 @@ function spineFor(path, p, track, planeOfFn) {
   let { pts, closed } = sketchPath3D(path);
   if (p.smooth && !closed) pts = smoothPath(pts, 3);
   if (pts.length < 2) throw new Error('Path needs at least two points');
-  if (!closed && (p.smooth || path.params.smooth) && pts.length > 2) return track(R.assembleWire([track(R.makeBSplineApproximation(pts, { tolerance: 1e-3 }))]));
+  if (!closed && (p.smooth || path.params.smooth) && pts.length > 2) return track(R.assembleWire([track(R.makeBSplineApproximation(pts, { tolerance: 5e-3, degMax: 3 }))]));
   const edges = [];
   for (let i = 0; i + 1 < pts.length; i++) edges.push(track(R.makeLine(pts[i], pts[i + 1])));
   if (closed) edges.push(track(R.makeLine(pts.at(-1), pts[0])));
@@ -1251,6 +1444,7 @@ function spineFor(path, p, track, planeOfFn) {
 function openPathDrawing(s) {
   const pts = s.pts.filter((q, i, a) => !i || !dupe(q, a[i - 1]));
   if (pts.length < 2) throw new Error('Path needs at least two points');
+  if (isSpline(s, pts)) return splineDrawing(pts, false);
   let pen = R.draw([pts[0][0], pts[0][1]]);
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i - 1], b = pts[i], bulge = a[2] || 0;

@@ -138,6 +138,7 @@ for (const fmt of ['stl', '3mf', 'obj', 'step']) { const x = json(await call('ex
 check('the old export_stl still works', json(await call('export_stl', { design: 'T1' }))?.filename === 'T1.stl');
 r = json(await call('describe_sketch'));
 check('describe_sketch lists shapes, constraints and line types', r?.shapes?.rect && r.constraints?.tangent && r.line_types?.centerline);
+for (const k of ['sweep', 'pipe']) { const d = json(await call('describe_feature_types', { kind: k })); check(`the catalogue lists the corner option of ${k}`, d?.fields?.some((f) => f.key === 'corner' && f.options.some((o) => /mitre/.test(o))), JSON.stringify(d)?.slice(0, 120)); }
 r = json(await call('describe_feature_types', { kind: 'fillet' }));
 check('the catalogue tells an assistant where face and edge values come from', JSON.stringify(r).includes('find_edges'), JSON.stringify(r)?.slice(0, 200));
 
