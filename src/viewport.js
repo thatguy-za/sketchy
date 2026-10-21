@@ -29,6 +29,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { PLANES, planeFrame, findFaceTri } from './kernel.js';
 import { look, textureById } from './materials.js';
 import { planarFace, curvedFace, findCurvedTri, faceOf } from './edges.js';
+import { matchBrepFace } from './brepface.js';
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -399,7 +400,7 @@ export class Viewport {
       geo = toCreasedNormals(geo, (35 * Math.PI) / 180);
       mesh = new THREE.Mesh(geo, this.mats.body);
       mesh.userData.id = b.id; mesh.userData.surface = !!b.surface; mesh.userData.key = b.key || null; mesh.castShadow = true; mesh.receiveShadow = true;
-      mesh.userData.src = { verts: b.verts, tris: b.tris };
+      mesh.userData.src = { verts: b.verts, tris: b.tris, ...(b.faceOf && b.faceOf.length === b.tris.length / 3 ? { faceOf: b.faceOf, faces: b.faces } : {}) }; // an exact (B-rep) body also knows which of its faces each triangle is on
       if (b.tris.length / 3 >= BVH_MIN) mesh.raycast = bvhRaycast; // big body: pick through a tree (built on first use)
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30), this.mats.edge);
       edges.raycast = () => {};
@@ -597,7 +598,8 @@ export class Viewport {
     const face = planarFace(src.verts, src.tris, hit.faceIndex);
     if (!face) return { curved: true, id, point: hit.point.toArray().map(r4), normal: hit.face.normal.toArray().map(r4) };
     const n = face.normal.map((c) => +c.toFixed(6));
-    return { face: true, id, point: hit.point.toArray().map(r4), normal: n, tris: face.tris, mesh: hit.object };
+    const bf = src.faceOf && src.faces[src.faceOf[hit.faceIndex]]; // an exact body: remember which B-rep face this is
+    return { face: true, id, point: hit.point.toArray().map(r4), normal: n, tris: face.tris, mesh: hit.object, ...(bf ? { brepFace: bf.key } : {}) };
   }
   /** Like pickPlanarFace, but a curved surface gives its whole curved face too ({face, curved: true, tris, mesh}). */
   pickFace(ev) {
@@ -605,14 +607,28 @@ export class Viewport {
     const hit = this.ray.intersectObjects(this.bodyGroup.children, false)[0];
     if (!hit) return null;
     const id = hit.object.userData.id, src = hit.object.userData.src, r4 = (v) => +v.toFixed(4);
+    if (src.faceOf) { // an exact body: the face is the B-rep face, flat or curved, with a key that survives a rebuild
+      const gi = src.faceOf[hit.faceIndex], meta = src.faces[gi], tris = this.brepFaceTris(src, gi);
+      if (meta && tris.length) {
+        const curved = meta.type !== 'PLANE';
+        return { face: true, ...(curved ? { curved: true } : {}), brepFace: meta.key, id, point: hit.point.toArray().map(r4), normal: hit.face.normal.toArray().map((c) => +c.toFixed(6)), tris, mesh: hit.object };
+      }
+    }
     const face = faceOf(src.verts, src.tris, hit.faceIndex);
     if (!face) return null;
     if (face.curved) return { face: true, curved: true, id, point: face.point, normal: face.normal, tris: face.tris, mesh: hit.object };
     return { face: true, id, point: hit.point.toArray().map(r4), normal: face.normal.map((c) => +c.toFixed(6)), tris: face.tris, mesh: hit.object };
   }
-  /** The triangles of a stored face {point, normal, curved?} on a body mesh now, or null. */
+  /** The triangles of B-rep face number `gi` of a body mesh. */
+  brepFaceTris(src, gi) {
+    const out = [];
+    for (let t = 0; t < src.faceOf.length; t++) if (src.faceOf[t] === gi) out.push(t);
+    return out;
+  }
+  /** The triangles of a stored face {point, normal, curved?, brepFace?} on a body mesh now, or null. */
   faceTris(mesh, f) {
-    const { verts, tris } = mesh.userData.src;
+    const { verts, tris, faces } = mesh.userData.src;
+    if (f.brepFace && faces) { const gi = matchBrepFace(faces, f); if (gi >= 0) return this.brepFaceTris(mesh.userData.src, gi); } // an exact body: the face by its key
     if (f.curved) { const t = findCurvedTri(verts, tris, f.point, f.normal); const c = t >= 0 ? curvedFace(verts, tris, t) : null; return c ? c.tris : null; }
     const t = findFaceTri(verts, tris, f.point, f.normal), pf = t >= 0 ? planarFace(verts, tris, t) : null;
     return pf ? pf.tris : null;

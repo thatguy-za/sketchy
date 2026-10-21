@@ -6,7 +6,8 @@ import { createTools } from './mcp-tools.js';
 let H = null, n = 0;
 const waiting = new Map();
 const call = (op) => (...args) => new Promise((resolve, reject) => { const id = ++n; waiting.set(id, { resolve, reject }); parentPort.postMessage({ type: 'storage', id, op, args }); });
-const deps = { storage: { list: call('list'), read: call('read'), write: call('write') }, device: '' };
+const OPS = ['list', 'read', 'write', 'saveVersion', 'versions', 'readVersion', 'restoreVersion', 'undo', 'requests', 'requestDone', 'live', 'ui'];
+const deps = { storage: Object.fromEntries(OPS.map((op) => [op, call(op)])), device: '' };
 const tools = createTools(deps);
 
 parentPort.on('message', async (m) => {

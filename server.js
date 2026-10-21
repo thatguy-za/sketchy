@@ -5,6 +5,7 @@
 //   node server.js reset-password <user> [new-password]   (generates one if omitted)
 //   node server.js make-admin <user>
 import { validateDesign } from './design-validate.js';
+import { validatePackage, LIMITS as ADDIN_LIMITS, ID_RE as ADDIN_ID } from './addin-validate.js';
 import { createMcp } from './mcp.js';
 import { createPool } from './mcp-pool.js';
 import { createOAuth } from './oauth.js';
@@ -12,6 +13,8 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
@@ -50,6 +53,8 @@ function hostOk(req) {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':') /* an IPv6 address */ || !h.includes('.') || /\.(local|lan|home\.arpa|internal|localdomain)$/.test(h);
 }
 const log = (event, ip = '', extra = '') => console.log(`${new Date().toISOString()} ${event}${ip ? ' ip=' + ip : ''}${extra ? ' ' + extra : ''}`); // one line per security event, easy to feed to fail2ban
+const brotli = promisify(zlib.brotliCompress), gzip = promisify(zlib.gzip);
+const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.wasm', '.svg', '.json']), packed = new Map(); // static files worth compressing, and the compressed copies
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png' };
 
 // In the Docker image the server starts as root, makes the data directory writable, and then switches to an unprivileged user
@@ -385,6 +390,25 @@ async function writeProject(username, name, objStr, device, ifSeq, opts = {}) {
   await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
   return { rev, seq };
 }
+// ---------------------------------------------------------------- live events (server-sent events) and the assistant activity state
+// Each signed-in page can hold one open stream; it tells the page when an assistant changes the design it is showing, when one is
+// working or stopped, and when a request left for an assistant is answered. Nothing here carries design data, only names and numbers.
+const streams = new Map(); // user -> Set(res)
+const emit = (user, event) => {
+  const set = streams.get(user); if (!set) return;
+  const line = `data: ${JSON.stringify(event)}\n\n`;
+  for (const r of set) { try { r.write(line); } catch { set.delete(r); } }
+};
+const mcpHold = new Map(); // user -> time until which assistant changes are refused (the person pressed Stop)
+const HOLD_MS = 30 * 60e3;
+const isHeld = (u) => (mcpHold.get(u) || 0) > Date.now();
+const reqFile = (u) => path.join(dataDir, 'requests', users[u].id + '.json');
+const readRequests = async (u) => { const l = await readJSON(reqFile(u), []); return Array.isArray(l) ? l : []; };
+const writeRequests = async (u, l) => { await fs.mkdir(path.dirname(reqFile(u)), { recursive: true }); await writeJSON(reqFile(u), l.slice(-200)); };
+const liveState = new Map(); // user -> { at, state }: what the person is looking at right now (sent by the open page)
+const LIVE_MS = 3 * 60e3;
+const undoDir = (D) => path.join(D.proj, '.undo');
+
 const mcpStorage = {
   async list(u) {
     const D = dirs(u);
@@ -399,12 +423,69 @@ const mcpStorage = {
     if (bad) throw new Error('This design cannot be opened by an assistant: ' + bad);
     return { obj, rev: (await readMeta(D.proj, name)).seq };
   },
-  async write(u, name, obj, device, rev) {
+  async write(u, name, obj, device, rev, opts = {}) {
     if (!nameOk(name)) throw new Error('Invalid design name.');
     // An assistant's edits are work in progress, like autosave: they change the design in place and never add a numbered revision.
-    // Only the Save button in the app does that.
-    try { return (await writeProject(u, name, JSON.stringify(obj), device, rev, { auto: true })).seq; }
+    // Only the Save button in the app (or the save_version tool) does that.
+    try {
+      const D = dirs(u), file = path.join(D.proj, name + '.json');
+      if (!opts.noUndo) { // keep what was there, so the assistant can take back its last change
+        const before = await fs.readFile(file).catch(() => null);
+        if (before) { await fs.mkdir(undoDir(D), { recursive: true }); await fs.writeFile(path.join(undoDir(D), name + '.json'), before); }
+      }
+      const r = await writeProject(u, name, JSON.stringify(obj), device, rev, { auto: true });
+      emit(u, { type: 'design', name, seq: r.seq, by: 'assistant', tool: obj.lastEdit?.tool || '' });
+      return r.seq;
+    }
     catch (e) { if (e instanceof Conflict) throw new Error('The design was changed by someone else while this edit was being made. Fetch it again and retry.'); throw e; }
+  },
+  async undo(u, name, device) {
+    if (!nameOk(name)) return null;
+    const D = dirs(u), f = path.join(undoDir(D), name + '.json'), prev = await fs.readFile(f, 'utf8').catch(() => null);
+    if (prev === null) return null;
+    const r = await writeProject(u, name, prev, device, '*', { auto: true });
+    await fs.rm(f, { force: true });
+    emit(u, { type: 'design', name, seq: r.seq, by: 'assistant', tool: 'undo_last_change' });
+    return r.seq;
+  },
+  async versions(u, name) {
+    if (!nameOk(name)) return null;
+    const D = dirs(u), file = path.join(D.proj, name + '.json');
+    if (!(await fs.stat(file).catch(() => null))) return null;
+    const dir = verDir(D, name), cur = await readMeta(D.proj, name);
+    const metas = (await Promise.all(((await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.meta'))).map((f) => readJSON(path.join(dir, f), null)))).filter(Boolean);
+    const all = [{ rev: cur.rev, modified: cur.modified, device: cur.device, note: cur.note, milestone: cur.milestone, cur: true }, ...metas.filter((m) => m.rev !== cur.rev)];
+    return all.sort((a, b) => b.rev - a.rev).slice(0, 100);
+  },
+  async readVersion(u, name, rev) {
+    if (!nameOk(name) || !Number.isInteger(rev)) return null;
+    const D = dirs(u), cur = await readMeta(D.proj, name);
+    const raw = await fs.readFile(rev === cur.rev ? path.join(D.proj, name + '.json') : path.join(verDir(D, name), rev + '.json'), 'utf8').catch(() => null);
+    if (raw === null) return null;
+    const obj = JSON.parse(raw); return validateDesign(obj) ? null : obj;
+  },
+  async saveVersion(u, name, obj, device, note) {
+    if (!nameOk(name)) throw new Error('Invalid design name.');
+    const r = await writeProject(u, name, JSON.stringify(obj), device, undefined, { note });
+    emit(u, { type: 'design', name, seq: r.seq, by: 'assistant', tool: 'save_version' });
+    return r;
+  },
+  async restoreVersion(u, name, rev, device) {
+    const obj = await mcpStorage.readVersion(u, name, rev);
+    if (!obj) return null;
+    const r = await writeProject(u, name, JSON.stringify(obj), device, undefined, { note: `Restored from V${rev}` });
+    emit(u, { type: 'design', name, seq: r.seq, by: 'assistant', tool: 'restore_version' });
+    return r;
+  },
+  async live(u) { const l = liveState.get(u); return l && Date.now() - l.at < LIVE_MS ? { ...l.state, ageSeconds: Math.round((Date.now() - l.at) / 1000) } : null; },
+  async ui(u, cmd) { const n = streams.get(u)?.size || 0; if (n) emit(u, { type: 'ui', ...cmd }); return n; },
+  async requests(u) { return readRequests(u); },
+  async requestDone(u, id, reply, declined) {
+    const l = await readRequests(u), r = l.find((x) => x.id === id && x.status === 'open');
+    if (!r) return false;
+    Object.assign(r, { status: declined ? 'declined' : 'done', reply, doneAt: Date.now() });
+    await writeRequests(u, l); emit(u, { type: 'requests' });
+    return true;
   },
 };
 
@@ -413,8 +494,9 @@ const mcpFile = path.join(dataDir, 'mcp-tokens.json');
 let mcpTokens = nullMap(await readJSON(mcpFile, {})); // id -> {hash, user, name, created, lastUsed}
 const saveMcp = () => writeJSON(mcpFile, mcpTokens);
 if (settings.allowMcp === undefined) settings.allowMcp = process.env.ALLOW_MCP !== 'false';
+if (settings.allowAddins === undefined) settings.allowAddins = process.env.ALLOW_ADDINS !== 'false'; // may people install their own add-ins? (the ones shipped with Sketchy are always there)
 const mcpPool = createPool({ storage: mcpStorage, size: Math.max(1, +process.env.MCP_WORKERS || 2), timeoutMs: (+process.env.MCP_TIMEOUT_SECONDS || 20) * 1000, memoryMb: +process.env.MCP_WORKER_MEMORY_MB || 512 });
-const mcpHandle = createMcp({ storage: mcpStorage, pool: mcpPool, device: 'Claude / ChatGPT (MCP)' });
+const mcpHandle = createMcp({ storage: mcpStorage, pool: mcpPool, device: 'Claude / ChatGPT (MCP)', activity: (u, ev) => emit(u, { type: 'activity', ...ev }), held: isHeld });
 // Tokens are only accepted in the Authorization header: a token in a URL ends up in proxy logs, browser history and referrers.
 const MCP_RATE = Math.max(1, +process.env.MCP_RATE_PER_MIN || 60);         // calls per minute for one token
 const MCP_STRIKES = 5, STRIKE_WINDOW = 10 * 60e3;                          // this many strikes in ten minutes pauses the token
@@ -486,7 +568,7 @@ async function api(req, res, url) {
       const tok = tokenOf(req), ss = sessions[sha(tok)];
       if (ss && ss.exp - Date.now() < SESSION_MS - DAY && ss.exp < ss.created + SESSION_MAX_MS) setSession(req, res, user, tok, ss);
     }
-    return send(res, 200, { user, admin: !!(user && users[user].admin), created: user ? users[user].created : 0, registration: settings.allowRegistration, mcp: settings.allowMcp, setup: !Object.keys(users).length });
+    return send(res, 200, { user, admin: !!(user && users[user].admin), created: user ? users[user].created : 0, registration: settings.allowRegistration, mcp: settings.allowMcp, addins: settings.allowAddins, setup: !Object.keys(users).length });
   }
 
   if (p === '/api/register' || p === '/api/login') {
@@ -619,6 +701,96 @@ async function api(req, res, url) {
     return send(res, 200, { used: (await dirBytes(D0.proj)) + (await dirBytes(D0.draft)), quota: quotaOf(user) });
   }
 
+  // ---- live events: one stream per page
+  if (p === '/api/events' && req.method === 'GET') {
+    const set = streams.get(user) || streams.set(user, new Set()).get(user);
+    if (set.size >= 8) return send(res, 429, { error: 'Too many open windows.' });
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+    res.write(`retry: 4000\ndata: ${JSON.stringify({ type: 'hello', hold: isHeld(user) })}\n\n`);
+    set.add(res);
+    const beat = setInterval(() => { try { res.write(': \n\n'); } catch { /* closed */ } }, 25e3);
+    req.on('close', () => { clearInterval(beat); set.delete(res); if (!set.size) streams.delete(user); });
+    return;
+  }
+  // ---- add-ins the person installed (each is a manifest plus a few text files; they run sandboxed in the browser)
+  if (p === '/api/addins' || p.startsWith('/api/addins/')) {
+    const dir = path.join(dataDir, 'addins', users[user].id);
+    if (p === '/api/addins') {
+      if (req.method !== 'GET') return send(res, 405, {});
+      const names = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.json'));
+      const list = (await Promise.all(names.map(async (f) => { const o = await readJSON(path.join(dir, f), null); return o?.manifest ? { manifest: o.manifest, installed: o.installed || 0, bytes: JSON.stringify(o.files || {}).length } : null; }))).filter(Boolean);
+      return send(res, 200, { enabled: settings.allowAddins, addins: list });
+    }
+    const id = decodeURIComponent(p.slice('/api/addins/'.length));
+    if (!ADDIN_ID.test(id)) return send(res, 400, { error: 'Invalid add-in id.' });
+    const file = path.join(dir, id + '.json');
+    if (req.method === 'GET') { const o = await readJSON(file, null); return o ? send(res, 200, { manifest: o.manifest, files: o.files }) : send(res, 404, { error: 'Not found' }); }
+    if (req.method === 'DELETE') { await fs.rm(file, { force: true }); log('addin_removed', ip, `user=${user} id=${id}`); return send(res, 200, {}); }
+    if (req.method === 'PUT') {
+      if (!settings.allowAddins) return send(res, 403, { error: 'Installing add-ins is turned off on this server.' });
+      const wait = rate('addin:' + user, 20, 60e3);
+      if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many installs. Slow down.' }); }
+      const b = await readJSONBody(req, ADDIN_LIMITS.totalBytes * 2 + 65536);
+      if (!b || typeof b !== 'object') return send(res, 400, { error: 'Bad request' });
+      const bad = validatePackage(b.manifest, b.files);
+      if (bad) return send(res, 400, { error: bad });
+      if (b.manifest.id !== id) return send(res, 400, { error: 'The add-in id in the address and in the manifest differ.' });
+      const have = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.json') && f !== id + '.json');
+      if (have.length >= ADDIN_LIMITS.perUser) return send(res, 400, { error: `You can have up to ${ADDIN_LIMITS.perUser} add-ins. Remove one first.` });
+      await fs.mkdir(dir, { recursive: true });
+      await writeJSON(file, { manifest: b.manifest, files: b.files, installed: Date.now() });
+      log('addin_installed', ip, `user=${user} id=${id} v=${String(b.manifest.version).slice(0, 20)}`);
+      return send(res, 200, { id });
+    }
+    return send(res, 405, {});
+  }
+  // ---- what the person is looking at, so an assistant can work on the same thing
+  if (p === '/api/live' && req.method === 'PUT') {
+    const b = await readJSONBody(req, 6144);
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return send(res, 400, { error: 'Bad request' });
+    const str = (v, n = 80) => (typeof v === 'string' ? v.slice(0, n) : '');
+    const list = (v, n = 40, m = 60) => (Array.isArray(v) ? v.slice(0, n).map((x) => str(x, m)).filter(Boolean) : []);
+    const sel = b.selection && typeof b.selection === 'object' ? b.selection : {};
+    const num3 = (v) => (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite) ? v.map((x) => +x.toFixed(4)) : undefined);
+    const face = sel.face && typeof sel.face === 'object' ? { body: str(sel.face.body), point: num3(sel.face.point), normal: num3(sel.face.normal), ...(sel.face.curved ? { curved: true } : {}) } : undefined;
+    liveState.set(user, { at: Date.now(), state: {
+      design: nameOk(str(b.design)) ? str(b.design) : '', dirty: !!b.dirty, openDesigns: list(b.openDesigns, 12, 80), tool: str(b.tool, 40), sketch: str(b.sketch, 64),
+      selection: { bodies: list(sel.bodies), features: list(sel.features), edges: Math.min(1e6, +sel.edges || 0), ...(face && face.point && face.normal ? { face } : {}) },
+      view: num3(b.view), units: str(b.units, 4), appVersion: str(b.appVersion, 20),
+    } });
+    return send(res, 200, {});
+  }
+  // ---- Stop / Resume for assistants
+  if (p === '/api/mcp/hold') {
+    if (req.method === 'GET') return send(res, 200, { held: isHeld(user) });
+    if (req.method !== 'POST') return send(res, 405, {});
+    const b = await readJSONBody(req, 512);
+    if (!b) return send(res, 400, { error: 'Bad request' });
+    if (b.on) mcpHold.set(user, Date.now() + HOLD_MS); else mcpHold.delete(user);
+    emit(user, { type: 'hold', on: !!b.on });
+    log(b.on ? 'mcp_stopped_by_user' : 'mcp_resumed_by_user', ip, `user=${user}`);
+    return send(res, 200, { held: isHeld(user) });
+  }
+  // ---- requests left for an assistant (it reads them with list_requests)
+  if (p === '/api/requests') {
+    if (req.method === 'GET') return send(res, 200, (await readRequests(user)).slice(-100).reverse());
+    if (req.method !== 'POST') return send(res, 405, {});
+    const wait = rate('req:' + user, 30, 60e3);
+    if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
+    const b = await readJSONBody(req, 8192);
+    const txt = String(b?.text || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').trim().slice(0, 2000);
+    if (!txt) return send(res, 400, { error: 'Write what you want done.' });
+    const design = nameOk(String(b.design || '')) ? String(b.design) : '';
+    const ctx = b.context && typeof b.context === 'object' && !Array.isArray(b.context) ? JSON.parse(JSON.stringify(b.context).slice(0, 2000) || '{}') : undefined;
+    const l = await readRequests(user);
+    if (l.filter((x) => x.status === 'open').length >= 20) return send(res, 400, { error: 'You already have 20 open requests. Wait for them to be done, or delete some.' });
+    const item = { id: 'r' + crypto.randomBytes(5).toString('hex'), text: txt, design, ...(ctx && Object.keys(ctx).length ? { context: ctx } : {}), status: 'open', created: Date.now() };
+    l.push(item); await writeRequests(user, l); emit(user, { type: 'requests' });
+    return send(res, 200, item);
+  }
+  const rq = /^\/api\/requests\/(r[0-9a-f]{10})$/.exec(p);
+  if (rq && req.method === 'DELETE') { const l = await readRequests(user); await writeRequests(user, l.filter((x) => x.id !== rq[1])); emit(user, { type: 'requests' }); return send(res, 200, {}); }
+
   // ---- signed-in devices
   if (p === '/api/sessions' && req.method === 'GET') {
     const cur = tokenOf(req) && sha(tokenOf(req));
@@ -673,6 +845,7 @@ async function api(req, res, url) {
         const b = await readJSONBody(req, 1024);
         if (typeof b?.allowRegistration === 'boolean') settings.allowRegistration = b.allowRegistration;
         if (typeof b?.allowMcp === 'boolean') settings.allowMcp = b.allowMcp;
+        if (typeof b?.allowAddins === 'boolean') settings.allowAddins = b.allowAddins;
         if (typeof b?.breachCheck === 'boolean') settings.breachCheck = b.breachCheck;
         if (b && 'idleMinutes' in b) { const n = Number(b.idleMinutes); if (!Number.isFinite(n) || (n !== 0 && (n < 0.02 || n > 525600))) return send(res, 400, { error: 'Idle time must be 0 (never sign out) or a number of minutes up to 525600.' }); settings.idleMinutes = n; }
         if (b && 'defaultQuotaMb' in b) { const n = Number(b.defaultQuotaMb); if (!Number.isInteger(n) || n < 0 || n > 1e7) return send(res, 400, { error: 'Storage must be a whole number of megabytes from 0 (no limit) to 10000000.' }); settings.defaultQuotaMb = n; usageCache.clear(); }
@@ -925,8 +1098,8 @@ async function api(req, res, url) {
 }
 
 // Headers every response carries. The CSP is the main defence if a malicious design file ever manages to put markup on the page:
-// scripts may only come from this server (no inline script, no eval) and styles from files only (no style attributes or style tags), and nothing can be framed, posted elsewhere or sent off-site.
-const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+// scripts may only come from this server (no inline script; eval is allowed only because OpenCascade's WebAssembly glue builds its bindings with new Function) and styles from files only (no style attributes or style tags), and nothing can be framed, posted elsewhere or sent off-site.
+const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 function harden(req, res, api) {
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('x-frame-options', 'DENY');
@@ -942,6 +1115,13 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const isMcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'), isOauth = url.pathname.startsWith('/.well-known/oauth-') || url.pathname === '/oauth/register' || url.pathname === '/oauth/token', isApi = url.pathname.startsWith('/api/') || isOauth;
     harden(req, res, isMcp || isApi);
+    if (url.pathname === '/addin-sandbox.html') { // the add-in sandbox page: framed by this app only, may run its one inline script and start workers, allowed nothing else (no network)
+      const html = await fs.readFile(path.join(root, 'addin-sandbox.html'), 'utf8').catch(() => '');
+      const inline = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '';
+      const hash = crypto.createHash('sha256').update(inline).digest('base64'); // 'self' does not work in a frame with no origin, so the page's own script is allowed by its hash
+      res.setHeader('content-security-policy', `default-src 'none'; script-src 'sha256-${hash}' blob:; worker-src blob:; connect-src 'none'; img-src 'none'; style-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
+      res.removeHeader('x-frame-options'); res.removeHeader('cross-origin-opener-policy'); res.removeHeader('permissions-policy'); res.setHeader('cross-origin-resource-policy', 'cross-origin'); // frame-ancestors above decides who may frame it (X-Frame-Options SAMEORIGIN would block a frame that has no origin)
+    }
     if (!hostOk(req)) { log('bad_host', clientIp(req), String(req.headers.host || '').slice(0, 60)); res.setHeader('content-type', 'text/plain'); res.statusCode = 421; return res.end('This address is not one this server answers to. Set PUBLIC_URL or ALLOWED_HOSTS to the address you use.'); }
     const ip = clientIp(req), wait = rate((isMcp ? 'mcp:' : isApi ? 'api:' : 'static:') + ip, isMcp ? 600 : isApi ? 1500 : 900, 60e3);
     if (wait) { log('rate_limited', ip, url.pathname.slice(0, 40)); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
@@ -956,7 +1136,18 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('content-type', types[path.extname(p)] || 'application/octet-stream');
     if (p.startsWith(path.join(root, 'assets') + path.sep)) res.setHeader('cache-control', 'public, max-age=31536000, immutable');
     else res.setHeader('cache-control', 'no-cache'); // the page itself is re-checked on every visit, so an upgrade shows up straight away
-    res.end(body);
+    if (url.pathname === '/sw.js') res.setHeader('service-worker-allowed', '/');
+    let out = body;
+    const ext = path.extname(p), enc = COMPRESSIBLE.has(ext) && body.length > 1024 ? (/\bbr\b/.test(String(req.headers['accept-encoding'] || '')) ? 'br' : /\bgzip\b/.test(String(req.headers['accept-encoding'] || '')) ? 'gzip' : '') : '';
+    if (COMPRESSIBLE.has(ext)) res.setHeader('vary', 'accept-encoding');
+    if (enc) { // the 23 MB CAD kernel is 7 MB compressed; each file is compressed once and kept
+      const key = `${p}|${enc}|${body.length}`;
+      let z = packed.get(key);
+      if (!z) { z = await (enc === 'br' ? brotli(body, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 6 } }) : gzip(body, { level: 9 })); packed.set(key, z); }
+      res.setHeader('content-encoding', enc); out = z;
+    }
+    res.setHeader('content-length', out.length);
+    res.end(out);
   } catch (e) { if (e.code === 413) res.setHeader('connection', 'close'); /* the unread upload makes the connection unusable */ if (e.code !== 413) console.error(`${new Date().toISOString()} server_error ${e.stack || e}`); const known = e.code === 413 || (e.code === 400 && e.msg); send(res, known ? e.code : 500, { error: known ? e.msg || 'File too large' : 'Server error' }); }
 });
 server.requestTimeout = 5 * 60e3; server.headersTimeout = 30e3; server.keepAliveTimeout = 5e3; server.maxHeadersCount = 100;

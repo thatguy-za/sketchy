@@ -130,7 +130,10 @@ export async function readModelFile(file) {
   if (ext === 'stl') list = [{ name: base, soup: parseSTL(await file.arrayBuffer()), notes: [] }];
   else if (ext === 'obj') list = parseOBJ(await file.text());
   else if (ext === '3mf') list = await parse3MF(await file.arrayBuffer());
-  else if (ext === 'step' || ext === 'stp') list = parseSTEP(await file.text());
+  else if (ext === 'step' || ext === 'stp') {
+    const text = await file.text(), parts = parseSTEP(text); // the triangles are for counting and as a fallback; the exact kernel reads the file itself and keeps the true surfaces
+    list = [{ name: base, soup: new Float32Array(parts.flatMap((q) => [...q.soup])), stepText: text, notes: [...new Set(parts.flatMap((q) => q.notes || []))] }];
+  }
   else throw new Error('Unsupported file type. Open an STL, OBJ, 3MF or STEP file.');
   if (list.length === 1 && (!list[0].name || /^(OBJ|Part|STEP)$/i.test(list[0].name))) list[0].name = base;
   return list;

@@ -141,7 +141,7 @@ A walk through Fusion's help centre, command by command, against what Sketchy do
 
 ## 8. Suggested order of work
 
-Ranked by how often a maker, who is Sketchy's main audience, would hit the difference. Items 1 to 5 are implemented (uncommitted at the time of writing).
+Ranked by how often a maker, who is Sketchy's main audience, would hit the difference. Items 1 to 5 are implemented. Of items 6 to 8, these are done: chamfer by two distances or distance and angle, fillet by chord length, patterns with Extent or Spacing, Symmetric and skipped instances, Mirror about any construction plane, Combine with several tool bodies, and Move/Copy point to point. Still open: Rule fillet, patterns on faces and features (not only bodies), Path pattern options, Align, selection filters and Select Through. The sketch constraint solver is in (see `src/sketchsolve.js`).
 
 1. **Sketch geometry types:** 3-point rectangle, 2-point and 3-point circle, center-point and tangent arc, slot variants, Point. Most designs start here.
 2. **Sketch tools and state:** Extend, Break, Chamfer; Construction and Centerline line types; Show toggles for dimensions, constraints and construction geometry.

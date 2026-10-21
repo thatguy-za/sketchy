@@ -4,52 +4,36 @@
 // Tools that rebuild a design run in worker threads (mcp-pool.js) so a heavy design can't stall the server.
 import { createTools } from './mcp-tools.js';
 import { validateArguments } from './mcp-validate.js';
+import { TOOLS, PROMPTS, INSTRUCTIONS, VERSION } from './mcp-defs.js';
 
 const VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER = { name: 'sketchy', version: '0.0.4' };
-
-const INSTRUCTIONS = `Sketchy is a parametric 3D CAD tool. You build a design as an ordered timeline of features (sketch, extrude, hole, fillet...), like other parametric CAD tools. Everything is in millimetres.
-
-Workflow: create_design (or list_designs / get_design) -> add_feature one step at a time -> inspect the result (every add_feature returns the bodies, sizes, volumes and any errors) -> fix with update_feature / delete_feature. Call describe_feature_types to see every feature kind with its parameters and defaults.
-
-Coordinates: planes are XY (floor, Z up), XZ (front) and YZ (right). A sketch lives on one plane (params.plane, optionally params.offset along the plane normal). Sketch shapes (params.shapes, 2D coordinates in the sketch plane, mm):
-- {"t":"rect","x":0,"y":0,"w":40,"h":20}  (x,y = lower-left corner)
-- {"t":"circle","cx":0,"cy":0,"r":5}
-- {"t":"rrect","x":0,"y":0,"w":40,"h":20,"r":3}  rounded rectangle
-- {"t":"slot","x1":0,"y1":0,"x2":20,"y2":0,"w":6}
-- {"t":"ellipse","cx":0,"cy":0,"rx":10,"ry":5,"rot":0}
-- {"t":"ngon","cx":0,"cy":0,"r":10,"n":6,"rot":0}
-- {"t":"path","pts":[[0,0],[10,0],[10,10]]}  closed polygon; pts may be [x,y,bulge] for arcs (bulge = tan(sweep/4)); add "open":true for an open path (used by sweep/rib/pattern)
-Closed shapes nested inside another become holes. An extrude takes the sketch id (e.g. "f1") and a distance; op is new / join / cut / intersect / auto. Body ids look like "f3" (the feature that created them). Surface kinds (sextrude, srevolve, ssweep, sloft) make open surface bodies listed under surfaces in the results; join them with sstitch (a closed shell becomes a solid) or give them thickness with sthicken. The pipe kind makes a solid or hollow tube along an open path sketch. Features that need picking edges or faces in the 3D view (fillet, chamfer, presspull...) cannot be placed from here yet; prefer primitives, sketches + extrude/revolve/sweep/loft, holes, patterns, mirror and boolean combine.
-
-Parameters (set_parameters) are named values usable in expressions, e.g. width=40 mm then "width/2 + 3" in any numeric field via the feature's expressions.`;
-
-const FEATURE_REF = { type: 'string', description: 'Feature id (e.g. "f3"), exact feature name, or "#3" for the 3rd feature in the timeline.' };
-const DESIGN = { type: 'string', description: 'Design name exactly as shown in list_designs.' };
-
-const TOOLS = [
-  { name: 'list_designs', description: 'List the designs saved in this user\'s Sketchy account.', schema: { type: 'object', properties: {} }, ro: true },
-  { name: 'create_design', description: 'Create a new empty design. Fails if the name is taken.', schema: { type: 'object', properties: { name: { type: 'string', description: 'Design name (letters, numbers, spaces, . _ ( ) -).' } }, required: ['name'] } },
-  { name: 'get_design', description: 'Get a design: its timeline of features with all parameters, its named parameters, and the resulting bodies and errors.', schema: { type: 'object', properties: { design: DESIGN }, required: ['design'] }, ro: true },
-  { name: 'describe_feature_types', description: 'Catalogue of feature kinds you can add (box, cylinder, sketch, extrude, revolve, hole, pattern, mirror, combine, ...) with their parameters, option lists and defaults. Pass kind to see just one.', schema: { type: 'object', properties: { kind: { type: 'string' } } }, ro: true },
-  { name: 'add_feature', description: 'Append a feature to the timeline (or insert at position). Returns the updated bodies and any error. If the feature fails to build it is NOT saved (unless keep_on_error is true) and the error is returned so you can correct the parameters.', schema: { type: 'object', properties: { design: DESIGN, kind: { type: 'string', description: 'Feature kind from describe_feature_types, e.g. "sketch", "extrude", "box", "hole".' }, params: { type: 'object', description: 'Parameters overriding the defaults for this kind.' }, name: { type: 'string' }, position: { type: 'integer', description: '1-based timeline position to insert at; default is the end.' }, keep_on_error: { type: 'boolean' } }, required: ['design', 'kind'] } },
-  { name: 'update_feature', description: 'Change parameters of an existing feature (shallow merge). Later features are rebuilt. The change is rejected, with the error, if it breaks the feature or anything after it (unless keep_on_error is true).', schema: { type: 'object', properties: { design: DESIGN, feature: FEATURE_REF, params: { type: 'object' }, name: { type: 'string' }, suppressed: { type: 'boolean', description: 'Temporarily disable the feature.' }, keep_on_error: { type: 'boolean' } }, required: ['design', 'feature'] } },
-  { name: 'delete_feature', description: 'Remove a feature from the timeline. Features that depended on it will report errors in the result.', schema: { type: 'object', properties: { design: DESIGN, feature: FEATURE_REF }, required: ['design', 'feature'] } },
-  { name: 'set_parameters', description: 'Create or update named design parameters (e.g. width = 40 mm) that feature fields can reference in expressions. Existing parameters with other names are kept.', schema: { type: 'object', properties: { design: DESIGN, parameters: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, expr: { type: 'string', description: 'Expression, e.g. "40 mm" or "width/2".' }, unit: { type: 'string', enum: ['length', 'angle', 'number'] }, comment: { type: 'string' } }, required: ['name', 'expr'] } } }, required: ['design', 'parameters'] } },
-  { name: 'inspect_design', description: 'Rebuild the design and report each body (volume, surface area, bounding box, size) and every feature error. Use after changes to verify the model.', schema: { type: 'object', properties: { design: DESIGN }, required: ['design'] }, ro: true },
-  { name: 'export_stl', description: 'Export the design (or chosen bodies) as a binary STL file, returned base64-encoded, ready for slicing.', schema: { type: 'object', properties: { design: DESIGN, bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids to include; default all.' } }, required: ['design'] }, ro: true },
-];
-
+const SERVER = { name: 'sketchy', version: VERSION };
 const text = (obj) => ({ content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 1) }] });
 const fail = (msg) => ({ isError: true, content: [{ type: 'text', text: msg }] });
-const LOCAL = new Set(['list_designs', 'create_design']); // cheap tools that never rebuild a design
+const LOCAL = new Set(TOOLS.filter((t) => t.local).map((t) => t.name)); // cheap tools that never rebuild a design
+const URI = /^sketchy:\/\/design\/([^/]{1,80})(\/preview\.png)?$/;
 
 /**
- * @param {object} d  { storage, pool, device }  pool.run(user, name, args, device) runs a tool in a worker thread with a time and memory limit
+ * @param {object} d  { storage, pool, device, activity?, held? }  pool.run(user, name, args, device) runs a tool in a worker thread with a time and memory limit;
+ *   activity(user, {state, tool, design, write}) tells the app what an assistant is doing; held(user) says the person pressed Stop
  * @returns {(user: string, msg: object, ctx?: {strike: (kind: string) => void}) => Promise<object|null>} JSON-RPC message handler
  */
 export function createMcp(d) {
   const local = createTools({ storage: d.storage, device: d.device });
+  /** Run one tool: in this thread for the cheap ones, in a worker for the rest. Tells the app what is going on while it runs. */
+  const runTool = async (user, tool, args, ctx = {}) => {
+    if (args.design === '@current') { // the design the person has open
+      const live = await d.storage.live(user);
+      if (!live?.design) return fail('No design is open in Sketchy right now, so "@current" means nothing. Use list_designs and the design\'s name.');
+      args = { ...args, design: live.design };
+    }
+    const note = (state) => { try { d.activity?.(user, { state, tool: tool.name, design: args.design || '', write: !!tool.write }); } catch { /* the app being unreachable must not break a tool */ } };
+    if (tool.write && d.held?.(user)) return fail('The person using Sketchy pressed Stop, so changes are paused. Do not retry. Tell them what you were about to do and ask them to press Resume in Sketchy (or tell you to carry on). Looking (get_design, render_view, find_faces) still works.');
+    if (!LOCAL.has(tool.name) || tool.write) note('start');
+    try {
+      return LOCAL.has(tool.name) ? await local[tool.name](user, args, null) : await d.pool.run(user, tool.name, args, d.device);
+    } finally { if (!LOCAL.has(tool.name) || tool.write) note('end'); }
+  };
   const rpc = async (user, m, ctx) => {
     const id = m.id;
     const ok = (result) => ({ jsonrpc: '2.0', id, result });
@@ -57,26 +41,57 @@ export function createMcp(d) {
     switch (m.method) {
       case 'initialize': {
         const want = m.params?.protocolVersion;
-        return ok({ protocolVersion: VERSIONS.includes(want) ? want : VERSIONS[0], capabilities: { tools: { listChanged: false } }, serverInfo: SERVER, instructions: INSTRUCTIONS });
+        return ok({ protocolVersion: VERSIONS.includes(want) ? want : VERSIONS[0], capabilities: { tools: { listChanged: false }, resources: { listChanged: false, subscribe: false }, prompts: { listChanged: false } }, serverInfo: SERVER, instructions: INSTRUCTIONS });
       }
       case 'ping': return ok({});
       case 'tools/list':
-        return ok({ tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.schema, annotations: { readOnlyHint: !!t.ro, destructiveHint: t.name === 'delete_feature', openWorldHint: false } })) });
+        return ok({ tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.schema, annotations: { readOnlyHint: !!t.ro, destructiveHint: t.name === 'delete_feature' || t.name === 'restore_version', idempotentHint: !!t.ro, openWorldHint: false } })) });
       case 'tools/call': {
         const tool = TOOLS.find((t) => t.name === m.params?.name);
         if (!tool) return err(-32602, `Unknown tool: ${String(m.params?.name).slice(0, 60)}`);
         const bad = validateArguments(tool.schema, m.params.arguments ?? {});
         if (bad) return ok(fail(`Invalid arguments: ${bad}`));
         try {
-          if (LOCAL.has(tool.name)) return ok(await local[tool.name](user, m.params.arguments || {}, null));
-          return ok(await d.pool.run(user, tool.name, m.params.arguments || {}, d.device));
+          return ok(await runTool(user, tool, m.params.arguments || {}, ctx));
         } catch (e) {
           if (e.kind && e.kind !== 'busy') ctx?.strike?.(e.kind); // timeout, memory or crash: counts against the token
           return ok(fail(e.kind ? e.message : e.message || String(e)));
         }
       }
-      case 'resources/list': return ok({ resources: [] });
-      case 'prompts/list': return ok({ prompts: [] });
+      case 'resources/list': {
+        const l = await d.storage.list(user);
+        return ok({ resources: l.slice(0, 200).map((x) => ({ uri: `sketchy://design/${x.name}`, name: x.name, description: `Sketchy design, revision ${x.rev}: timeline, parameters and model summary as JSON.`, mimeType: 'application/json' })) });
+      }
+      case 'resources/templates/list':
+        return ok({ resourceTemplates: [
+          { uriTemplate: 'sketchy://design/{name}', name: 'Design', description: 'A design as JSON: its timeline of features, parameters, units, appearance and the bodies it builds, with errors.', mimeType: 'application/json' },
+          { uriTemplate: 'sketchy://design/{name}/preview.png', name: 'Design preview', description: 'A picture of the design from the front right above.', mimeType: 'image/png' },
+        ] });
+      case 'resources/read': {
+        const mt = URI.exec(String(m.params?.uri || ''));
+        if (!mt) return err(-32602, 'Unknown resource. Use sketchy://design/{name} or sketchy://design/{name}/preview.png');
+        const design = mt[1];
+        try {
+          if (mt[2]) { // the preview
+            const r = await runTool(user, TOOLS.find((t) => t.name === 'render_view'), { design }, ctx);
+            const img = r.content?.find((c) => c.type === 'image');
+            return img ? ok({ contents: [{ uri: m.params.uri, mimeType: 'image/png', blob: img.data }] }) : err(-32002, r.content?.[0]?.text || 'Nothing to draw yet.');
+          }
+          const r = await runTool(user, TOOLS.find((t) => t.name === 'get_design'), { design }, ctx);
+          if (r.isError) return err(-32002, r.content?.[0]?.text || 'Design not found');
+          return ok({ contents: [{ uri: m.params.uri, mimeType: 'application/json', text: r.content[0].text }] });
+        } catch (e) { return err(-32002, e.message || String(e)); }
+      }
+      case 'prompts/list':
+        return ok({ prompts: PROMPTS.map((p) => ({ name: p.name, description: p.description, arguments: p.arguments })) });
+      case 'prompts/get': {
+        const p = PROMPTS.find((x) => x.name === m.params?.name);
+        if (!p) return err(-32602, `Unknown prompt: ${String(m.params?.name).slice(0, 60)}`);
+        const args = m.params?.arguments && typeof m.params.arguments === 'object' ? m.params.arguments : {};
+        for (const a of p.arguments) if (a.required && !String(args[a.name] ?? '').trim()) return err(-32602, `Missing argument: ${a.name}`);
+        const clean = Object.fromEntries(Object.entries(args).map(([k, v]) => [k, String(v).slice(0, 500)]));
+        return ok({ description: p.description, messages: [{ role: 'user', content: { type: 'text', text: p.text(clean) } }] });
+      }
       default: return err(-32601, `Method not found: ${String(m.method).slice(0, 60)}`);
     }
   };

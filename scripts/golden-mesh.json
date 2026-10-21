@@ -1,0 +1,2168 @@
+{
+ "Both backends: primitives": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 24000,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "cyl",
+    "volume": 5018.477592520435,
+    "bbox": {
+     "min": [
+      52,
+      -8,
+      0
+     ],
+     "max": [
+      68,
+      8,
+      25
+     ]
+    },
+    "flat": 66
+   },
+   {
+    "id": "sph",
+    "volume": 3036.3845755290877,
+    "bbox": {
+     "min": [
+      91,
+      -9,
+      -9
+     ],
+     "max": [
+      109,
+      9,
+      9
+     ]
+    },
+    "flat": 2028
+   },
+   {
+    "id": "con",
+    "volume": 1521.226173147818,
+    "bbox": {
+     "min": [
+      122,
+      -8,
+      0
+     ],
+     "max": [
+      138,
+      8,
+      15
+     ]
+    },
+    "flat": 66
+   },
+   {
+    "id": "tor",
+    "volume": 2114.761910231661,
+    "bbox": {
+     "min": [
+      155,
+      -15,
+      -3
+     ],
+     "max": [
+      185,
+      15,
+      3
+     ]
+    },
+    "flat": 2048
+   },
+   {
+    "id": "rb",
+    "volume": 7554.6611321170885,
+    "bbox": {
+     "min": [
+      210,
+      -10,
+      0
+     ],
+     "max": [
+      230,
+      10,
+      20
+     ]
+    },
+    "flat": 366
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: box, fillet on the top edges, through hole (11 exact faces)": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 22169.03389782485,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 118
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: chamfer on the vertical edges": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 23840,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 10
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: counterbore and countersink holes": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 48717.151667366714,
+    "bbox": {
+     "min": [
+      -25,
+      -25,
+      0
+     ],
+     "max": [
+      25,
+      25,
+      20
+     ]
+    },
+    "flat": 264
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: extrude a rectangle with a round hole and a polygon": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "e",
+    "volume": 16162.702408167452,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      0
+     ],
+     "max": [
+      80,
+      30,
+      12
+     ]
+    },
+    "flat": 78
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: extrude a rounded rectangle, a slot, an ellipse and an arc path": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "e",
+    "volume": 11696.13525790163,
+    "bbox": {
+     "min": [
+      0,
+      -4.142000198364258,
+      0
+     ],
+     "max": [
+      150,
+      20,
+      7
+     ]
+    },
+    "flat": 189
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: extrude both sides, symmetric, offset start and a cut": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "base",
+    "volume": 70795.56539847018,
+    "bbox": {
+     "min": [
+      -30,
+      -30,
+      0
+     ],
+     "max": [
+      30,
+      30,
+      20
+     ]
+    },
+    "flat": 71
+   },
+   {
+    "id": "two",
+    "volume": 800,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      -3
+     ],
+     "max": [
+      10,
+      10,
+      5
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "sym",
+    "volume": 640.0000000000001,
+    "bbox": {
+     "min": [
+      30,
+      30,
+      -1
+     ],
+     "max": [
+      38,
+      38,
+      9
+     ]
+    },
+    "flat": 6
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: revolve full, partial, symmetric, two sides, about the X axis and a centerline": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "full",
+    "volume": 2352.411376094372,
+    "bbox": {
+     "min": [
+      -10,
+      0,
+      -10
+     ],
+     "max": [
+      10,
+      10,
+      10
+     ]
+    },
+    "flat": 130
+   },
+   {
+    "id": "part",
+    "volume": 2399.5303058457644,
+    "bbox": {
+     "min": [
+      -5.209445476531982,
+      0,
+      -29.998214721679688
+     ],
+     "max": [
+      30,
+      10,
+      0
+     ]
+    },
+    "flat": 132
+   },
+   {
+    "id": "sym",
+    "volume": 3730.266594414261,
+    "bbox": {
+     "min": [
+      31.819805145263672,
+      0,
+      -35.35533905029297
+     ],
+     "max": [
+      50,
+      10,
+      35.35533905029297
+     ]
+    },
+    "flat": 132
+   },
+   {
+    "id": "two",
+    "volume": 8835.039744843398,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      -60.62177658081055
+     ],
+     "max": [
+      70,
+      10,
+      70
+     ]
+    },
+    "flat": 260
+   },
+   {
+    "id": "xax",
+    "volume": 1881.9291008754974,
+    "bbox": {
+     "min": [
+      85,
+      -10,
+      -10
+     ],
+     "max": [
+      93,
+      10,
+      10
+     ]
+    },
+    "flat": 130
+   },
+   {
+    "id": "cl",
+    "volume": 2352.411334975507,
+    "bbox": {
+     "min": [
+      -30,
+      0,
+      -10
+     ],
+     "max": [
+      -10,
+      10,
+      10
+     ]
+    },
+    "flat": 130
+   },
+   {
+    "id": "neg",
+    "volume": 4515.586070985232,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      -60
+     ],
+     "max": [
+      60,
+      10,
+      0
+     ]
+    },
+    "flat": 132
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: combine join, cut and intersect": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 18083.160218896617,
+    "bbox": {
+     "min": [
+      -15,
+      -15,
+      0
+     ],
+     "max": [
+      15,
+      15,
+      30
+     ]
+    },
+    "flat": 1134
+   },
+   {
+    "id": "c",
+    "volume": 5645.787381672471,
+    "bbox": {
+     "min": [
+      -6,
+      -6,
+      -5
+     ],
+     "max": [
+      6,
+      6,
+      45
+     ]
+    },
+    "flat": 66
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: mirror, and linear and circular patterns": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "b",
+    "volume": 480,
+    "bbox": {
+     "min": [
+      -25,
+      -3,
+      0
+     ],
+     "max": [
+      25,
+      3,
+      4
+     ]
+    },
+    "flat": 12
+   },
+   {
+    "id": "p",
+    "volume": 1535.9999999999998,
+    "bbox": {
+     "min": [
+      -4,
+      36,
+      0
+     ],
+     "max": [
+      46,
+      44,
+      8
+     ]
+    },
+    "flat": 18
+   },
+   {
+    "id": "q",
+    "volume": 1129.157099397271,
+    "bbox": {
+     "min": [
+      -50.77960560478991,
+      -43.891798603851086,
+      0
+     ],
+     "max": [
+      50.31219382305315,
+      52.99192302561464,
+      8
+     ]
+    },
+    "flat": 330
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: a sketch on a face follows an edit of the base (extruded boss with a filleted base)": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 32103.325981067595,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      34
+     ]
+    },
+    "flat": 71
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: automatic, through-all and to-object extrudes, and emboss": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "base",
+    "volume": 71352.69030113904,
+    "bbox": {
+     "min": [
+      -30,
+      -30,
+      0
+     ],
+     "max": [
+      30,
+      30,
+      25
+     ]
+    },
+    "flat": 85
+   },
+   {
+    "id": "wall",
+    "volume": 3000,
+    "bbox": {
+     "min": [
+      35,
+      -5,
+      0
+     ],
+     "max": [
+      45,
+      5,
+      30
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "obj",
+    "volume": 188.1929350539508,
+    "bbox": {
+     "min": [
+      38,
+      -2,
+      25
+     ],
+     "max": [
+      42,
+      2,
+      40
+     ]
+    },
+    "flat": 66
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: shell a box with the top open": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 7152,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 11
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: shell a cylinder through its curved side and top": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "c",
+    "volume": 3143.993426919583,
+    "bbox": {
+     "min": [
+      -12,
+      -12,
+      0
+     ],
+     "max": [
+      12,
+      12,
+      25
+     ]
+    },
+    "flat": 180
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: draft side faces from the bottom and from the top": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 22950.13603768891,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      19.999999999999996,
+      15,
+      20
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "b",
+    "volume": 23685.553324301647,
+    "bbox": {
+     "min": [
+      60,
+      -15,
+      0
+     ],
+     "max": [
+      100,
+      15,
+      20
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "c",
+    "volume": 24559.41449554808,
+    "bbox": {
+     "min": [
+      140,
+      -15,
+      0
+     ],
+     "max": [
+      180,
+      16.398536238870207,
+      20
+     ]
+    },
+    "flat": 9
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: sweep a circle and a rectangle along lines and arcs": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "sw1",
+    "volume": 1733.0733143208301,
+    "bbox": {
+     "min": [
+      0,
+      -3,
+      -3
+     ],
+     "max": [
+      52.99357604980469,
+      20.196208953857422,
+      3
+     ]
+    },
+    "flat": 833
+   },
+   {
+    "id": "sw2",
+    "volume": 1280,
+    "bbox": {
+     "min": [
+      0,
+      -2,
+      -4
+     ],
+     "max": [
+      40,
+      2,
+      4
+     ]
+    },
+    "flat": 6
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: loft square to square, square to circle and three sections": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "l1",
+    "volume": 4666.666666666667,
+    "bbox": {
+     "min": [
+      -10,
+      -10,
+      0
+     ],
+     "max": [
+      10,
+      10,
+      20
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "l2",
+    "volume": 3512.934362465378,
+    "bbox": {
+     "min": [
+      52,
+      -8,
+      0
+     ],
+     "max": [
+      68,
+      8,
+      30
+     ]
+    },
+    "flat": 130
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: an external thread on a cylinder": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "c",
+    "volume": 8863.844036314966,
+    "bbox": {
+     "min": [
+      -10,
+      -10,
+      0
+     ],
+     "max": [
+      10,
+      10,
+      30
+     ]
+    },
+    "flat": 2756
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: move, copy, rotate and scale a body; scale feature": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 1200.0000000000002,
+    "bbox": {
+     "min": [
+      -6.160254037844387,
+      -6.330127018922193,
+      2
+     ],
+     "max": [
+      16.16025403784439,
+      12.330127018922193,
+      8
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "c",
+    "volume": 602.2173375227649,
+    "bbox": {
+     "min": [
+      36,
+      -4,
+      0
+     ],
+     "max": [
+      44,
+      4,
+      12
+     ]
+    },
+    "flat": 66
+   },
+   {
+    "id": "cp",
+    "volume": 2032.4835141393314,
+    "bbox": {
+     "min": [
+      34,
+      11,
+      0
+     ],
+     "max": [
+      46,
+      29,
+      12
+     ]
+    },
+    "flat": 66
+   },
+   {
+    "id": "d",
+    "volume": 4913,
+    "bbox": {
+     "min": [
+      -48.5,
+      -8.5,
+      -3.5
+     ],
+     "max": [
+      -31.5,
+      8.5,
+      13.5
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "e",
+    "volume": 999.9999999999998,
+    "bbox": {
+     "min": [
+      -45,
+      35,
+      0
+     ],
+     "max": [
+      -35,
+      45,
+      10
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "sc2",
+    "volume": 124.99999999999997,
+    "bbox": {
+     "min": [
+      -22.5,
+      17.5,
+      0
+     ],
+     "max": [
+      -17.5,
+      22.5,
+      5
+     ]
+    },
+    "flat": 6
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: split by a plane and by a body": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 7200,
+    "bbox": {
+     "min": [
+      8,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "sp",
+    "volume": 16800,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      8,
+      15,
+      20
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "b",
+    "volume": 14399.999999999982,
+    "bbox": {
+     "min": [
+      80,
+      -15,
+      0
+     ],
+     "max": [
+      120,
+      15,
+      11.999999999999986
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "c",
+    "volume": 2182.644256024525,
+    "bbox": {
+     "min": [
+      185,
+      -15,
+      0
+     ],
+     "max": [
+      215,
+      15,
+      30
+     ]
+    },
+    "flat": 662
+   },
+   {
+    "id": "sr",
+    "volume": 24817.35574397548,
+    "bbox": {
+     "min": [
+      185,
+      -15,
+      0
+     ],
+     "max": [
+      215,
+      15,
+      30
+     ]
+    },
+    "flat": 662
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: joints move a body about a point": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 2000,
+    "bbox": {
+     "min": [
+      -10,
+      -10,
+      0
+     ],
+     "max": [
+      10,
+      10,
+      5
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "b",
+    "volume": 159.99999999999997,
+    "bbox": {
+     "min": [
+      4.757086905852951,
+      -4.506186270333213,
+      2.5
+     ],
+     "max": [
+      15.242913094147056,
+      4.506186270333213,
+      6.5
+     ]
+    },
+    "flat": 6
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: variable radius, chord length, two distances and distance and angle": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 23875.676797594504,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 18
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: fillet by chord length": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 23765.96078498644,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 54
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: chamfer with two distances": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 23800,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 7
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: chamfer with a distance and an angle": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "box",
+    "volume": 23390.023409333306,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 10
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: extrude with twist and end scale (about the sketch origin)": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "tw",
+    "volume": 1458.7951011881028,
+    "bbox": {
+     "min": [
+      -6.7076921463012695,
+      -6.696152210235596,
+      0
+     ],
+     "max": [
+      6.7076921463012695,
+      6.696152210235596,
+      20
+     ]
+    },
+    "flat": 266
+   },
+   {
+    "id": "sc",
+    "volume": 630,
+    "bbox": {
+     "min": [
+      -6,
+      -3,
+      30
+     ],
+     "max": [
+      6,
+      3,
+      45
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "sd",
+    "volume": 1710,
+    "bbox": {
+     "min": [
+      -9,
+      -4.5,
+      65
+     ],
+     "max": [
+      9,
+      4.5,
+      80
+     ]
+    },
+    "flat": 6
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: tapered extrude, one side, both sides and downwards": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "t1",
+    "volume": 5247.046131174729,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      0
+     ],
+     "max": [
+      20,
+      20,
+      15
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "t2",
+    "volume": 1936.2107252837286,
+    "bbox": {
+     "min": [
+      42,
+      2,
+      0
+     ],
+     "max": [
+      58,
+      18,
+      12
+     ]
+    },
+    "flat": 66
+   },
+   {
+    "id": "t3",
+    "volume": 3726.8130965149853,
+    "bbox": {
+     "min": [
+      80,
+      0,
+      -10
+     ],
+     "max": [
+      100,
+      20,
+      0
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "t4",
+    "volume": 6732.505086496119,
+    "bbox": {
+     "min": [
+      120,
+      0,
+      -8
+     ],
+     "max": [
+      140,
+      20,
+      10
+     ]
+    },
+    "flat": 10
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: thin extrude, inside, outside and centred, with a hole": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "i1",
+    "volume": 2468.217726907276,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      0
+     ],
+     "max": [
+      30,
+      20,
+      10
+     ]
+    },
+    "flat": 140
+   },
+   {
+    "id": "i2",
+    "volume": 2160.0000000000005,
+    "bbox": {
+     "min": [
+      58,
+      -2,
+      0
+     ],
+     "max": [
+      92,
+      22,
+      10
+     ]
+    },
+    "flat": 10
+   },
+   {
+    "id": "i3",
+    "volume": 3000,
+    "bbox": {
+     "min": [
+      118.5,
+      -1.5,
+      0
+     ],
+     "max": [
+      151.5,
+      21.5,
+      10
+     ]
+    },
+    "flat": 10
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: a pipe along lines and arcs, solid and hollow": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "pp",
+    "volume": 1724.72808706417,
+    "bbox": {
+     "min": [
+      0,
+      -3,
+      -3
+     ],
+     "max": [
+      52.99357604980469,
+      20.196208953857422,
+      3
+     ]
+    },
+    "flat": 418
+   },
+   {
+    "id": "ph",
+    "volume": 1217.3636286377405,
+    "bbox": {
+     "min": [
+      0,
+      56,
+      -4
+     ],
+     "max": [
+      40,
+      64,
+      4
+     ]
+    },
+    "flat": 66
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: ribs along a centre line": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 10592,
+    "bbox": {
+     "min": [
+      -30,
+      -20,
+      0
+     ],
+     "max": [
+      30,
+      20,
+      12
+     ]
+    },
+    "flat": 13
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: a coil with a round and a square section": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "c1",
+    "volume": 958.7791747312434,
+    "bbox": {
+     "min": [
+      -11,
+      -11,
+      -1
+     ],
+     "max": [
+      11,
+      11,
+      21
+     ]
+    },
+    "flat": 5762
+   },
+   {
+    "id": "c2",
+    "volume": 803.3452300948867,
+    "bbox": {
+     "min": [
+      41,
+      -9,
+      -1
+     ],
+     "max": [
+      59,
+      9,
+      17
+     ]
+    },
+    "flat": 1154
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: Press/Pull a face out and in, thicken faces, replace a face with a plane": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 27300,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      15,
+      15,
+      26
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "b",
+    "volume": 24840,
+    "bbox": {
+     "min": [
+      60,
+      -15,
+      0
+     ],
+     "max": [
+      96,
+      15,
+      23
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "c",
+    "volume": 31200,
+    "bbox": {
+     "min": [
+      140,
+      -15,
+      0
+     ],
+     "max": [
+      180,
+      15,
+      26
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "d",
+    "volume": 14400,
+    "bbox": {
+     "min": [
+      220,
+      -15,
+      0
+     ],
+     "max": [
+      260,
+      15,
+      12
+     ]
+    },
+    "flat": 6
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: patterns along a path and on a face": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 1080,
+    "bbox": {
+     "min": [
+      -3,
+      -3,
+      0
+     ],
+     "max": [
+      43,
+      33,
+      6
+     ]
+    },
+    "flat": 30
+   },
+   {
+    "id": "b",
+    "volume": 1296,
+    "bbox": {
+     "min": [
+      -3,
+      53,
+      0
+     ],
+     "max": [
+      13,
+      83,
+      6
+     ]
+    },
+    "flat": 36
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: a threaded hole": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 17219.64819587274,
+    "bbox": {
+     "min": [
+      -15,
+      -15,
+      0
+     ],
+     "max": [
+      15,
+      15,
+      20
+     ]
+    },
+    "flat": 2188
+   }
+  ],
+  "surfaces": []
+ },
+ "profiles: a circle inside a rectangle": [
+  {
+   "id": "0.1:0",
+   "defaultOn": false,
+   "area": 112.91574571174687
+  },
+  {
+   "id": "0:0",
+   "defaultOn": true,
+   "area": 1087.084254288253
+  }
+ ],
+ "profiles: two overlapping rectangles": [
+  {
+   "id": "0.1:0",
+   "defaultOn": true,
+   "area": 100
+  },
+  {
+   "id": "0:0",
+   "defaultOn": true,
+   "area": 300
+  },
+  {
+   "id": "1:0",
+   "defaultOn": true,
+   "area": 300
+  }
+ ],
+ "profiles: three nested shapes": [
+  {
+   "id": "0.1.2:0",
+   "defaultOn": true,
+   "area": 100
+  },
+  {
+   "id": "0.1:0",
+   "defaultOn": false,
+   "area": 605.7234103759164
+  },
+  {
+   "id": "0:0",
+   "defaultOn": true,
+   "area": 894.2765896240836
+  }
+ ],
+ "profiles: separate shapes": [
+  {
+   "id": "0:0",
+   "defaultOn": true,
+   "area": 100
+  },
+  {
+   "id": "1:0",
+   "defaultOn": true,
+   "area": 50.184775852193496
+  },
+  {
+   "id": "2:0",
+   "defaultOn": true,
+   "area": 59.441032241618245
+  }
+ ],
+ "profiles: a circle crossing a rectangle": [
+  {
+   "id": "0.1:0",
+   "defaultOn": true,
+   "area": 56.45787285587338
+  },
+  {
+   "id": "0:0",
+   "defaultOn": true,
+   "area": 343.5421271441266
+  },
+  {
+   "id": "1:0",
+   "defaultOn": true,
+   "area": 56.457872855873404
+  }
+ ],
+ "profiles: lines that meet end to end": [
+  {
+   "id": "1000:0",
+   "defaultOn": true,
+   "area": 300
+  }
+ ],
+ "Both backends: extrude overlapping shapes, joined lines and a hand-picked region": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "e1",
+    "volume": 4200,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      0
+     ],
+     "max": [
+      30,
+      30,
+      6
+     ]
+    },
+    "flat": 10
+   },
+   {
+    "id": "e2",
+    "volume": 2139.776806547874,
+    "bbox": {
+     "min": [
+      60,
+      0,
+      0
+     ],
+     "max": [
+      80,
+      19.142000198364258,
+      6
+     ]
+    },
+    "flat": 17
+   },
+   {
+    "id": "e3",
+    "volume": 338.74715560339973,
+    "bbox": {
+     "min": [
+      120,
+      4,
+      0
+     ],
+     "max": [
+      126,
+      16,
+      6
+     ]
+    },
+    "flat": 35
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: an imported mesh (a box with a hole, a sphere, a torus)": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "i1",
+    "volume": 22431.72574927042,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 70
+   },
+   {
+    "id": "i2",
+    "volume": 2132.5499141049954,
+    "bbox": {
+     "min": [
+      52,
+      -8,
+      2
+     ],
+     "max": [
+      68,
+      8,
+      18
+     ]
+    },
+    "flat": 2028
+   },
+   {
+    "id": "i3",
+    "volume": 1762.3014143419086,
+    "bbox": {
+     "min": [
+      107,
+      -13,
+      7
+     ],
+     "max": [
+      133,
+      13,
+      13
+     ]
+    },
+    "flat": 2048
+   }
+  ],
+  "surfaces": []
+ },
+ "mesh tools: separate": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "i",
+    "volume": 22431.72574927042,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 70
+   },
+   {
+    "id": "sep~2",
+    "volume": 2132.5499141049954,
+    "bbox": {
+     "min": [
+      52,
+      -8,
+      2
+     ],
+     "max": [
+      68,
+      8,
+      18
+     ]
+    },
+    "flat": 2028
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: a closed hollow shell, inside, outside and centred": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 9024,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 12
+   },
+   {
+    "id": "b",
+    "volume": 11508.618802153516,
+    "bbox": {
+     "min": [
+      58,
+      -17,
+      -2
+     ],
+     "max": [
+      102,
+      17,
+      22
+     ]
+    },
+    "flat": 120
+   },
+   {
+    "id": "c",
+    "volume": 15436.573557158514,
+    "bbox": {
+     "min": [
+      138.5,
+      -16.5,
+      -1.5
+     ],
+     "max": [
+      181.5,
+      16.5,
+      21.5
+     ]
+    },
+    "flat": 120
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: boundary fill takes the space a hollow body encloses, and where bodies overlap": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 9024,
+    "bbox": {
+     "min": [
+      -20,
+      -15,
+      0
+     ],
+     "max": [
+      20,
+      15,
+      20
+     ]
+    },
+    "flat": 12
+   },
+   {
+    "id": "bf",
+    "volume": 14976,
+    "bbox": {
+     "min": [
+      -18,
+      -13,
+      2
+     ],
+     "max": [
+      18,
+      13,
+      18
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "x",
+    "volume": 7999.999999999999,
+    "bbox": {
+     "min": [
+      90,
+      -10,
+      0
+     ],
+     "max": [
+      110,
+      10,
+      20
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "y",
+    "volume": 8000,
+    "bbox": {
+     "min": [
+      100,
+      -5,
+      5
+     ],
+     "max": [
+      120,
+      15,
+      25
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "bg",
+    "volume": 2250,
+    "bbox": {
+     "min": [
+      100,
+      -5,
+      5
+     ],
+     "max": [
+      110,
+      10,
+      20
+     ]
+    },
+    "flat": 6
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: stretch bodies differently along each axis (the exact kernel facets them)": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "a",
+    "volume": 8000,
+    "bbox": {
+     "min": [
+      -10,
+      -20,
+      5
+     ],
+     "max": [
+      10,
+      20,
+      15
+     ]
+    },
+    "flat": 6
+   },
+   {
+    "id": "c",
+    "volume": 12044.346222049044,
+    "bbox": {
+     "min": [
+      44,
+      -8,
+      -5
+     ],
+     "max": [
+      76,
+      8,
+      25
+     ]
+    },
+    "flat": 66
+   }
+  ],
+  "surfaces": []
+ },
+ "surface: extrude": {
+  "errors": 0,
+  "bodies": [],
+  "surfaces": [
+   {
+    "id": "se",
+    "area": 491.22649840987884,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      -4
+     ],
+     "max": [
+      45,
+      10,
+      4
+     ]
+    }
+   }
+  ]
+ },
+ "surface: revolve": {
+  "errors": 0,
+  "bodies": [],
+  "surfaces": [
+   {
+    "id": "sr",
+    "area": 1754.19927041156,
+    "bbox": {
+     "min": [
+      -15,
+      0,
+      -15
+     ],
+     "max": [
+      15,
+      20,
+      15
+     ]
+    }
+   }
+  ]
+ },
+ "surface: sweep": {
+  "errors": 0,
+  "bodies": [],
+  "surfaces": [
+   {
+    "id": "ss",
+    "area": 1542.362448868324,
+    "bbox": {
+     "min": [
+      0,
+      -4,
+      -4
+     ],
+     "max": [
+      53.99142837524414,
+      20.26169776916504,
+      4
+     ]
+    }
+   }
+  ]
+ },
+ "surface: loft": {
+  "errors": 0,
+  "bodies": [],
+  "surfaces": [
+   {
+    "id": "sl",
+    "area": 1212.5192678424924,
+    "bbox": {
+     "min": [
+      -10,
+      -10,
+      0
+     ],
+     "max": [
+      10,
+      10,
+      20
+     ]
+    }
+   }
+  ]
+ },
+ "surface: stitch six faces into a solid": {
+  "errors": 0,
+  "bodies": [],
+  "surfaces": [
+   {
+    "id": "x1",
+    "area": 400,
+    "bbox": {
+     "min": [
+      0,
+      0,
+      0
+     ],
+     "max": [
+      10,
+      10,
+      10
+     ]
+    }
+   }
+  ]
+ },
+ "surface: thicken": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "tk",
+    "volume": 447.19301655103936,
+    "bbox": {
+     "min": [
+      0,
+      -2,
+      0
+     ],
+     "max": [
+      22,
+      10,
+      8
+     ]
+    },
+    "flat": 10
+   }
+  ],
+  "surfaces": []
+ },
+ "Both backends: sweep and pipe along smoothed paths, 3D sketches and closed shapes": {
+  "errors": 0,
+  "bodies": [
+   {
+    "id": "sw1",
+    "volume": 691.5047636065038,
+    "bbox": {
+     "min": [
+      0,
+      -2,
+      -2
+     ],
+     "max": [
+      50,
+      17,
+      2
+     ]
+    },
+    "flat": 1090
+   },
+   {
+    "id": "pp",
+    "volume": 688.1750463296892,
+    "bbox": {
+     "min": [
+      0,
+      38,
+      -2
+     ],
+     "max": [
+      50,
+      57,
+      2
+     ]
+    },
+    "flat": 546
+   },
+   {
+    "id": "p3",
+    "volume": 437.9749703982031,
+    "bbox": {
+     "min": [
+      0,
+      78.5,
+      -1.5
+     ],
+     "max": [
+      40,
+      101.5,
+      11.5
+     ]
+    },
+    "flat": 98
+   }
+  ],
+  "surfaces": []
+ }
+}

@@ -1,0 +1,5 @@
+{
+  "addins": [
+    { "id": "openscad", "files": ["manifest.json", "main.js", "scad.js", "export.js", "README.md", "LICENSE"] }
+  ]
+}

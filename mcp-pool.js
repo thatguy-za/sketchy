@@ -5,6 +5,7 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 
 const workerFile = fileURLToPath(new URL('./mcp-worker.js', import.meta.url));
+const STORAGE_OPS = new Set(['list', 'read', 'write', 'saveVersion', 'versions', 'readVersion', 'restoreVersion', 'undo', 'requests', 'requestDone', 'live', 'ui']); // all a worker may ask the main thread for
 const fail = (kind, message) => Object.assign(new Error(message), { kind });
 
 /**
@@ -23,7 +24,7 @@ export function createPool({ storage, size = 2, timeoutMs = 20000, memoryMb = 51
     slot.w.on('message', async (m) => {
       if (m.type === 'ready') { slot.ready = true; return; }
       if (m.type === 'storage') {
-        try { slot.w.postMessage({ type: 'storage-result', id: m.id, value: await storage[m.op](...m.args) }); }
+        try { if (!STORAGE_OPS.has(m.op)) throw new Error('Unknown storage operation.'); slot.w.postMessage({ type: 'storage-result', id: m.id, value: await storage[m.op](...m.args) }); }
         catch (e) { slot.w.postMessage({ type: 'storage-result', id: m.id, error: e.message || String(e) }); }
         return;
       }

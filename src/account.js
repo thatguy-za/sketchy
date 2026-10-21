@@ -31,6 +31,7 @@ export async function refreshAccount() {
   acct.registration = acct.server ? r.data.registration !== false : false;
   acct.setup = !!(acct.server && r.data.setup);
   acct.created = acct.server ? r.data.created || 0 : 0;
+  acct.mcp = acct.server ? r.data.mcp !== false : false; // may assistants connect to this server?
   renderAccountButton();
   onAccountChange?.();
 }
@@ -432,6 +433,7 @@ export async function showAdmin(startTab = 'registration') {
         <label class="chk"><input type="checkbox" id="ad-reg"> Allow new people to register</label>
         <div class="hint">Off by default. When it is off, add people yourself on the Users tab.</div>
         <label class="chk"><input type="checkbox" id="ad-mcp"> Allow AI assistants to connect (MCP)</label>
+        <label class="chk"><input type="checkbox" id="ad-addins"> Allow people to install their own add-ins</label>
         <div class="hint">People create their own access tokens under Account, and each token only reaches that person's designs.</div>
         <h3 class="mh3">Storage</h3>
         <div class="ad-lock"><label>Default storage per person<input type="number" id="ad-quota" min="0" max="10000000" step="1" inputmode="numeric"></label><span>MB (0 = no limit)</span></div>
@@ -473,10 +475,12 @@ export async function showAdmin(startTab = 'registration') {
   const msg = $m('#ad-msg'), msgReg = $m('#ad-msg-reg'), msgSec = $m('#ad-msg-sec'), host = $m('#ad-table');
   const st = await call('GET', '/admin/settings');
   // ---- registration
-  const reg = $m('#ad-reg'), mcp = $m('#ad-mcp');
+  const reg = $m('#ad-reg'), mcp = $m('#ad-mcp'), addins = $m('#ad-addins');
   reg.checked = !!st.data?.allowRegistration;
   reg.onchange = async () => { await call('PUT', '/admin/settings', { allowRegistration: reg.checked }); msgReg.textContent = 'Saved.'; await refreshAccount(); };
   mcp.checked = st.data?.allowMcp !== false;
+  addins.checked = st.data?.allowAddins !== false;
+  addins.onchange = async () => { await call('PUT', '/admin/settings', { allowAddins: addins.checked }); msgReg.textContent = 'Saved.'; };
   mcp.onchange = async () => { await call('PUT', '/admin/settings', { allowMcp: mcp.checked }); msgReg.textContent = 'Saved.'; };
   // ---- security
   const lim = { max: $m('#ad-max'), win: $m('#ad-win'), lock: $m('#ad-lockmin') };

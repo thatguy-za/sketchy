@@ -15,7 +15,7 @@ RUN npm run build && mkdir -p /data-empty
 FROM --platform=${BUILDPLATFORM:-linux/amd64} node:22-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
-# runtime needs only the modelling kernel (manifold-3d + three's triangulation) for the MCP server; the other browser libraries are bundled into dist
+# runtime needs only the modelling kernel (replicad and OpenCascade, the 23 MB WebAssembly file included) for the MCP server; the other browser libraries are bundled into dist
 RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:22-alpine
@@ -24,7 +24,7 @@ ENV NODE_ENV=production DATA_DIR=/data PORT=8080 SKETCHY_DROP_ROOT=1
 COPY package*.json ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY server.js design-validate.js oauth.js mcp.js mcp-tools.js mcp-validate.js mcp-pool.js mcp-worker.js ./
+COPY server.js design-validate.js addin-validate.js oauth.js mcp.js mcp-defs.js mcp-tools.js mcp-validate.js mcp-pool.js mcp-worker.js ./
 COPY src ./src
 COPY --from=build --chown=node:node /data-empty /data
 VOLUME /data

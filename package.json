@@ -1,6 +1,6 @@
 {
   "name": "sketchy",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -9,13 +9,16 @@
     "test:robustness": "node scripts/robustness.mjs",
     "test:security": "node scripts/security-test.mjs",
     "test:mcp-limits": "node scripts/mcp-limits-test.mjs",
+    "test:mcp-tools": "node scripts/mcp-tools-test.mjs",
+    "test:openscad": "node scripts/openscad-test.mjs",
     "start": "vite build && node server.js",
     "app": "vite",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "manifold-3d": "^3.5.4",
+    "replicad": "^1.1.0",
+    "replicad-opencascadejs": "^1.1.0",
     "three": "^0.186.1"
   },
   "devDependencies": {

@@ -2,11 +2,15 @@ import './style.css';
 import * as THREE from 'three';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
-import { initKernel, rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference, compareBodies } from './kernel.js';
+import { loadBrep, brepSupport, brepReady, replicad, exactStep, profilesOfExact, interferenceOf, compareResults } from './backend-brep.js';
+import { rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { writeSTL } from './stl.js';
 import { readModelFile } from './importers.js';
-import wasmUrl from 'manifold-3d/manifold.wasm?url';
+import runtimeSource from './addin-runtime.js?raw';
+import { createAddinManager } from './addins-ui.js';
+import { buildTree } from './csg-service.js';
+import occtUrl from 'replicad-opencascadejs/wasm?url'; // OpenCascade, 23 MB: only fetched when an exact STEP export needs it
 import { evaluate as evaluateDoc } from './headless.js';
 import { initA11y } from './a11y.js';
 import { initTheme, getTheme, setTheme, onTheme } from './theme.js';
@@ -27,6 +31,7 @@ import { createSketchUI } from './sketchui.js';
 import { smoothPath } from './solids.js';
 import { bedFit, overhangs, wallThickness } from './printcheck.js';
 import { withoutSkins } from './skins.js';
+import { createAssistant, toolPast } from './assistant.js';
 import { MATERIALS, TEXTURES, textureById, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
 import { resolveSketch } from './sketchdims.js';
 import { CON_GLYPH, CON_LABEL, definedState } from './sketchcons.js';
@@ -58,6 +63,7 @@ let selFeature = null;           // timeline selection (primary)
 let selSet = new Set();          // timeline multi-selection
 let paramState = { values: {}, errors: {} };
 let resolvedMap = {};
+let resolvedFeats = []; // the features as the kernel last saw them (parameters and planes resolved)
 let measure = null;
 let navMode = 'orbit';
 let SU = null;
@@ -74,6 +80,9 @@ let selPriority = prefPriority;
 const savePriority = (v) => { prefPriority = v; try { localStorage.setItem('sketchy.selPriority', v); } catch { /* storage unavailable */ } };
 let selMode = 'click';           // click | window | freeform | paint (drag-selection tools)
 let selFace = null;
+let addins = null; // the add-in manager (src/addins-ui.js)
+let aiFlash = new Set(); // features the assistant just changed (pulsed in the timeline for a few seconds)
+let assistant = null;
 let paintMode = null; // Appearance picked with nothing selected: { val, target: 'faces' | 'bodies' }; each click applies it, Esc finishes
 let viewBodies = [], skinCount = 0, skinWarned = false; // what the viewport draws, and how many triangles of zero-thickness walls were left out of it
 let selFaceB = null; // a second flat face (Shift or Ctrl-click) to measure against; only valid while selFace is still the face it was added to
@@ -125,7 +134,7 @@ function ensureKernelWorker() {
     kw.worker = new Worker(new URL('./kernel-worker.js', import.meta.url), { type: 'module' });
     kw.worker.onmessage = onKernelMessage;
     kw.worker.onerror = (e) => { console.error(e); stopKernelWorker(); kernelHeavy = false; toast('The background rebuild failed, so Sketchy went back to rebuilding on the page.', true); refresh(); };
-    kw.worker.postMessage({ type: 'init', wasmUrl });
+    kw.worker.postMessage({ type: 'init', occtUrl });
   } catch (e) { console.error(e); kw.worker = null; kernelHeavy = false; }
 }
 function stopKernelWorker() {
@@ -152,7 +161,9 @@ function onKernelMessage(e) {
   const run = kw.running;
   if (!run || m.id !== run.id) return; // an answer for a request that was stopped
   kw.running = null;
-  if (m.type === 'error') { console.error(m.message); toast('Kernel error: ' + m.message, true); } else {
+  if (m.type === 'error') {
+    console.error(m.message); toast('Kernel error: ' + m.message, true);
+  } else {
     const res = m.result;
     const missing = res.bodies.some((b) => !b.verts && !kw.meshes.has(b.key));
     if (missing) { sendRebuild(run.req, true); return; } // the page lost a mesh the worker thought it had: ask for everything again
@@ -209,6 +220,7 @@ function refreshNow() {
     }
   });
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
+  resolvedFeats = feats;
   vp.setCanvases((doc.canvases || []).map((c) => ({ ...c, hidden: canvasHidden.has(c.id) })));
   vp.setConstructionLines(feats.filter((f, i) => (f.type === 'axis' || f.type === 'cpoint') && !f.suppressed && !f.params.error && i < limit()).map((f) => (f.type === 'axis' ? { id: f.id, kind: 'axis', origin: f.params.origin, dir: f.params.dir, hidden: planeHidden.has(f.id) } : { id: f.id, kind: 'point', origin: (f.params.pos || [0, 0, 0]).map(Number), hidden: planeHidden.has(f.id) })));
   vp.setConstructionPlanes(feats.filter((f, i) => f.type === 'plane' && !f.suppressed && i < limit()).map((f) => ({ id: f.id, name: f.name, origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir, hidden: planeHidden.has(f.id) })));
@@ -252,7 +264,7 @@ function applyResult(evalErr) {
 function profilesFor(sk) {
   const params = resolvedMap[sk.id] || sk.params;
   let r = profileCache.get(params);
-  if (!r) { try { r = profilesOf({ ...sk, params }); } catch { r = []; } profileCache.set(params, r); }
+  if (!r) { try { r = profilesOfExact({ ...sk, params }); } catch { r = []; } profileCache.set(params, r); }
   return r;
 }
 function effectiveProfiles(df, sk) {
@@ -501,6 +513,7 @@ const CUSTOM = {
   canvas: () => pickCanvasImage(),
   cfg1: () => showConfigurations(), cfg3: (ev) => showConfigMenu(ev?.currentTarget),
   importstl: () => $('#file-stl').click(),
+  addins: () => (addins ? addins.showDialog() : toast('Add-ins are still loading. Try again in a moment.', true)),
   repairimport: () => $('#file-repair').click(),
   measure: () => startMeasure('dist'), angle: () => startMeasure('angle'), edgelen: () => startMeasure('edge'), faces: () => startMeasure('faces'),
   properties: () => showInfo(),
@@ -529,6 +542,7 @@ function runCommand(id, ev) {
   if (selFace?.curved && (id === 'extrude' || id === 'sketch')) return toast('A sketch or Press/Pull needs a flat face. Pick a flat face, or use a plane.', true);
   if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
   if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
+  if (c.addinCommand) { lastCmd = id; return runAddinCommand(c); }
   if (c.feature) { lastCmd = id; return startFeature(c.feature, c.preset); }
   CUSTOM[id]?.(ev);
   if (!['select', 'finishsketch', 'cancelpick'].includes(id)) lastCmd = id;
@@ -564,6 +578,7 @@ function sketchOnSelectedFace() {
 }
 function renderRibbon() {
   apPanel?.sync();
+  queueLive();
   renderStatus(); // the status line follows the selection (two faces show the distance between them)
   vp.hold('sketch', !!sketch);
   const picking = !!sketch?.picking, inSketch = !!sketch && !picking;
@@ -708,8 +723,8 @@ function renderTimeline() {
   doc.features.forEach((f, i) => {
     if (i === shownMarker && !sketch) host.appendChild(mk());
     const el = document.createElement('div');
-    el.className = 'tl-item' + (i >= shownMarker ? ' off' : '') + (result.errors[f.id] ? ' err' : result.warnings?.[f.id] ? ' warn' : '') + (selSet.has(f.id) ? ' sel' : '') + (f.suppressed ? ' supp' : '');
-    el.title = f.name + (result.errors[f.id] ? ` — ${result.errors[f.id]}` : '') + (result.warnings?.[f.id] ? ` — ${result.warnings[f.id].map((w) => w.text).join(' ')}` : '') + (result.notes?.[f.id] && !result.errors[f.id] ? ` — ${result.notes[f.id].text}` : '');
+    el.className = 'tl-item' + (i >= shownMarker ? ' off' : '') + (result.errors[f.id] ? ' err' : result.warnings?.[f.id] ? ' warn' : '') + (selSet.has(f.id) ? ' sel' : '') + (f.suppressed ? ' supp' : '') + (f.by === 'assistant' ? ' ai' : '') + (aiFlash.has(f.id) ? ' ai-new' : '');
+    el.title = (f.by === 'assistant' ? 'Added or changed by the assistant · ' : '') + f.name + (result.errors[f.id] ? ` — ${result.errors[f.id]}` : '') + (result.warnings?.[f.id] ? ` — ${result.warnings[f.id].map((w) => w.text).join(' ')}` : '') + (result.notes?.[f.id] && !result.errors[f.id] ? ` — ${result.notes[f.id].text}` : '');
     el.innerHTML = ficon(fiName(f), 24);
     el.onclick = (e) => { if (tlDragged) { tlDragged = false; return; } selectFeature(f.id, e); };
     el.ondblclick = () => editFeature(i);
@@ -1179,14 +1194,14 @@ function startFeature(key, overrides = {}) {
   const params = { ...def.make(c), ...overrides };
   if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
   if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
-  if (selFace?.curved && !selEdges.length && ['fillet', 'chamfer', 'presspull', 'hole', 'shell', 'draft'].includes(key)) return toast('That tool needs a flat face (or edges). A curved face can be given an appearance.', true);
+  if (selFace?.curved && !selEdges.length && ['fillet', 'chamfer', 'presspull', 'hole', 'shell', 'draft'].includes(key) && !(key === 'shell' && selFace.brepFace)) return toast('That tool needs a flat face (or edges). A curved face can be given an appearance.', true);
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
     params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
     if (!params.edges.length) toast('That face has no edges to round.', true);
     selEdges = []; edgeHover = null; selFace = null; vp.showFaces([], null); updateEdgeView();
   }
   if (selFace) {
-    const fc = { point: selFace.point, normal: selFace.normal };
+    const fc = { point: selFace.point, normal: selFace.normal, ...(selFace.brepFace ? { brepFace: selFace.brepFace } : {}) }; // the face key lets the exact kernel find the face again; the point and normal serve the mesh kernel
     if (key === 'presspull') { params.face = fc; params.body = selFace.id; }
     else if (key === 'hole') { params.pos = [...selFace.point]; params.dir = [...selFace.normal]; }
     else if (key === 'shell') { params.body = selFace.id; params.open = [fc]; }
@@ -1420,8 +1435,8 @@ function renderDialog() {
       ctl.innerHTML = `<div class="profrow"><div class="selbtn on"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 3l12 11.5-5.2.7 3 5.6-2.6 1.4-3-5.7-4.2 3.2z" fill="#fff" stroke="#333" stroke-width="1.4" stroke-linejoin="round"/></svg><span>${items.length ? `${chosen} selected` : 'No closed profiles'}</span></div><button type="button" class="xclear" title="Reset to the default selection">×</button></div>`;
       ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
     } else if (fld.type === 'bodies') {
-      const avail = bodiesBefore(idx);
-      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
+      const avail = bodiesBefore(idx).filter((q) => q.id !== f.params.target), cur = Array.isArray(val) ? val : val ? [val] : []; // older designs stored one body as text
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${cur.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
       ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'surfaces') {
       const avail = result.surfSnaps?.[idx] || result.surfaces.map((q) => ({ id: q.id, name: q.name }));
@@ -1442,6 +1457,10 @@ function renderDialog() {
       ctl.querySelector('#p3-clear').onclick = () => { set([]); renderDialog(); };
       ctl.querySelectorAll('input[data-k]').forEach((inp) => (inp.onchange = () => { const k = +inp.dataset.k, a = +inp.dataset.a, n = [...pts]; n[k] = [...n[k]]; n[k][a] = (+inp.value || 0) * f2; set(n); }));
       ctl.querySelectorAll('.p3-del').forEach((b2) => (b2.onclick = () => { set(pts.filter((_, k) => k !== +b2.dataset.k)); renderDialog(); }));
+    } else if (fld.type === 'text') {
+      const inp = document.createElement('input'); inp.type = 'text'; inp.value = val ?? ''; inp.maxLength = 80; inp.setAttribute('aria-label', fld.label); inp.autocomplete = 'off'; inp.spellcheck = false;
+      inp.oninput = () => set(inp.value);
+      ctl.appendChild(inp);
     } else if (fld.type === 'bool') {
       const c = document.createElement('input'); c.type = 'checkbox'; c.setAttribute('aria-label', fld.label); c.checked = !!val; c.onchange = () => { set(c.checked); if (['thread', 'through', 'internal'].includes(fld.key)) rerender(); }; ctl.appendChild(c);
     } else if (fld.type === 'sketchlist') {
@@ -1548,7 +1567,7 @@ function dialogPick(e) {
   const tg = vp.pickPlanarFace(e);
   if (!tg) return;
   if (tg.curved) return toast('Pick a flat (planar) face.', true);
-  const entry = { point: tg.point, normal: tg.normal };
+  const entry = { point: tg.point, normal: tg.normal, ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) };
   if (pk.kind === 'face') patchParams(i, { [pk.key]: entry, body: tg.id });
   else {
     const cur = f.params[pk.key] || [];
@@ -1659,6 +1678,7 @@ function closeDialog(ok, force = false) {
   if (ok) {
     const f = doc.features[dialog.index];
     if (f.type === 'extrude' && f.params.extent === 'distance') LAST.extrude = Math.abs((resolvedMap[f.id] || f.params).distance) || undefined;
+    if (f.by && JSON.stringify(f.params) !== JSON.stringify(pre.features[dialog.index]?.params)) { const nf = { ...f }; delete nf.by; doc.features[dialog.index] = nf; } // you changed it: it is yours now
     pushUndo(pre);
   } else restore(pre);
   dialog = null;
@@ -1758,7 +1778,7 @@ function sketchStateChip(shapes, cons) {
   const d = definedState(shapes, cons);
   if (d.state === 'empty') return '';
   const label = { defined: 'Fully defined', partial: 'Partly defined', free: 'Not defined yet' }[d.state];
-  const tip = d.state === 'defined' ? 'Every size and direction is locked by a dimension expression or a constraint.' : `Not locked yet: ${d.free.slice(0, 12).join(', ')}${d.free.length > 12 ? '…' : ''}. Lock a size by typing a parameter in its dimension, or add a constraint. The sketch's position is not counted.`;
+  const tip = d.state === 'defined' ? 'Every size and direction is locked by a dimension expression or a constraint.' : `Not locked yet: ${d.free.slice(0, 12).join(', ')}${d.free.length > 12 ? '…' : ''}. Lock a size by typing a parameter in its dimension, or add a constraint. Where the first shape sits is not counted.`;
   return `<div class="sk-state sk-${d.state}" title="${esc(tip)}"><span class="dot"></span>${label} <small>${d.locked} of ${d.total} locked</small></div>`;
 }
 function renderSketchPanel() {
@@ -2118,7 +2138,7 @@ function measureClick(e) {
 function showInterference() {
   if (dialog || sketch) return;
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id));
-  const hits = bodies.length > 1 ? interference(bodies) : [];
+  const hits = bodies.length > 1 ? interferenceOf(bodies) : [];
   const wrap = $('#props-wrap');
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('combine', 20)}INTERFERENCE</div><div class="body">${
     bodies.length < 2 ? 'Needs at least two visible bodies.' : hits.length ? `<div class="stat"><span>Interfering pairs</span><b class="warn">${hits.length}</b></div>` + hits.map((h) => `<div class="sep"></div><b>${esc(h.a.name)} ∩ ${esc(h.b.name)}</b><div class="stat"><span>Overlap volume</span><b>${fmtVolume(h.volume)}</b></div>`).join('') : '<div class="stat"><span>Result</span><b class="ok">No interference</b></div>'
@@ -2150,13 +2170,13 @@ function showDriveJoints() {
   $('#i-close').onclick = () => { wrap.classList.remove('open'); };
 }
 /** The stored appearance of a face (doc.faceAppearance), matched by body and plane. */
-const faceEntryIdx = (f) => (doc.faceAppearance || []).findIndex((e) => e.body === f.id && (f.curved ? e.curved && Math.hypot(e.point[0] - f.point[0], e.point[1] - f.point[1], e.point[2] - f.point[2]) < 0.05 : !e.curved) && e.normal[0] * f.normal[0] + e.normal[1] * f.normal[1] + e.normal[2] * f.normal[2] > 0.999 && Math.abs((e.point[0] - f.point[0]) * f.normal[0] + (e.point[1] - f.point[1]) * f.normal[1] + (e.point[2] - f.point[2]) * f.normal[2]) < 0.05);
+const faceEntryIdx = (f) => (doc.faceAppearance || []).findIndex((e) => e.body === f.id && (f.brepFace && e.brepFace ? e.brepFace === f.brepFace : true) && (f.curved ? e.curved && Math.hypot(e.point[0] - f.point[0], e.point[1] - f.point[1], e.point[2] - f.point[2]) < 0.05 : !e.curved) && e.normal[0] * f.normal[0] + e.normal[1] * f.normal[1] + e.normal[2] * f.normal[2] > 0.999 && Math.abs((e.point[0] - f.point[0]) * f.normal[0] + (e.point[1] - f.point[1]) * f.normal[1] + (e.point[2] - f.point[2]) * f.normal[2]) < 0.05);
 const texPreview = (t) => { try { const c = document.createElement('canvas'); c.width = c.height = 48; const x = c.getContext('2d'); const big = document.createElement('canvas'); big.width = big.height = 256; t.draw(big.getContext('2d'), 256); x.fillStyle = x.createPattern(big, 'repeat'); x.scale(48 / 128, 48 / 128); x.fillRect(0, 0, 128, 128); return c.toDataURL(); } catch { return ''; } };
 function setFaceAppearance(face, val) {
   const any = !!(val.material || val.color || val.texture);
   mutate(() => {
     const list = (doc.faceAppearance || []).map((x) => ({ ...x })), i = faceEntryIdx(face);
-    if (!any) { if (i >= 0) list.splice(i, 1); } else { const ent = { body: face.id, point: [...face.point], normal: [...face.normal], ...(face.curved ? { curved: true } : {}), ...val }; if (i >= 0) list[i] = ent; else list.push(ent); }
+    if (!any) { if (i >= 0) list.splice(i, 1); } else { const ent = { body: face.id, point: [...face.point], normal: [...face.normal], ...(face.curved ? { curved: true } : {}), ...(face.brepFace ? { brepFace: face.brepFace } : {}), ...val }; if (i >= 0) list[i] = ent; else list.push(ent); }
     doc.faceAppearance = list;
   });
 }
@@ -2170,7 +2190,7 @@ function paintClick(e) {
   if (paintMode.target === 'faces') {
     const tg = vp.pickFace(e);
     if (!tg?.face) return;
-    setFaceAppearance({ id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) }, paintMode.val);
+    setFaceAppearance({ id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}), ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) }, paintMode.val);
   } else {
     const hit = vp.pickBody(e);
     if (hit) setBodyAppearance([hit.id], paintMode.val);
@@ -2528,14 +2548,28 @@ const EXPORT_FORMATS = [
   ['3mf', '3MF', 'Recommended for 3D printing. Keeps units and colours, and opens in every slicer.'],
   ['stl', 'STL', 'Works everywhere, but has no units or colours.'],
   ['obj', 'OBJ', ''],
-  ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
+  ['step', 'STEP', 'For other CAD programs. Exact (true cylinders, fillets and holes) when the design uses only sketches, extrude, revolve, combine, fillet, chamfer, holes, mirror and patterns; otherwise curved surfaces are small flat facets, and you are told which feature caused it.'],
   ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
 ];
+/** The formats Export offers: the built-in ones, then the ones add-ins add. */
+function exportFormats() { return [...EXPORT_FORMATS, ...(addins ? addins.exporters().map((e) => [e.value, e.label, e.description, e.extension]) : [])]; }
+async function exportViaAddin(fmt, name, selectedOnly) {
+  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id)));
+  if (!bodies.length) return toast('Nothing to export.', true);
+  try {
+    const out = await addins.runExporter(fmt, { name, units: getUnits(), parameters: (doc.params || []).map((p) => ({ name: p.name, expr: p.expr })), bodies: bodies.map((b) => ({ id: b.id, name: b.name, color: look((doc.appearance || {})[b.id]).color, verts: b.verts, tris: b.tris })) });
+    const ext = (out.name.match(/\.[A-Za-z0-9]+$/) || [''])[0];
+    download(new Blob([out.text !== undefined ? out.text : out.bytes], { type: out.mime || 'application/octet-stream' }), `${name}${ext}`);
+    toast(`Exported "${name}${ext}"`);
+  } catch (e) { toast(`Export failed: ${e.message}`, true); }
+}
 function exportFile(fmt, name, selectedOnly, split = false) {
+  if (fmt.startsWith('addin:')) return exportViaAddin(fmt, name, selectedOnly);
   if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: look((doc.appearance || {})[b.id]).color }));
   if (!bodies.length) return toast('Nothing to export.', true);
-  const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
+  if (fmt === 'step') { exportStep(bodies, name, split); return; }
+  const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ }[fmt];
   if (split && bodies.length > 1) { // one file per body: "Name_v3_Lid.stl", numbered if two bodies share a name
     const used = new Map();
     bodies.forEach((b, i) => {
@@ -2547,7 +2581,33 @@ function exportFile(fmt, name, selectedOnly, split = false) {
     return;
   }
   download(w(bodies, name), `${name}.${fmt}`);
-  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}`);
+  toast(`Exported ${bodies.length} ${bodies.length > 1 ? 'bodies' : 'body'} as ${fmt.toUpperCase()}`);
+}
+/**
+ * STEP: exact (real planes, cylinders and fillets) when the exact kernel supports every feature of the design, otherwise the faceted file
+ * with a message that names the feature that kept it from being exact. The 23 MB OpenCascade file is fetched only here, then cached.
+ */
+async function exportStep(bodies, name, split) {
+  const feats = resolvedFeats.slice(0, limit());
+  const sup = brepSupport(feats);
+  const noun = `${bodies.length} ${bodies.length > 1 ? 'bodies' : 'body'}`;
+  const faceted = (why) => {
+    if (split && bodies.length > 1) bodies.forEach((b, i) => setTimeout(() => download(writeSTEP([b], `${name}_${fileSafeName(b.name) || 'body' + (i + 1)}`), `${name}_${fileSafeName(b.name) || 'body' + (i + 1)}.step`), i * 300));
+    else download(writeSTEP(bodies, name), `${name}.step`);
+    toast(`Exported ${noun} as a faceted STEP file. ${why}`);
+  };
+  if (!sup.ok) return faceted(`Not exact: ${sup.feature.name} uses ${sup.reason}, which the exact kernel does not have yet.`);
+  toast('Preparing an exact STEP file…');
+  try {
+    await loadBrep({ locateFile: () => occtUrl });
+    const groups = split && bodies.length > 1 ? bodies.map((b) => [b]) : [bodies];
+    groups.forEach((g, i) => {
+      const { blob } = exactStep(feats, { ids: g.map((b) => b.id), name });
+      const file = split && bodies.length > 1 ? `${name}_${fileSafeName(g[0].name) || 'body' + (i + 1)}` : name;
+      setTimeout(() => download(blob, `${file}.step`), i * 300);
+    });
+    toast(`Exported ${noun} as an exact STEP file`);
+  } catch (e) { console.error(e); faceted(`Not exact: ${e.message}`); }
 }
 /** "_v3" for a saved design, so an exported file says which version it came from. */
 const verSuffix = () => (doc.rev ? `_v${doc.rev}` : '');
@@ -2562,7 +2622,7 @@ function exportDialog() {
   if (dialog || sketch) return;
   if (kernelBusy()) return toast('Still rebuilding the design. Try again in a moment.', true);
   let last = '3mf'; try { last = localStorage.getItem('sketchy.exportFormat') || '3mf'; } catch { /* storage unavailable */ }
-  if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = '3mf';
+  if (!exportFormats().some((f) => f[0] === last)) last = '3mf';
   const hasSel = vp.selected.size > 0;
   /** The design's name, then the body's name when only one body of several is exported, then the version: "Bracket_Lid_v3". */
   const nameFor = (selectedOnly, split = false) => {
@@ -2573,7 +2633,7 @@ function exportDialog() {
   const m = modal(`<div class="modal-title">Export</div>
     <form class="modal-body ex">
       <label>File name<input id="ex-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
-      <label>Format<select id="ex-fmt" name="fmt">${EXPORT_FORMATS.map(([v, l]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + v})</option>`).join('')}</select></label>
+      <label>Format<select id="ex-fmt" name="fmt">${exportFormats().map(([v, l, , x]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + (x || v)})</option>`).join('')}</select></label>
       <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
       <div class="ex-check" id="ex-check" aria-live="polite" hidden></div>
       <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
@@ -2584,7 +2644,7 @@ function exportDialog() {
   const form = m.el.querySelector('form'), fmtSel = m.el.querySelector('#ex-fmt');
   const sync = () => {
     const f = fmtSel.value, proj = f === 'sketchy';
-    const d = (EXPORT_FORMATS.find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
+    const d = (exportFormats().find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
     de.textContent = d; de.hidden = !d;
     m.el.querySelector('#ex-sel').disabled = proj || !hasSel; m.el.querySelector('#ex-scope').style.opacity = proj || !hasSel ? '.55' : '';
     runChecks();
@@ -2641,10 +2701,18 @@ function exportDialog() {
 /** Rebuild the design now, and wait for it (the page rebuilds in place; a big design rebuilds in the worker). */
 async function rebuildNow() { refreshNow(); if (kernelHeavy && canWorker) await kernelIdle(); }
 async function importPart(part) {
+  if (part.stepText && brepReady()) { // a STEP file keeps its true surfaces (the exact kernel reads it)
+    const pre = snapshot(), f = { id: 'f' + doc.nextId++, type: 'importstep', name: part.name, params: { data: part.stepText } };
+    doc.features.splice(doc.marker, 0, f); doc.marker++;
+    pushUndo(pre);
+    await rebuildNow();
+    if (!result.errors[f.id]) return { tris: part.soup.length / 9, note: 'kept as exact surfaces', exact: true, id: f.id };
+    restore(pre); undoStack.pop(); // could not read it exactly: fall back to its triangles
+  }
   let soup = part.soup;
   const attempt = async (data) => {
     const pre = snapshot();
-    const f = { id: 'f' + doc.nextId++, type: 'import', name: part.name, params: { data: encodeFloats(data), tris: data.length / 9 } };
+    const f = { id: 'f' + doc.nextId++, type: 'import', name: part.name, params: { data: encodeFloats(data), tris: data.length / 9, ...(part.reduce ? { reduce: part.reduce } : {}) } };
     doc.features.splice(doc.marker, 0, f); doc.marker++;
     pushUndo(pre);
     await rebuildNow();
@@ -2653,6 +2721,7 @@ async function importPart(part) {
     return { id: f.id };
   };
   let r = await attempt(soup), note = '';
+  if (r.err && /flat faces once neighbouring/.test(r.err)) return { err: r.err, limit: true }; // too many faces: repairing cannot help, reducing can
   if (r.err) {
     const fixed = repairSoup(soup);
     r = await attempt(fixed.soup);
@@ -2695,8 +2764,8 @@ function repairDialog(part, why = '') {
   });
 }
 // ---- importing big models: say what is happening, offer to cancel, and offer to reduce a very dense mesh
-const IMPORT_WARN = 300000; // triangles: above this a model makes editing noticeably slower
-const IMPORT_TARGET = 250000;
+const IMPORT_WARN = 20000; // triangles: above this a mesh takes long to sew into a solid (about 0.5 s per thousand faces) and may be over the limit
+const IMPORT_TARGET = 10000;
 const tick = () => new Promise((r) => setTimeout(r, 30)); // let the page paint between steps
 function importProgress(name) {
   const el = document.createElement('div');
@@ -2714,8 +2783,8 @@ function askLargeImport(name, tris) {
     let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
     const keep = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / tris) * 100)));
     const m = modal(`<div class="modal-title">Large model</div>
-      <div class="modal-body"><p class="p0"><b>${esc(name)}</b> has ${tris.toLocaleString()} triangles. Editing and rebuilding get slower the denser a model is, and most designs do not need more than about ${IMPORT_TARGET.toLocaleString()}.</p>
-      <p class="p0">Importing with a <b>Reduce</b> step keeps about ${keep}% of the triangles. It is a step in the timeline, so you can change the amount or turn it off later.</p>
+      <div class="modal-body"><p class="p0"><b>${esc(name)}</b> has ${tris.toLocaleString()} triangles. A mesh becomes a solid made of flat faces, and sewing and editing that gets slower the denser it is; more than about ${(IMPORT_TARGET + 2000).toLocaleString()} faces is refused. Most designs do not need more than about ${IMPORT_TARGET.toLocaleString()} triangles.</p>
+      <p class="p0">Importing with a <b>Reduce</b> keeps about ${keep}% of the triangles (the import step remembers the amount, so you can change it later).</p>
       <div class="modal-foot flush"><button type="button" class="btn primary" id="li-reduce">Import and reduce to ~${keep}%</button><button type="button" class="btn" id="li-asis">Import as it is</button><button type="button" class="btn" id="li-cancel">Cancel</button></div></div>`);
     m.el.querySelector('#li-reduce').onclick = () => { m.close(); finish({ keep }); };
     m.el.querySelector('#li-asis').onclick = () => { m.close(); finish({ keep: 0 }); };
@@ -2727,7 +2796,7 @@ async function importModel(file, { always = false } = {}) {
   const prog = importProgress(file.name);
   try {
     await tick();
-    const parts = await readModelFile(file);
+    const parts = await readImport(file);
     if (prog.cancelled) return toast('Import cancelled.');
     const big = parts.reduce((a, p) => a + p.soup.length / 9, 0);
     let keep = 0;
@@ -2738,10 +2807,12 @@ async function importModel(file, { always = false } = {}) {
       keep = choice.keep;
     }
     let tris = 0, made = 0; const notes = new Set(), errs = [];
+    if (keep) for (const part of parts) { const n = part.soup.length / 9; if (n > IMPORT_TARGET) part.reduce = { keep: Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / n) * 100))), tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) }; } // the import reduces the triangles before it sews them
     for (const part of parts) {
       if (prog.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       prog.set(`Checking ${part.name} (${(part.soup.length / 9).toLocaleString()} triangles)…`); await tick();
       let r = always ? { err: '' } : await importPart(part);
+      if (r.limit) { errs.push(`${part.name}: ${r.err}`); continue; }
       if (r.err !== undefined && (always || r.err)) { // won't make a solid by itself: let the user steer the repair
         const fixed = await repairDialog(part, r.err);
         if (!fixed) { errs.push(`${part.name}: cancelled`); continue; }
@@ -2749,13 +2820,7 @@ async function importModel(file, { always = false } = {}) {
         r = await importPart({ ...part, soup: fixed });
       }
       if (r.err) errs.push(`${part.name}: ${r.err}`); else {
-        made++; tris += r.tris; if (r.note) notes.add(`repaired: ${r.note}`);
-        if (keep && r.id && r.tris > IMPORT_TARGET) { // the dense part gets a Reduce step after it
-          const pre = snapshot(), n = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / r.tris) * 100)));
-          doc.features.splice(doc.marker, 0, { id: 'f' + doc.nextId++, type: 'mreduce', name: `Reduce ${part.name}`.slice(0, 60), params: { body: r.id, keep: n, tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) } });
-          doc.marker++; pushUndo(pre);
-          prog.set(`Reducing ${part.name}…`); await tick(); await rebuildNow();
-        }
+        made++; tris += r.tris; if (r.note) notes.add(r.exact ? r.note : `repaired: ${r.note}`);
       }
       part.notes?.forEach((n) => notes.add(n));
     }
@@ -2789,7 +2854,7 @@ const projectJSON = (name = doc.name, withThumb = false) => { const { rev, viewi
 function loadProject(txt, rev = 0, seq = rev) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev, seq };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev, seq };
   setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
@@ -3235,7 +3300,7 @@ function bindViewport() {
       const tg = vp.pickFace(e);
       vp.selected.clear(); vp.refreshMaterials();
       if (add && selFace && tg?.face && !tg.curved && !selFace.curved && !faceB()) selFaceB = { id: tg.id, point: tg.point, normal: tg.normal, base: selFace }; // a second flat face: measure between them
-      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) } : null;
+      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}), ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) } : null;
       vp.showFaces(shownFaces(), null);
       renderTree(); renderRibbon();
       return;
@@ -3666,7 +3731,7 @@ async function compareVersion(pr, rev, oldTxt) {
   let A, B;
   try { A = JSON.parse(oldTxt); B = typeof cur.data === 'string' ? JSON.parse(cur.data) : cur.data; } catch { return toast('Could not read those versions.', true); }
   let ra, rb, diff;
-  try { ra = evaluateDoc({ ...A, params: A.params || [] }); rb = evaluateDoc({ ...B, params: B.params || [] }); diff = compareBodies(ra.result.bodies, rb.result.bodies); }
+  try { ra = evaluateDoc({ ...A, params: A.params || [] }, { keepShapes: true }); rb = evaluateDoc({ ...B, params: B.params || [] }, { keepShapes: true }); diff = compareResults(ra.result, rb.result); }
   catch (e) { return toast('Could not compare: ' + e.message, true); }
   const byId = (d) => new Map(d.features.map((f) => [f.id, f]));
   const ma = byId(A), mb = byId(B), lines = [];
@@ -3950,6 +4015,12 @@ function bindKeys() {
 }
 
 // ------------------------------------------------------------------ boot
+/** Keep the app shell and the CAD kernel for repeat visits and offline use (src/sw.js). Production builds on a secure origin only; nothing from /api is ever kept. */
+function registerServiceWorker() {
+  if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.type === 'sketchy-updated') toast('Sketchy was updated. Reload the page to use the new version.'); });
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((e) => console.warn('Offline support is off:', e.message));
+}
 async function boot() {
   if (location.pathname === '/oauth/authorize') { await refreshAccount(); await ensureSignedIn(); await oauthConsent(); return; } // an assistant is asking to connect: just the approval page
   const caret = uicon('caret', 7, 0).replace('class="ui"', 'class="ui caret"');
@@ -3960,14 +4031,17 @@ async function boot() {
  
   set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
   set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
-  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading">Loading CAD kernel…</div>');
-  await initKernel({ locateFile: () => wasmUrl });
+  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" role="status">Loading CAD kernel…</div>');
+  const loadingEl = $('#loading'), mb = (n) => (n / 1048576).toFixed(1);
+  try { await loadBrep({ locateFile: () => occtUrl, wasmUrl: occtUrl, totalBytes: __WASM_BYTES__, onProgress: (n, total) => { if (loadingEl) loadingEl.textContent = `Loading CAD kernel… ${mb(n)} of ${mb(total || __WASM_BYTES__)} MB`; } }); } // the exact kernel (about 23 MB; the service worker and the browser keep it for the next visit)
+  catch (e) { console.error(e); $('#loading')?.remove(); toast('The CAD kernel could not be loaded: ' + e.message + '. Reload the page to try again.', true); return; }
   vp = new Viewport($('#gl'), $('#cube'));
   vp.opts.bedSize = printerSize(bedName) || vp.opts.bedSize;
   vp.buildBed();
   vp.home();
   vp.fitted = true; // only opening a design re-frames the view; making the first body must not move the camera
   $('#loading')?.remove();
+  registerServiceWorker();
   SU = createSketchUI({
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
     setShapes: (sh) => setSketchShapes(sh), remapCons: (si, delta) => remapSketchCons(si, delta), projectHover: (e) => projectHover(e), projectPick: (e, all) => projectPick(e, all), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
@@ -4008,7 +4082,7 @@ async function boot() {
   $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importModel(f); };
   $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { const txt = await f.text(); if (!newTab({ reuseBlank: true })) return; loadProject(txt); renderDocTabs(); } catch (x) { toast(x.message, true); } };
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
-  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.(stl|obj|3mf|step|stp)$/i.test(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
+  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && isImportName(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
   initA11y();
   const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x3d94ff : 0x1f5fa8); sketchMatActive.color.setHex(d ? 0x2f8cff : 0x0b6bcb); };
   paint(getTheme()); onTheme(paint);
@@ -4017,14 +4091,143 @@ async function boot() {
   setAccountMenuHandler((anchor) => openUserMenu(anchor, {
     onAccount: () => showAccount(), onPrefs: () => showSettings(), onSettings: showAdmin,
     isDark: () => getTheme() === 'dark', onTheme: () => setTheme(getTheme() === 'dark' ? 'light' : 'dark'),
-    onLogout: async () => { await signOut(); try { localStorage.removeItem('sketchy.autosave'); } catch { /* ignore */ } location.reload(); },
+    onLogout: async () => { assistant?.stop(); await signOut(); try { localStorage.removeItem('sketchy.autosave'); } catch { /* ignore */ } location.reload(); },
   }));
   if (localStorage.getItem('sketchy.data') === '1') toggleDataPanel(true);
   setAccountChangeHandler(() => { if (dataOpen) renderDataPanel(); });
   startRemotePolling();
+  setupAssistant();
+  setupAddins();
   refresh();
   window.__sketchy = { kernelState: () => ({ heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
   openLastOrCreate().then(checkDrafts); // not awaited: the New design dialog must not hold up the rest of start-up
+}
+// ------------------------------------------------------------------ add-ins (src/addins.js, src/addins-ui.js)
+const BASE_IMPORT_EXT = ['stl', 'obj', '3mf', 'step', 'stp'];
+const isImportName = (name) => { const ext = (/\.([a-z0-9]+)$/i.exec(name)?.[1] || '').toLowerCase(); return BASE_IMPORT_EXT.includes(ext) || !!addins?.importerFor(ext); };
+/** Read a model file: with an add-in when one handles that file type, otherwise with the built-in readers. */
+async function readImport(file) {
+  const ext = (/\.([a-z0-9]+)$/i.exec(file.name)?.[1] || '').toLowerCase();
+  const ref = !BASE_IMPORT_EXT.includes(ext) && addins?.importerFor(ext);
+  if (!ref) return readModelFile(file);
+  try { return await addins.readFile(file, ref); }
+  catch (e) { throw new Error(e.message === 'cancelled' ? 'Import cancelled.' : `${ref.addin.manifest.name}: ${e.message}`); }
+}
+async function runAddinCommand(c) {
+  try { await addins.runCommand(c.addinCommand); } catch (e) { toast(`${c.label}: ${e.message}`, true); }
+}
+/** A form an add-in asked for: resolves the values, or null if cancelled. */
+function addinForm(spec) {
+  return new Promise((resolve) => {
+    const rows = spec.fields.map((f) => `<label class="ad-row"><span>${esc(f.label)}</span>${f.type === 'bool' ? `<input type="checkbox" name="${esc(f.name)}" ${f.value ? 'checked' : ''}>` : f.type === 'select' ? `<select name="${esc(f.name)}">${(f.options || []).map(([v, l]) => `<option value="${esc(v)}" ${String(f.value) === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : `<input name="${esc(f.name)}" type="${f.type === 'number' ? 'number' : 'text'}" ${f.type === 'number' ? 'step="any"' : 'maxlength="200"'} value="${esc(f.value)}">`}</label>`).join('');
+    const m = modal(`<div class="modal-title">${esc(spec.title)}</div><form class="modal-body">${spec.intro ? `<p class="rp-lead">${esc(spec.intro)}</p>` : ''}<div class="ad-form">${rows}</div><div class="modal-foot flush"><button type="button" class="btn" id="ad-c">Cancel</button><button type="submit" class="btn primary">${esc(spec.ok)}</button></div></form>`, () => resolve(null));
+    const form = m.el.querySelector('form');
+    m.el.querySelector('#ad-c').onclick = () => m.close();
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const out = {};
+      for (const f of spec.fields) { const el = form.elements[f.name]; out[f.name] = f.type === 'bool' ? el.checked : f.type === 'number' ? (Number.isFinite(parseFloat(el.value)) ? parseFloat(el.value) : f.value) : el.value; }
+      resolve(out); m.closeSilently?.() ?? m.close();
+    };
+    setTimeout(() => form.querySelector('input,select')?.focus(), 0);
+  });
+}
+function setupAddins() {
+  addins = createAddinManager({
+    runtime: runtimeSource,
+    onChange: () => {
+      // contributed commands appear in the ADD-INS group's menu
+      const ids = [];
+      for (const c of addins.commands()) { const id = `addin:${c.ref}`; CMD[id] = { label: c.label, icon: 'addin', desc: `${c.description ? c.description + ' ' : ''}(Add-in: ${c.addin})`, addinCommand: c.ref }; ids.push(id); }
+      const g = TOOLBAR.UTILITIES.find((x) => x.label === 'ADD-INS'); if (g) g.menu = ids.length ? ['addins', '|', ...ids] : [];
+      const accept = [...BASE_IMPORT_EXT, ...addins.importExtensions()].map((x) => '.' + x).join(',');
+      $('#file-stl').accept = accept; $('#file-repair').accept = accept;
+      if (!dialog && !sketch) renderRibbon();
+    },
+    hooks: {
+      toast, menu: showMenu,
+      confirm: (message, o = {}) => confirmBox({ title: o.title || 'Add-in', message, ok: o.ok || 'OK', danger: !!o.danger }),
+      form: addinForm,
+      pickFile: (o) => new Promise((resolve) => {
+        const inp = document.createElement('input'); inp.type = 'file'; if (o.accept) inp.accept = o.accept;
+        inp.onchange = async () => { const f = inp.files[0]; resolve(f ? { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) } : null); };
+        inp.oncancel = () => resolve(null); inp.click();
+      }),
+      readDocument: async (o) => ({ name: doc.name, units: getUnits(), parameters: (doc.params || []).map((p) => ({ name: p.name, expr: p.expr })), bodies: result.bodies.map((b) => ({ id: b.id, name: b.name, color: look((doc.appearance || {})[b.id]).color, ...(o.meshes ? { verts: b.verts, tris: b.tris } : {}) })) }),
+      addBody: async ({ name, verts, tris }) => {
+        const n = tris.length / 3, soup = new Float32Array(n * 9);
+        for (let t = 0; t < n; t++) for (let k = 0; k < 3; k++) soup.set(verts.subarray(tris[t * 3 + k] * 3, tris[t * 3 + k] * 3 + 3), t * 9 + k * 3);
+        const r = await importPart({ name, soup });
+        if (r.err) throw new Error(r.err);
+        return { id: r.id };
+      },
+      buildGeometry: async (tree) => { if (!brepReady()) throw new Error('The geometry engine is not ready yet.'); await tick(); return buildTree(replicad(), tree); },
+      saveFile: async ({ name, bytes, mime }) => { download(new Blob([bytes], { type: mime }), name); return true; },
+    },
+  });
+  addins.startup().catch(() => {});
+}
+
+/** The assistant as part of the app: live changes, the Stop chip and the request box (see assistant.js). */
+const LIVE_VIEWS = { iso: [1, -1, 0.8], iso_back: [-1, 1, 0.8], front: [0, -1, 0], back: [0, 1, 0], left: [-1, 0, 0], right: [1, 0, 0], top: [0, 0, 1], bottom: [0, 0, -1] };
+let liveT = null, liveLast = '';
+/** Tell the server what you are looking at (open design, selection, view), so an assistant can work on the same thing (get_live_context). */
+function queueLive(force = false) {
+  if (!assistant) return;
+  clearTimeout(liveT);
+  liveT = setTimeout(() => {
+    const sel = {};
+    if (vp.selected.size) sel.bodies = [...vp.selected];
+    if (selSet.size) sel.features = [...selSet];
+    if (selEdges.length) sel.edges = selEdges.length;
+    if (selFace) sel.face = { body: selFace.id, point: selFace.point, normal: selFace.normal, ...(selFace.curved ? { curved: true } : {}) };
+    const cam = vp.camera.position.clone().sub(vp.controls.target).normalize();
+    const state = { design: doc.name && doc.name !== 'Untitled' && doc.rev ? doc.name : '', dirty, openDesigns: tabs.map(tabName).filter((n) => n && n !== 'Untitled'), tool: sketch ? 'sketch' : dialog ? (doc.features[dialog.index]?.type || 'feature') : measure ? 'measure' : '', sketch: sketch && !sketch.picking ? doc.features[sketch.index]?.id || '' : '', selection: sel, view: [cam.x, cam.y, cam.z], units: getUnits(), appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '' };
+    const key = JSON.stringify({ ...state, view: state.view.map((v) => +v.toFixed(1)) });
+    if (!force && key === liveLast) return;
+    liveLast = key;
+    call('PUT', '/live', state);
+  }, 700);
+}
+function setupAssistant() {
+  const btn = $('#btn-ai');
+  if (!acct.server || !acct.user) return;
+  btn.hidden = false; btn.innerHTML = uicon('sparkle', 18, 1.6);
+  assistant = createAssistant({
+    toast,
+    currentDesignName: () => (doc.name && doc.name !== 'Untitled' ? doc.name : ''),
+    getSelection: () => {
+      const parts = [], context = {};
+      if (selFace) { const b = result.bodies.find((x) => x.id === selFace.id); parts.push(`a ${selFace.curved ? 'curved ' : ''}face of ${b?.name || selFace.id}`); context.face = { body: selFace.id, point: selFace.point, normal: selFace.normal, ...(selFace.curved ? { curved: true } : {}) }; }
+      if (vp.selected.size) { const names = [...vp.selected].map((id) => result.bodies.find((x) => x.id === id)?.name || id); parts.push(names.length > 2 ? `${names.length} bodies` : names.join(', ')); context.bodies = [...vp.selected]; }
+      if (selSet.size) { const fs = [...selSet].map((id) => doc.features.find((f) => f.id === id)).filter(Boolean); if (fs.length) { parts.push(fs.length > 2 ? `${fs.length} features` : fs.map((f) => f.name).join(', ')); context.features = fs.map((f) => f.id); } }
+      if (selEdges.length) { parts.push(`${selEdges.length} edge${selEdges.length > 1 ? 's' : ''}`); context.edges = selEdges.slice(0, 20).map((e) => ({ body: e.body, pts: e.pts })); }
+      return parts.length ? { summary: parts.join(', '), context: { ...context, summary: parts.join(', ') } } : null;
+    },
+    showInApp: (ev) => { // an assistant pointing at something: turn the view, select, say something. Never changes the design.
+      if (ev.design && ev.design !== doc.name) { if (ev.message) toast(`Assistant, about "${ev.design}": ${ev.message}`); return; }
+      if (dialog || sketch) { if (ev.message) toast(`Assistant: ${ev.message}`); return; }
+      if (ev.view && LIVE_VIEWS[ev.view]) { const d = LIVE_VIEWS[ev.view]; vp.lookAlong(d, Math.abs(d[2]) > 0.9 * Math.hypot(...d) ? [0, 1, 0] : [0, 0, 1], true); }
+      if (ev.bodies?.length) { const ids = ev.bodies.filter((id) => result.bodies.some((b) => b.id === id)); selFace = null; vp.showFaces([], null); vp.selected.clear(); ids.forEach((id) => vp.selected.add(id)); vp.refreshMaterials(); renderTree(); renderRibbon(); }
+      if (ev.face?.point && ev.face?.normal && result.bodies.some((b) => b.id === ev.face.body)) { vp.selected.clear(); vp.refreshMaterials(); selFace = { id: ev.face.body, point: ev.face.point, normal: ev.face.normal, ...(ev.face.curved ? { curved: true } : {}) }; vp.showFaces(shownFaces(), null); renderTree(); renderRibbon(); }
+      if (ev.message) toast(`Assistant: ${ev.message}`);
+    },
+    designChanged: async (ev) => {
+      if (ev.name !== doc.name || !doc.rev) { toast(`The assistant changed "${ev.name}"`); if (dataOpen) renderDataPanel(); return; }
+      if (ev.seq <= (doc.seq || 0) || doc.viewingRev) return;
+      if (dirty || sketch || dialog || measure) { bannerRev = ev.seq; showBanner({ rev: ev.seq, device: 'the assistant' }); return; } // you are in the middle of something: ask first
+      await openDesign(doc.name, true);
+      const ids = doc.lastEdit?.by === 'assistant' ? doc.lastEdit.features || [] : [];
+      aiFlash = new Set(ids); renderTimeline();
+      setTimeout(() => { aiFlash = new Set(); renderTimeline(); }, 6000);
+      const tool = doc.lastEdit?.tool;
+      toast(`The assistant ${toolPast(tool)}.`);
+    },
+  });
+  btn.onclick = () => assistant.togglePanel(acct.mcp);
+  assistant.start();
+  setInterval(() => queueLive(true), 60e3); // the server forgets what you are looking at after 3 minutes of silence
+  queueLive(true);
 }
 /** On start: reopen the design you were last in; otherwise restore unsaved work, or ask for a name for a new design. */
 async function openLastOrCreate() {

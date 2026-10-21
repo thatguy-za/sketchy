@@ -1,0 +1,102 @@
+# One kernel: moving Sketchy to OpenCascade only
+
+Decision (owner): Sketchy ends up with **one** kernel, the B-rep kernel (OpenCascade through replicad). The mesh kernel (manifold-3d) goes away. This file is the plan and the progress log. Nothing here is committed.
+
+## Where manifold-3d is used today
+
+Only five places import it or its types; everything else (`printcheck.js`, `skins.js`, `solids.js`, `importers.js`, `meshrepair.js`, `queries.js`, `render-sw.js`, `exporters.js`, `bvh.js`, `lod.js`) works on plain triangle arrays and survives unchanged.
+
+| File | What it does with manifold | Plan |
+|---|---|---|
+| `src/kernel.js` | every feature that is not yet in `backend-brep.js`, the sketch profile regions (`CrossSection`), the mesh fillet cutters, the checkpoint cache | port the features, then delete |
+| `src/backend-mesh.js`, `src/backend.js` | the mesh backend wrapper | delete with kernel.js |
+| `src/csg-service.js` | the OpenSCAD add-in's geometry service (cube, sphere, hull, minkowski, linear/rotate extrude, offset, 2D booleans) | rewrite on OpenCascade (step 5) |
+| `src/main.js` | loads `manifold.wasm`, hands the module to the add-in service | load OpenCascade instead |
+| `vite.config.js`, `package.json`, `Dockerfile`, docs | build and licence notices | step 6, only when nothing imports it |
+
+## Feature inventory
+
+Legend: **B-rep** = already built by `backend-brep.js` (two-backend tests exist); **port** = OpenCascade can do it, write it; **new** = needs a different approach.
+
+| Feature | State | Notes |
+|---|---|---|
+| Primitive (box, cylinder, cone, sphere, torus, rounded box) | B-rep | |
+| Sketch, 3D sketch, Plane, Axis, Point | B-rep | sketch regions: overlapping shapes and joined open lines still use the mesh cross-section code, **port** (planar face booleans) |
+| Extrude: distance, both sides, symmetric, offset start, to object, through all | B-rep | |
+| Extrude: taper, twist, end scale, thin wall | port | replicad twist/profile options; taper by lofting to an offset wire; thin by wire offset |
+| Revolve (all axes, partial, two sides) | B-rep | far-side partial revolve: **port** (mirror the profile) |
+| Emboss | B-rep | |
+| Combine, Mirror, linear and circular Pattern | B-rep | |
+| Pattern along a path, on a face | port | translate along a sampled path; face frame from the face |
+| Move / Copy (translate, rotate, scale, point to point) | port | transforms; non-uniform scale via a general transformation |
+| Scale | port | |
+| Fillet constant radius, Chamfer equal | B-rep | |
+| Fillet variable / by chord, Chamfer two distances / angle | port | OpenCascade supports radius laws and asymmetric chamfers |
+| Hole: simple, counterbore, countersink | B-rep | |
+| Hole: threaded | port | thread groove sweep, already written for Thread |
+| Shell inward with open faces | B-rep | |
+| Shell outward / centred / closed hollow | port | OpenCascade offset (better than the mesh version) |
+| Draft | B-rep | |
+| Sweep, Loft | B-rep (limited) | sweep along 3D sketch or smoothed paths, multi-region profiles: **port** |
+| Pipe, Rib, Coil | port | sweep a circle, extrude rectangles, helix sweep |
+| Thread | B-rep | |
+| Press/Pull, Offset face, Thicken face, Replace face | port | prism of the face then boolean; offset = move the face's plane; replace = boolean with a half space |
+| Split (plane or body) | port | boolean split |
+| Boundary fill | port | boolean of tool bodies and a box |
+| Joint (rigid, revolute, slider, ...) | port | rigid transforms of bodies |
+| Surfaces: extrude/revolve/sweep/loft surface, stitch, thicken, trim, extend | new | surfaces become faces and shells; stitch = sewing; thicken = offset shell; trim/extend by plane splitting and extending the face |
+| Import feature (STL, OBJ, 3MF) | new | sew triangles into a faceted solid, see below |
+| Import STEP | new | true B-rep (replicad can read it) |
+| Clean mesh, Reduce, Separate | new | operate on the imported triangle data *before* sewing; the imported body keeps its triangle soup in the feature so they stay editable |
+| Remove | B-rep | |
+
+## Imported meshes
+
+A mesh has no surfaces. In a one-kernel Sketchy an imported STL/OBJ/3MF becomes a **faceted B-rep solid**: triangles are welded, coplanar neighbours are merged into one planar face each, and the shell is sewn into a solid. Fast path and limit: sewing cost grows with the number of faces, so above a face limit (planned: 50,000 triangles after merging) the import is refused with a message that says so and suggests Reduce first (Reduce works on the triangle data before sewing, so it stays available). Booleans, fillets on the sharp edges and STEP export then work on imported parts.
+
+## Order of work and what "done" means per step
+
+1. Inventory and this document. Done when every manifold use is listed above.
+2. Port missing features, most used first, each with a two-backend test (volume, bounding box, face count) while both kernels exist. Done when `brepSupport()` accepts every feature in the table.
+3. Import: sewing, the size limit, STEP import, mesh tools before sewing.
+4. Make the exact kernel the default and only path in the UI; remove the "Exact geometry (beta)" setting and the fallback note. Until every feature is ported the fallback stays and names the feature still to port. Large designs: worker rebuilds, the incremental cache, Stop, and tessellation cached per face with a tolerance tied to the size of the part.
+5. Move `csg-service.js`, `headless.js`, `queries.js`, the render and the exports to the B-rep kernel; keep their tests (`test:openscad`, `test:mcp-tools`).
+6. Only when nothing imports manifold-3d: remove it from `package.json`, the Dockerfile, `vite.config.js` and the docs.
+
+At every reported step all of `test:robustness`, `test:mcp-tools`, `test:security`, `test:mcp-limits` and `test:openscad` pass.
+
+## Cost to be honest about
+
+* The 23 MB WebAssembly file (7 MB gzipped) now applies to everyone on first load, where manifold's was 0.5 MB. Proposal: load it in the worker at start-up while a loading screen shows, serve it with a long-lived cache header and a content hash so it is downloaded once, and keep it in the browser cache between visits. The server already serves hashed assets.
+* The exact kernel rebuilds slower than manifold for the same boolean-heavy design (measured: a 41-feature design, full rebuild about 1.0 s against about 0.4 s). The incremental cache and the worker are what keep editing responsive.
+* OpenCascade is LGPL-2.1: keep the notice in the README and keep the `.wasm` a separate file.
+
+## Progress log
+
+**Step 1 (inventory): done.** See the tables above.
+
+**Step 2 (port): done except two features and a few options.** Ported with two-backend tests (volume, bounding box, face counts): Move/Copy/Scale (uniform exact; non-uniform stretches a body into a *faceted* solid, because OpenCascade has no non-uniform transform of curved surfaces), Split, Joints, Press/Pull, Thicken face, Replace face, Boundary fill, Fillet variable/chord, Chamfer two distances/angle, Extrude twist/end scale/taper/thin wall, Pipe, Rib, Coil, Pattern along a path/on a face, Hole with thread, Shell outward/centred/closed (OpenCascade offsets, so the outward shell no longer rises above an open face the way the mesh version did), far-side partial Revolve, sketch regions (overlapping shapes, open lines joined into loops, hand-picked regions, exact 2D booleans in `src/sketch-brep.js`), Sweep along smoothed paths, 3D sketches and closed shapes, surfaces (extrude, revolve, sweep, loft surfaces; stitch, trim, thicken flat surfaces). Not ported: **Extend surface** (no OpenCascade equivalent; needs a different approach), **thickening a curved surface** (OpenCascade has no thickening of an open shell in this build), Loft/Sweep with a multi-region or holed profile. Differences from the mesh kernel are noted in the tests: the exact pipe around a closed shape is full volume (the mesh mitred it thinner), the exact outward shell stays at the open face, and twist/end scale now work (the mesh version had a bug that flattened the shape; fixed there too).
+
+**Step 3 (imports): sewing and mesh tools done, STEP done; UI not wired yet.** `src/sew.js` welds triangles, merges coplanar neighbours into planar faces and sews a faceted solid (several pieces become a compound); the limit is 30,000 merged faces (about 8 s), with a message that points to Reduce. Reduce is now quadric edge collapse (`src/meshtools.js`), Clean Mesh is `repairSoup`, Separate splits connected pieces; each works on the body's triangles and sews the result. STEP files import as true B-rep through the new `importstep` feature (backend done and tested by writing and reading back an exact file; the Insert Model dialog still produces faceted `import` features and must be switched to it).
+
+Measured sewing cost: about 0.25 ms per face (a 2,000-face sphere takes 0.5 s, a 3,000-face one 0.8 s).
+
+**Step 4 (one kernel in the UI): done.** The "Exact geometry (beta)" setting and the fallback note are gone. The app loads OpenCascade at start-up behind the loading screen (and again inside the worker), every design is built by it, and a feature the kernel cannot build (Extend surface) reports an error on that feature while the rest builds. Large designs: the incremental cache and the worker with Stop are as before, tessellation is cached per shape with a gap tied to the part's size. Measured (`node scripts/bench-brep.mjs`, 41 features): full rebuild about 1.0 s, edit the last feature about 0.3 s (27 ms in the worker), edit near the start about 1.0 s. Imported meshes (a torus of flat triangles): 1,600 triangles 0.3 s, 6,400 triangles 2.1 s, 14,400 triangles 9.7 s; over 12,000 merged faces the import is refused unless it reduces first (the Large model dialog now starts at 20,000 triangles and writes the amount into the import step). Not done: per-face tessellation reuse (OpenCascade meshes the whole shape again after a boolean), and a streamed or progressive display.
+
+**Step 5 (add-in service, MCP, headless): done.** `src/csg-service.js` builds on OpenCascade (`buildTree(R, tree)`; `npm run test:openscad` passes, 80 checks): exact cubes, spheres above 24 sides, cylinders and circles above 128 sides, faceted polygons below that (OpenSCAD models rely on `$fn=6` being a hexagon), hull and minkowski through convex hulls (`src/hull.js`) and sewing, linear/rotate extrude, 2D booleans and offset. `headless.js`, MCP export (exact STEP, `step_exact`), queries, render and print checks run on the B-rep results; Interference, Compare versions and the sketch offset tool run on OpenCascade.
+
+**Step 6 (remove manifold-3d): done.** Nothing imports it; it is out of `package.json`, the lock file, `vite.config.js` and the Dockerfile comment, and README/REFERENCE/DEVELOPMENT describe the one kernel. `src/backend-mesh.js` and `src/backend.js` are deleted; `src/kernel.js` is now 250 lines of shared helpers plus `rebuild`. The two-backend tests compare against `scripts/golden-mesh.json`, the volumes, boxes and flat-face counts the mesh kernel produced for the same designs before it was removed (re-recording it needs the old kernel).
+
+**Regressions and costs, honestly.** Rebuilding a boolean-heavy design is about 2.5 times slower than the mesh kernel was (1.0 s against 0.4 s for the 41-feature design). First load now includes the 23 MB file (7 MB gzipped): about 3 s to a usable app on a local server; on a real connection that depends on the line, and it is cached afterwards. Mesh imports above about 12,000 faces need Reduce first, and sewing is slow in the thousands of faces. Extend surface and thickening a curved surface are gone. Non-uniform scale makes a faceted body. A pipe or sweep around a sharp corner is now fully swept (the mesh kernel mitred it thinner), and a few mesh quirks were not carried over (the outward shell rising above an open face).
+
+**Proposals for the first-load cost.** Serve the hashed `.wasm` with `Cache-Control: immutable` and gzip/brotli (the static server already hashes assets; set the header), start the download from `index.html` with a `<link rel="preload">` before the app code runs, keep the loading screen, and let a service worker keep the file for offline use.
+
+## Follow-up: click-through, first load and offline use
+
+**Found and fixed by driving the real app.** (1) **The production build did not boot**: OpenCascade's WebAssembly glue builds its bindings with `new Function`, which the page CSP (`script-src 'self' 'wasm-unsafe-eval'`) forbids; the dev server has no CSP, so every earlier check passed. The CSP now allows `'unsafe-eval'` for scripts (everything else is unchanged: no inline scripts, no off-site connections, no framing); a security test fails if a built file needs eval and the CSP does not allow it. (2) Importing a mesh over the face limit opened the repair dialog with a confusing message; it now says what to do (import again with "Import and reduce"). (3) The STEP import toast said "repaired: kept as exact surfaces", and "5 bodys". (4) A chamfer on an edge that runs into a rounded corner fails in OpenCascade for most sizes; the error now says so. Added robustness tests for the chamfer message and the import limit.
+
+**Driven in the browser (dev server):** Insert Model with an STL, an OBJ, a 3MF and a STEP (the STEP keeps 7 true faces, cylindrical surfaces included); the Large model dialog with "Import as it is" (refused, with the message) and "Import and reduce to ~25%" (40,000 triangles became a 9,952-face solid with 0.3 % volume error); export of all five bodies as STL, 3MF, OBJ and STEP; Press/Pull, Fillet (from a selected face) and Chamfer (from a clicked edge) from the real tools; undo/redo; a design saved on the mesh-kernel timeline format (fillet edges stored by position, a counterbore hole with a face reference, a smoothed sweep, a point-and-normal face appearance with no face key, a body appearance) opens, rebuilds and paints. Not repeated this time (done in the previous round): Appearance panel clicks and Shell/Hole from selected faces.
+
+**Open issues, round two.** (1) Chamfer/fillet into a rounded corner: fixed by trying OpenCascade, then a wedge cut built from the edge profile (`src/edgecutter.js`), then smaller sizes; the error names the size that fits. (2) Shell on swept bodies: with both ends opened the wall is the sweep less a sweep of the offset profile; a closed hollow of a cornered or spline sweep is a faceted wall (the surface triangles moved along their normals and sewn), which is not an exact surface and is refused for very large curved bodies. Lofted bodies are not covered by the sweep route. (3) Tessellation: gap 0.15 % of the diagonal (0.04 to 0.6 mm) and 0.3 rad between neighbours; a smooth tube went from 6,846 to 2,042 triangles, a sphere (r 20) 6,600 to 1,980, a rounded box 2,796 to 1,372, a flat plate stays at 12. (4) The STEP writer's transfer report is no longer printed (Emscripten `print` hook, tested). (5) Appearance on curved and flat faces, Shell and Hole from selected faces, and the loading counter path were driven or exercised.
+
+**First-load speed.** The server compresses text files and the kernel file (brotli, gzip as the fallback; each compressed once and kept) and already marks hashed build files `immutable`; the kernel file goes from 23.0 MB to 5.9 MB over the wire (brotli), 7.2 MB with gzip. The page preloads it (`<link rel="preload">` written into `index.html` at build time), the loading screen counts bytes ("Loading CAD kernel... 12.3 of 22.4 MB"), and a service worker (`src/sw.js`, written to `dist/sw.js` with the build's version and file list) keeps the page and every hashed build file for repeat visits and offline use. Measured on a loopback server in the in-app browser: cold (empty cache) the sign-in screen appears after 0.97 s with the kernel file taking 0.37 s; repeat (HTTP cache) 0.75 s with the file served from cache in 0.06 s. On a real connection the cold cost is the 5.9 MB: about 5 s at 10 Mbit/s, 1 s at 50 Mbit/s. **Not verified in a real browser:** the service worker. The in-app browser refuses every service worker registration (it fails for any script), so the worker is covered by 34 security tests that run `sw.js` in a sandbox with a fake browser (what it keeps, what it never touches, update and cleanup), and the repeat-load figure above is the HTTP cache alone. The worker never answers or stores `/api`, `/mcp`, OAuth, the add-in sandbox page or add-in files, requests with an Authorization header, range requests, other origins, or any response that is not a plain 200 (or says `no-store`, sets a cookie); a new version deletes the old version's files and tells open pages to reload. It needs a secure origin (https or localhost); a LAN address over plain http has no service worker and no offline use, only the HTTP cache.

@@ -5,6 +5,7 @@
 //   refs: { s: shapeIndex, k?: pointKey, seg?: segmentIndex }
 import { setDim, getDim } from './sketchdims.js';
 import { arcOf } from './sketchgeo.js';
+import { solveSketch } from './sketchsolve.js';
 
 const D2R = Math.PI / 180;
 export const CON_GLYPH = { horizontal: 'H', vertical: 'V', coincident: '●', concentric: '◎', equal: '=', parallel: '∥', perpendicular: '⟂', collinear: '═', midpoint: '△', tangent: '⌒', symmetry: '⇋', fix: '⚓' };
@@ -162,8 +163,8 @@ function applyOne(shapes, c) {
   }
 }
 
-/** Apply constraints in order, repeating so chains settle. Returns new shapes (input untouched). */
-export function applyConstraints(shapes, cons) {
+/** The older method: apply constraints one after another, three passes. Used when the solver cannot (a very big sketch) or does no better. Input untouched. */
+export function applySequential(shapes, cons) {
   if (!cons?.length) return shapes;
   const out = [...shapes];
   for (let pass = 0; pass < 3; pass++) {
@@ -173,6 +174,18 @@ export function applyConstraints(shapes, cons) {
       if (c.snap) out[c.a.s] = c.snap;
       else if (c.pos && c.a.k) out[c.a.s] = movePoint(out[c.a.s], c.a.k, c.pos);
     }
+  }
+  return out;
+}
+
+/** Satisfy all the constraints together with the solver (src/sketchsolve.js). Returns new shapes; the input is untouched. */
+export function applyConstraints(shapes, cons) {
+  if (!cons?.length) return shapes;
+  const out = [...solveSketch(shapes, cons).shapes];
+  for (const c of cons) { // fixed geometry is exactly where it was fixed: it wins over every other relation
+    if (c.t !== 'fix' || !out[c.a?.s]) continue;
+    if (c.snap) out[c.a.s] = c.snap;
+    else if (c.pos && c.a.k) out[c.a.s] = movePoint(out[c.a.s], c.a.k, c.pos);
   }
   return out;
 }
@@ -194,6 +207,16 @@ export function conAnchor(shapes, c) {
  * Returns { total, locked, free: ["Rectangle 1 width", ...], state: 'empty' | 'free' | 'partial' | 'defined' }.
  */
 export function definedState(shapes, cons) {
+  const heur = definedStateByCounting(shapes, cons);
+  if (heur.state === 'empty') return heur;
+  let info;
+  try { info = solveSketch(shapes, cons || [], { details: true }); } catch { return heur; }
+  if (info.method === 'sequential' && !info.free.length && info.rank === 0) return heur; // too big for the solver: count instead
+  const free = info.free, total = info.total;
+  return { total, locked: Math.max(0, total - free.length), free, dof: info.dof, redundant: info.redundant, state: !free.length ? 'defined' : free.length < total ? 'partial' : 'free' };
+}
+/** The older way of judging how defined a sketch is, by counting locked sizes and directions. Used for sketches too big for the solver. */
+export function definedStateByCounting(shapes, cons) {
   const NAMES = { rect: 'Rectangle', rrect: 'Rounded rectangle', circle: 'Circle', ngon: 'Polygon', slot: 'Slot', ellipse: 'Ellipse', path: 'Path' };
   const DIMS = { rect: [['w', 'width'], ['h', 'height']], rrect: [['w', 'width'], ['h', 'height'], ['r', 'corner radius']], circle: [['d', 'diameter']], ngon: [['r', 'radius']], slot: [['len', 'length'], ['w', 'width']], ellipse: [['a', 'width'], ['b', 'height']] };
   let total = 0, locked = 0;

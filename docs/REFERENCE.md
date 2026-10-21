@@ -26,9 +26,9 @@ Detailed notes on how things work. New here? Start with the [README](../README.m
 | **Camera moves** | Fit, Home, Zoom Window, the ViewCube and starting a sketch glide to the new view over a fraction of a second (dragging the view cancels the move). Opening a design jumps straight to it. Making a body, a feature or opening a dialog never changes the zoom or angle of the view. The sketch grid is deliberately faint, and the shape you are drawing is a thick bright line (white on the dark theme, near-black on the light one) so it always stands out; finished sketch shapes are thick blue lines |
 | **Search** (magnifier in the top bar, or `S`) | Opens a field to the left of the button. It matches commands by name and, when you're signed in, your saved designs by name or folder (designs are listed first, under their own heading). Arrow keys move through the results, `Enter` runs the command or opens the design (jumping to its tab if it's already open), and `Esc` closes the field |
 | **Accounts and Server settings** (administrators: your initial → Server settings) | The page opens on **sign in**. It only opens on sign-up for the very first account on a new server, which becomes the administrator. Sign-up is then **closed** until an administrator ticks **Allow new people to register**. Administrators can add people under **Users** (leave the password blank to generate a temporary one, shown once), reset passwords, grant or remove admin, and delete users. **Sign-in protection** locks an address, and the username being tried, out after a set number of failed sign-ins within a set time, for a set time (default 5 failures in 15 minutes, locked for 15; 0 failures switches it off). Locked addresses and usernames are listed there with an **Unlock** button, and the lock-outs reset when the server restarts. Behind a reverse proxy the real address comes from the `X-Forwarded-For` or `CF-Connecting-IP` header, trusted only when the request arrives from a private or loopback address |
-| **Utilities tab** | **Export** opens one dialog for every supported format: STL, 3MF (with body colours), OBJ, STEP (flat faces exact, curves as facets) and the Sketchy project file (the whole timeline, reopens fully editable). Choose all visible bodies or only the selected ones, and name the file. **Printer…** picks the printer (or a custom size) and **Show Build Volume** draws its build volume in the viewport; Properties reports whether each body fits. Export is also in the File menu |
+| **Utilities tab** | **Export** opens one dialog for every supported format: STL, 3MF (with body colours), OBJ, STEP (exact: true planes, cylinders and fillets) and the Sketchy project file (the whole timeline, reopens fully editable). Choose all visible bodies or only the selected ones, and name the file. **Printer…** picks the printer (or a custom size) and **Show Build Volume** draws its build volume in the viewport; Properties reports whether each body fits. Export is also in the File menu |
 | **Naming, autosave and versions** | Every design is named when you create it: **New design** (the + tab, Ctrl+N or the sidebar button) asks for a name and a folder in an in-app dialog and stores the design straight away. From then on Sketchy **autosaves** to the server a couple of seconds after each change; the tab's `*` shows unsaved changes and its tooltip says Saving, Saved or the problem. Autosave updates the design in place and does not add a version. **Save version** (Ctrl+S) adds a version to the history (restore them from the V1 ▾ button in the sidebar); **Save As** stores a copy under another name or folder. If you dismiss the first dialog the design stays Untitled and asks for a name once, at its first edit. If the design was changed on another device, autosave pauses and a banner asks what to do. On the next start Sketchy reopens the design you were last in, and restores any change that hadn't reached the server. The **Designs** sidebar on the left shows your folders and designs: expand or collapse folders, drag a design onto a folder, click the pencil beside a name to rename, use the version button for history, a design's **⋯** menu to move or delete it, and a folder's **⋯** menu to create, rename, move or delete folders. Search shows matches from every folder. Design names are unique across your account. Sketchy no longer uses browser prompt, confirm or alert popups (the one browser-controlled dialog left is the "Leave site?" warning when closing the window with unsaved work). Designs are stored as `.json` project files that keep the whole feature timeline, so they stay editable. STEP, STL, 3MF and OBJ are export formats and cannot be reopened as editable designs |
-| **Export** | STL, **3MF** (with body colours), **OBJ**, and **STEP** — flat faces are written as single planar faces (with holes); curved surfaces are written as many small flat facets, not exact surfaces |
+| **Export** | STL, **3MF** (with body colours), **OBJ**, and **STEP** — exact (AP242, true planes, cylinders and fillets); an imported mesh is written as the faceted solid it is |
 | **Joint** | Rigid, revolute, slider, cylindrical, planar and ball joints positioning one body relative to another |
 | **Parameters** | Name dimensions (`width = 40 mm`) and use expressions in any numeric field (`width/2 + 3 mm`, `sin(30)*r`). Changing a parameter rebuilds the whole timeline |
 | **Section Analysis** (Inspect tab) | Clip the model with an XY/XZ/YZ plane (slider or typed offset, flip side); the cut face is capped. View-only, not stored in the timeline |
@@ -91,8 +91,61 @@ Sketchy runs a [Model Context Protocol](https://modelcontextprotocol.io) server 
    * Claude and ChatGPT call Sketchy from their own servers, so they need a public **https** address (see [HTTPS.md](HTTPS.md)). Other tools (Cursor, VS Code, Gemini CLI, Claude desktop with `mcp-remote`) use a token you create under Account. Tokens are accepted **only** in the `Authorization: Bearer` header (never in the address). Connected apps get an access token that lasts an hour and is renewed automatically; reusing an old refresh token ends the connection. A token that keeps hitting its rate limit or sending work that times out is paused until you resume it, and browser pages are refused unless the admin lists their origin in `MCP_ALLOWED_ORIGINS`. See [SECURITY.md](SECURITY.md).
 3. Ask it to build something: *"Make a 60×30×8 mm bracket with two 10 mm holes, call it Bracket"*.
 
-Tools: `list_designs`, `create_design`, `get_design`, `describe_feature_types`, `add_feature`, `update_feature`, `delete_feature`, `set_parameters`, `inspect_design`, `export_stl`. The server replays the design with the same modelling kernel the app uses, so every call returns the real bodies, sizes, volumes and any errors, and a change that would break the model is rejected rather than saved. Designs show up in your sidebar like any other, and every assistant edit is a new revision in the version history. Limits: the transport is plain JSON over HTTP (no streaming), authentication is bearer tokens (no OAuth), and features that need picking edges or faces in the 3D view (fillet, chamfer, press/pull) can't be placed from here yet.
+Tools (31, defined in `mcp-defs.js` from the same tables the app uses, so they cannot drift from the app):
 
+* **Designs:** `list_designs`, `create_design`, `duplicate_design`, `get_design`, `describe_feature_types` (every feature kind with its fields), `describe_sketch` (shapes, line types, constraints).
+* **Editing:** `add_feature`, `update_feature`, `edit_sketch` (add, remove or replace shapes and constraints without resending the sketch), `delete_feature`, `move_feature`, `set_parameters`, `set_appearance` (material, colour, texture on bodies or one flat or curved face), `set_units`, `undo_last_change`.
+* **Looking:** `render_view` (a PNG from any angle, with a section and highlighted faces), `inspect_design` (with mass and face counts), `find_faces` and `find_edges` (pick by description: "the top face", "the vertical edges", then pass the returned `ref` to fillet, chamfer, shell, hole and so on), `measure`, `print_check`.
+* **Versions and files:** `save_version`, `list_versions`, `compare_versions`, `restore_version`, `export_model` (STL, 3MF, OBJ, STEP; the result reports `step_exact`), `export_stl`.
+* **Requests from the app:** `list_requests`, `complete_request`.
+* **The running app:** `get_live_context` (the open design, what is selected, the view) and `show_in_app` (turn the person's view, select something, show a note). Any tool that takes a design also accepts `"@current"`, meaning the design the person has open. The page reports this every minute and whenever the selection changes; the server forgets it after 3 minutes of silence.
+
+The server replays the design with the same modelling kernel the app uses, so every call returns the real bodies, sizes, volumes, errors with a hint for each, and a summary of what the change did. A change that would break the model is rejected rather than saved, with the list of problems. Edits change the design in place (no numbered versions; `save_version` or the Save button makes one). The server also offers **resources** (`sketchy://design/{name}` and `.../preview.png`) and **prompts** (design for printing, make parametric, review a design, fix errors, work through requests).
+
+**In the app:**
+
+* **Live changes.** When an assistant changes the design you have open, it updates on screen as it happens, the features it touched pulse in the timeline and carry a small dot (the dot goes away once you edit that feature yourself). If you have unsaved changes or a dialog open, you get the usual "updated elsewhere" bar instead of a surprise reload.
+* **The assistant chip.** While an assistant is changing something, a chip at the top says what it is doing, with a **Stop** button. Stop makes the server refuse every change until you press **Resume** (looking still works, and the assistant is told to stop and ask you). Stop lasts at most 30 minutes.
+* **Ask the assistant** (the sparkle button at the top right). Write a request, optionally with your current selection (a face, body, edges or features); it waits in a list, and your assistant picks it up with `list_requests` (its instructions say to do that at the start of every conversation, or ask it to "check my Sketchy requests"). Its reply appears under your request. Assistants cannot be pushed to work: they act when they are connected and asked.
+
+
+
+## Add-ins (UTILITIES, ADD-INS)
+
+**Scripts and Add-Ins** (UTILITIES, ADD-INS) lists the add-ins you can run, with their description, author, licence and **permissions**, a **Run / Stop** button, **Enabled** and **Run on startup**. **+ Add…** installs one from a zip file or a folder; **Remove** deletes one you installed. Add-ins can add import formats, export formats and commands. Add-ins you install are kept on your account (or in this browser when there is no server); an admin can switch installing off (Account, Server settings, or `ALLOW_ADDINS=false`).
+
+**Fusion 360 add-ins cannot run in Sketchy.** They are Python or C++ programs written for Autodesk's own API. Sketchy add-ins are small JavaScript packages that use Sketchy's API.
+
+**A package** is a folder or zip with `manifest.json` and a few text files (`.js`, `.json`, `.md`, `.txt`, `.css`, `.html`; at most 40 files and 4 MB):
+
+```json
+{
+  "id": "openscad", "name": "OpenSCAD import and export", "version": "1.0.0",
+  "description": "...", "author": "...", "license": "MIT", "main": "main.js", "runOnStartup": false,
+  "permissions": ["document.read", "geometry"],
+  "contributes": {
+    "importers": [{ "id": "scad", "label": "OpenSCAD script", "extensions": ["scad"] }],
+    "exporters": [{ "id": "scad", "label": "OpenSCAD script", "extension": "scad" }],
+    "commands": [{ "id": "about", "label": "About" }]
+  }
+}
+```
+
+`main.js` exports `activate(sketchy)`:
+
+```js
+export async function activate(sketchy) {
+  sketchy.on('importer', 'scad', async ({ name, bytes }) => ({ parts: [{ name, verts, tris }] }));   // verts: Float32Array, tris: Uint32Array
+  sketchy.on('exporter', 'scad', async ({ design }) => ({ filename: design.name + '.scad', mime: 'text/plain', text }));
+  sketchy.on('command', 'about', async () => sketchy.ui.toast('Hello'));
+}
+```
+
+The API: `sketchy.ui` (toast, confirm, form, pickFile), `sketchy.document` (read, addBody), `sketchy.geometry.build(tree)` (a tree of solids, see `src/csg-service.js`), `sketchy.files.save`. Each call needs the matching permission in the manifest: `document.read`, `document.write`, `files.open`, `files.save`, `geometry`.
+
+**Sandbox.** Each add-in runs in a worker inside a sandboxed iframe (`sandbox="allow-scripts"`, no `allow-same-origin`) served by `/addin-sandbox.html` with a policy that allows no network and only its own hashed script. It has no access to the page, your cookies, your designs or the server. Everything it does goes through the app, which checks its permissions on every call. Stopping an add-in removes the frame, which ends even a loop that never finishes.
+
+**OpenSCAD import and export** is built in (`public/addins/openscad/`). It reads the OpenSCAD language with its own interpreter (no OpenSCAD code, MIT licensed): shapes, transforms, booleans, extrusions, hull, minkowski, variables, functions, modules, loops, conditionals and list comprehensions. `text()`, `import()`, `surface()`, `projection()`, `resize()` and `include`/`use` are skipped and listed as warnings. Settings at the top of a script (`width = 40;`) appear in a form before import. Export writes each body as a `polyhedron` module (a snapshot of the shape, not the feature timeline).
 
 ## Typography
 
@@ -122,7 +175,8 @@ Your initial (top right) → **Settings** holds personal preferences. **Units** 
 * **Failures say what to do.** A feature that cannot be built shows its reason inside its dialog with a hint for the usual fixes, and a red mark on its timeline item. A feature that built but needs a look (a cut that touches nothing, a fillet that lost some edges) gets an amber mark and a warning.
 * **Extrude and cut say what they act on.** The dialog shows a line such as "Cuts from Body 2" and outlines the affected bodies in the viewport. Automatic mode says which operation it chose.
 * **Lost fillet edges.** If an earlier change makes some picked edges disappear, the fillet or chamfer still builds with the rest and says "1 of 6 picked edges could not be found". The missing edges are drawn in red; **Remove them and pick again** drops them so you can click the new ones.
-* **Sketch state.** The sketch palette shows how many sizes and directions are locked ("Fully defined", "Partly defined", "Not defined yet"). A size is locked by a parameter expression or an Equal constraint; a direction by Horizontal, Vertical, Parallel or Perpendicular. Where the sketch sits is not counted.
+* **Sketch constraints are solved together** (`src/sketchsolve.js`: damped least squares over every shape's numbers). Chains and loops work (four lines made horizontal and vertical close into a rectangle; parallel pairs plus an equal side make a rhombus). The shape you name first moves to meet the second, sizes and line lengths are kept where the constraints allow, Fix pins what it names, and a size driven by a parameter expression is held. If constraints cannot all hold, the older one-after-another method is used when it leaves less error. Sketches with more than about 360 numbers fall back to the older method.
+* **Sketch state.** The sketch palette shows how many of the sketch's numbers are pinned down by dimensions and constraints ("Fully defined", "Partly defined", "Not defined yet"), counted from the solver's degrees of freedom. The tooltip lists what is still free, such as "Rectangle 1 width". Where the first shape sits is not counted.
 * **Expressions.** Errors are in plain words and suggest the nearest parameter name ("Did you mean height?"). Right-click a number box and choose **Make this a parameter…** to turn its value into a named parameter.
 * **Version compare and restore.** In Version history, **Compare** overlays an older version on the latest: unchanged grey, added blue, removed red, with the volumes and the changed features. **Restore** adds a new version on top ("Restored from V3") and keeps the current one in the history.
 * **Export.** The suggested file name is the design name, then the body's name when you export just one body of several ("Bracket_Lid_v3"), then the version. Type your own and it is left alone. 3MF is the default format. Before exporting a mesh the dialog checks watertightness, bed fit, overhangs and wall thickness. They are advice only; you can always export.
@@ -145,15 +199,26 @@ Fillets, chamfers, holes, shells and sketches on faces remember what they were a
 
 ## Known limits
 
-The modelling kernel is mesh-based ([manifold-3d](https://github.com/elalish/manifold)), not a boundary-representation (B-rep) kernel, so a few common CAD operations are approximated or absent:
+Sketchy has one modelling kernel, a boundary-representation (B-rep) kernel: OpenCascade through replicad. A few operations are still approximate or absent:
 
-* Face-level operations (Draft, Thicken Face, Replace Face, Press/Pull) act on **flat faces** only.
+* Face-level operations (Draft, Thicken Face, Replace Face, Press/Pull) act on **flat faces** only (Thicken Face and Replace Face), Draft on flat faces, Press/Pull on flat faces.
 * **Fillets** have constant or linearly varying radius. There are no setback corners; where fillets meet at a vertex the rounded cuts simply overlap.
-* **Exact curved faces do not exist.** Cylinders, spheres and fillets are stored as many small flat triangles, so **IGES** export is not offered and **STEP** carries flat faces exactly but curved surfaces only as facets. Other CAD programs read the STEP file as a faceted solid.
-* There is **no Split Face** (it needs boundary-representation faces). Sketch on the face and extrude or emboss instead.
-* **Surfaces** are meshes: there is no surface fillet, and Trim and Extend work on planes and straight tangent strips.
+* **IGES** export is not offered. STEP export is exact (true planes, cylinders, spheres, fillets). The exceptions are bodies that are meshes: an imported STL/OBJ/3MF is a faceted solid, and so is a body stretched differently along each axis.
+* There is **no Split Face** command yet (the kernel has the faces for it). Sketch on the face and extrude or emboss instead.
+* A **chamfer** or **fillet** on an edge that runs into a rounded corner is retried as a wedge cut and at smaller sizes; if nothing fits, the error gives the largest size that does. A **Shell** of a body swept along corners or a spline is built as the sweep less a sweep of the offset profile when both ends are opened; a closed hollow of such a body is a faceted wall (a copy of the surface moved by the thickness, sewn), so it is not an exact surface, and very large curved bodies refuse it (open the ends instead).
+* **Surfaces** are faces and shells: there is no surface fillet, **Extend surface** is not available (OpenCascade has no equivalent), and Thicken works on flat surfaces only.
 * *To object* extents use the object's bounding box. Booleans are body-to-body.
 
 ## Roadmap
 
 Setback fillet corners, curved-face selection for Thicken and Replace Face, trimming surfaces by other bodies.
+
+## The kernel
+
+Every design is built by one kernel: OpenCascade (a boundary-representation kernel) through replicad, in `src/backend-brep.js`, with the shared feature rules in `src/featurespec.js` and the sketch regions in `src/sketch-brep.js`. The 23 MB WebAssembly file (5.9 MB with brotli) is preloaded by the page and fetched when the app starts; the loading screen shows how much has arrived. The server sends it `immutable`, and a service worker (`src/sw.js`, on https or localhost) keeps the app shell and every hashed build file for repeat visits and offline use; it never touches `/api`, `/mcp`, OAuth, add-ins or any authenticated or `no-store` response, and a new version replaces the old files and asks open pages to reload. The kernel is loaded again inside the background worker from the same cached file. OpenCascade's glue uses `new Function`, so the page's content security policy allows `'unsafe-eval'` for scripts (nothing else was loosened).
+
+* **Timeline.** `rebuild(features, count, opts)` replays the features. Each step is kept, so a change to feature k replays only features k..end (the incremental cache); a slow rebuild moves to a background worker with a busy bar and **Stop**. Measured with `node scripts/bench-brep.mjs` on a 41-feature design: a full rebuild about 1.0 s, an edit of the last feature about 0.3 s (27 ms inside the worker), an edit near the start about 1.0 s. A feature that cannot be built reports an error on that feature and the rest of the design still builds.
+* **Meshes.** Each body is tessellated once per shape (the gap allowed between surface and triangles is 0.15 % of the part's diagonal, within 0.04 to 0.6 mm, and no triangle turns more than 0.3 rad from its neighbour) and every triangle knows its B-rep face (`faceOf`, `faces`). A mesh is for drawing, picking, export of STL/3MF/OBJ and the print checks; it is never the model.
+* **Faces.** A click selects the whole B-rep face, curved or flat. A stored face (an Appearance in `doc.faceAppearance`, or a face picked for Shell, Draft, Hole, Press/Pull) keeps a `brepFace` key (surface type, area-weighted centre, area); `src/brepface.js` finds the face again after an edit that moves or resizes it (same type and normal, nearest centre, clearly the best candidate) and the point-and-normal match is the fallback.
+* **Imported meshes** (STL, OBJ, 3MF) are welded, repaired, then **sewn into a faceted solid**: coplanar neighbours become one planar face (`src/sew.js`). Sewing costs about 0.3 ms per face and more as it grows, so a mesh of more than 12,000 flat faces is refused with a message; the Large model dialog offers to reduce the triangles first (quadric edge collapse, `src/meshtools.js`; the import step remembers the amount). Clean Mesh, Reduce and Separate work on the triangles of a body and sew the result. **STEP files import as true B-rep** (the `importstep` feature keeps the file's surfaces).
+* **Licence:** OpenCascade is LGPL-2.1 with an exception; see the README for the notice. It is shipped unmodified as a separate `.wasm` file, loaded at run time.
