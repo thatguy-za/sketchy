@@ -2663,7 +2663,7 @@ function captureThumb() {
     return c.toDataURL('image/jpeg', 0.72);
   } catch { return null; }
 }
-const projectJSON = (name = doc.name, withThumb = false) => { const { rev, ...rest } = doc; return JSON.stringify({ format: 'sketchy', version: 1, ...rest, name, ...(withThumb ? { thumb: captureThumb() } : {}) }); };
+const projectJSON = (name = doc.name, withThumb = false) => { const { rev, viewingRev, ...rest } = doc; return JSON.stringify({ format: 'sketchy', version: 1, ...rest, name, ...(withThumb ? { thumb: captureThumb() } : {}) }); };
 function loadProject(txt, rev = 0, seq = rev) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
@@ -2744,7 +2744,7 @@ async function save(as, note = '', milestone = '') {
       else return;
     }
     if (!r.ok) return toast('Save failed: ' + (r.data?.error || r.status), true);
-    doc.rev = r.data.rev; doc.seq = r.data.seq; doc.conflict = false; bannerRev = doc.seq; hideBanner(); doc.folder = folder; rememberLast(name);
+    doc.rev = r.data.rev; doc.seq = r.data.seq; doc.conflict = false; delete doc.viewingRev; renderDocTabs(); bannerRev = doc.seq; hideBanner(); doc.folder = folder; rememberLast(name);
     toast(`Saved "${name}" as V${doc.rev}${folder ? ` in ${folder}` : ''}`);
     if ($('#data-panel').classList.contains('open')) renderDataPanel();
   } else download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`);
@@ -2786,7 +2786,24 @@ function showBanner(info) {
   $('#bn-reload').onclick = async () => { if (dirty && !(await confirmBox({ title: 'Discard your changes?', message: 'Load the latest version and discard your unsaved changes?', ok: 'Discard and load', danger: true }))) return; openDesign(doc.name); };
   $('#bn-x').onclick = hideBanner;
 }
-const hideBanner = () => { const b = $('#banner'); if (b) b.hidden = true; };
+const hideBanner = () => { const b = $('#banner'); if (b) { b.hidden = true; delete b.dataset.view; } };
+/** Shown while an older version is open: the way back to the latest one, or to make this one the latest. */
+function showViewBanner() {
+  const b = $('#banner'), v = doc.viewingRev;
+  b.hidden = false; b.dataset.view = '1';
+  b.innerHTML = `<span>${uicon('clock', 15, 1.6)} You are viewing <b>V${esc(String(v))}</b> of "${esc(doc.name)}", an older version. Changes here are not saved automatically.</span><button class="btn sm" id="bn-latest">Back to latest</button><button class="btn sm" id="bn-restore">Restore V${esc(String(v))}</button>`;
+  $('#bn-latest').onclick = async () => {
+    if (dirty && !(await confirmBox({ title: 'Discard your changes?', message: `Go back to the latest version and discard the changes you made to V${v}?`, ok: 'Discard and go back', danger: true }))) return;
+    openDesign(doc.name, true);
+  };
+  $('#bn-restore').onclick = async () => {
+    if (!(await confirmBox({ title: `Restore V${v}?`, message: `This adds a new version on top called "Restored from V${v}". The current latest stays in the history, so nothing is lost.`, ok: 'Restore' }))) return;
+    const p = await call('PUT', '/projects/' + encodeURIComponent(doc.name), projectJSON(doc.name, true), { 'if-match': String(doc.seq || doc.rev), 'x-note': encodeURIComponent(`Restored from V${v}`) });
+    if (!p.ok) return toast(p.status === 409 ? 'The design changed on another device. Go back to the latest version and try again.' : (p.data?.error || 'Restore failed.'), true);
+    toast(`Restored V${v} as V${p.data.rev}`); openDesign(doc.name, true);
+  };
+}
+const syncViewBanner = () => { if (doc.viewingRev) showViewBanner(); else if ($('#banner')?.dataset.view) hideBanner(); };
 function startRemotePolling() {
   setInterval(async () => {
     if (document.hidden || !acct.user || !doc.rev || doc.name === 'Untitled' || asBusy) return;
@@ -2823,7 +2840,7 @@ function applyTabState(st) {
 const blankState = () => ({ doc: blankDoc(), undoStack: [], redoStack: [], dirty: false, hidden: [], sketchVis: {}, originVis: false, selFeature: null, selSet: new Set(), cam: null });
 const isPristine = () => !dirty && !doc.features.length && doc.name === 'Untitled' && !doc.rev;
 function busy() { if (dialog || sketch || measure) { toast('Finish the current command first.', true); return true; } return false; }
-function switchToState(st) { applyTabState(st); renderDocTabs(); refresh(); }
+function switchToState(st) { applyTabState(st); syncViewBanner(); if (doc.name && doc.rev) rememberLast(doc.name); renderDocTabs(); refresh(); } // the design you switch to is the one reopened next time
 /** Open a blank design in a new tab. With reuseBlank, an untouched blank tab is reused instead. */
 function newTab({ reuseBlank = false } = {}) {
   if (busy()) return false;
@@ -2924,7 +2941,7 @@ function setSaveState(kind) {
   el.title = { pending: 'Unsaved changes', saving: 'Saving…', saved: 'All changes saved', conflict: 'Not saved: this design was changed elsewhere', error: 'Could not save. Retrying…' }[kind] || '';
   el.classList.toggle('on', kind !== 'saved');
 }
-const canAutosave = () => !!(acct.server && acct.user && doc.name !== 'Untitled' && doc.rev && !doc.conflict);
+const canAutosave = () => !!(acct.server && acct.user && doc.name !== 'Untitled' && doc.rev && !doc.conflict && !doc.viewingRev); // an older version being viewed must never overwrite the latest
 function scheduleServerSave() {
   changeSeq++;
   if (!canAutosave()) return;
@@ -2956,7 +2973,7 @@ function renderDocTabs() {
     const active = t.id === activeTab, el = document.createElement('div');
     el.className = 'doc-tab' + (active ? ' active' : '');
     el.innerHTML = `<button class="doc-sel"${active ? ' aria-current="true"' : ''}><span class="doc-ic"></span><span class="doc-name"${active ? ' id="doc-name"' : ''}></span><span class="doc-dirty${tabDirty(t) ? ' on' : ''}"${active ? ' id="doc-dirty"' : ''}></span></button><button class="doc-x" title="Close design" aria-label="Close ${esc(tabName(t))}"></button>`;
-    el.querySelector('.doc-name').textContent = tabName(t);
+    el.querySelector('.doc-name').textContent = tabName(t) + ((t.id === activeTab ? doc.viewingRev : t.state.doc.viewingRev) ? ` (V${t.id === activeTab ? doc.viewingRev : t.state.doc.viewingRev})` : '');
     el.querySelector('.doc-ic').innerHTML = LOGO_MARK;
     el.querySelector('.doc-x').innerHTML = uicon('close', 12, 2);
     el.title = tabName(t);
@@ -3562,8 +3579,8 @@ async function showVersions(pr) {
       if (b.dataset.a === 'open') {
         if (!newTab({ reuseBlank: true })) return;
         m.close();
-        loadProject(txt, pr.ver, pr.seq || pr.ver); doc.name = pr.name; $('#doc-name').textContent = pr.name; dirty = true; $('#doc-dirty').classList.add('on'); refresh();
-        toast(`Opened V${rev} of "${pr.name}". Save to make it the latest version.`);
+        loadProject(txt, pr.ver, pr.seq || pr.ver); doc.name = pr.name; doc.viewingRev = rev; renderDocTabs(); showViewBanner(); refresh();
+        toast(`Opened V${rev} of "${pr.name}". Use the bar at the top to go back to the latest version.`);
       } else {
         if (!(await confirmBox({ title: `Restore V${rev}?`, message: `This adds a new version on top called "Restored from V${rev}". The current version stays in the history, so nothing is lost.`, ok: 'Restore' }))) return;
         const p = await call('PUT', '/projects/' + encodeURIComponent(pr.name), txt, { 'if-match': String(pr.ver), 'x-note': encodeURIComponent(`Restored from V${rev}`) });

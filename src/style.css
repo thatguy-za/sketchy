@@ -348,7 +348,8 @@ form .modal-foot { padding: 4px 0 0; }
 .conbadge { position: absolute; z-index: 4; min-width: 18px; height: 18px; padding: 0 3px; border: 1px solid var(--c-c62828); border-radius: 3px; background: var(--c-ffffff); color: var(--c-c62828); font-size: var(--fs-xs); font-weight: 600; line-height: 1; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
 .conbadge:hover { background: var(--c-c62828); color: var(--c-ffffff); }
 
-#banner { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 7; display: flex; align-items: center; gap: 10px; background: var(--c-fff7e0); border: 1px solid var(--c-e0b64a); border-radius: 4px; padding: 6px 10px; box-shadow: 0 2px 8px rgba(0,0,0,.18); max-width: 70%; }
+#banner { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 7; display: flex; align-items: center; gap: 10px; background: var(--c-fff7e0); border: 1px solid var(--c-e0b64a); border-radius: 4px; padding: 6px 10px; box-shadow: 0 2px 8px rgba(0,0,0,.18); max-width: min(720px, 70%); }
+#banner .btn { white-space: nowrap; flex: 0 0 auto; }
 #banner svg { display: inline-block; vertical-align: -3px; color: var(--c-985800); }
 #banner[hidden] { display: none; }
 .conflict-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }

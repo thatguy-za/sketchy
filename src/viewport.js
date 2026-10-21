@@ -175,7 +175,7 @@ export class Viewport {
     this.originGroup.visible = false;
     this.scene.add(this.originGroup);
   }
-  setOriginVisible(v) { this.originGroup.visible = v; }
+  setOriginVisible(v) { this.originGroup.visible = v; this.originOn = v; if (this.originMarks) this.originMarks.visible = v && !this.opts.render; } // the planes and the axis lines go together
   /** Effective layout: 'single', 'h' (one above the other) or 'v' (side by side). Sketching and the move gizmo need one full view. */
   get layout() { return this.holds.size ? 'single' : this.layoutWanted; }
   hold(key, on) {
@@ -522,7 +522,7 @@ export class Viewport {
     this.mats.body.wireframe = this.mats.sel.wireframe = this.mats.hover.wireframe = this.opts.wire;
     for (const mm of Object.values(this.colorMats || {})) mm.wireframe = this.opts.wire;
     this.grid.visible = this.opts.grid && !this.hideGround && !this.opts.render;
-    if (this.originMarks) this.originMarks.visible = !this.opts.render;
+    if (this.originMarks) this.originMarks.visible = !!this.originOn && !this.opts.render;
     if (this.bedObj) this.bedObj.visible = this.opts.bed;
   }
 
