@@ -3,12 +3,13 @@
 // Run with `npm run test:robustness`.
 import { initHeadless, evaluate } from '../src/headless.js';
 import { findEdgeChains, edgeRef } from '../src/edges.js';
-import { planarFace } from '../src/edges.js';
+import { planarFace, curvedFace, findCurvedTri, faceOf } from '../src/edges.js';
 import { findFaceTri, rebuild, clearKernelCache, resolvePlanes } from '../src/kernel.js';
 import { findSkins } from '../src/skins.js';
 import { applyConstraints, definedState } from '../src/sketchcons.js';
 import { extendAt, breakAt, chamferShape } from '../src/sketchedit.js';
 import { buildBVH, raycastBVH } from '../src/bvh.js';
+import { look, TEXTURES, textureById } from '../src/materials.js';
 import { clusterMesh } from '../src/lod.js';
 
 await initHeadless();
@@ -434,6 +435,42 @@ scenario('Sketch: extend, break and chamfer', () => {
   check('two distances cut different lengths', c && Math.abs(c.pts[1][0] - 8) < 1e-9 && Math.abs(c.pts[2][1] - 4) < 1e-9, JSON.stringify(c?.pts));
   check('a chamfer longer than the side is refused', chamferShape(sq, 0, 12) === null);
   check('the end of an open path has no corner to cut', chamferShape(line([0, 0], [5, 0]), 0, 1) === null);
+});
+
+// ---- colours and textures ----
+{
+  let l = look({ texture: 'wood' });
+  check('a texture on its own is shown in its own colours (white tint)', l.custom && l.texture === 'wood' && l.color === '#ffffff' && l.texSize === textureById('wood').size, JSON.stringify(l));
+  l = look({ texture: 'wood', color: '#336699', texSize: 25 });
+  check('a colour tints the texture and a stored size wins', l.color === '#336699' && l.texSize === 25);
+  check('an unknown texture id is ignored', look({ texture: 'nope' }).custom === false);
+  check('a texture size is clamped to a sane range', look({ texture: 'dots', texSize: 1e9 }).texSize === 2000 && look({ texture: 'dots', texSize: 0.001 }).texSize === 0.5);
+  check('every texture has an id, a name and a draw function', TEXTURES.every((t) => t.id && t.name && t.size > 0 && typeof t.draw === 'function'));
+  check('an older plain-colour appearance still works', look('#ff0000').color === '#ff0000' && look('#ff0000').texture === undefined);
+}
+
+scenario('Curved faces', () => {
+  const cyl = bodyOf(evaluate(doc([prim('cyl', 'cylinder', { radius: 10, height: 25 })])), 'cyl');
+  const { V, T } = mesh(cyl), nt = T.length / 3;
+  let side = -1, cap = -1;
+  for (let t = 0; t < nt; t++) { const f = planarFace(V, T, t); if (f && cap < 0) cap = t; if (!f && side < 0) side = t; }
+  const cf = curvedFace(V, T, side);
+  check('the side of a cylinder is one curved face', cf && cf.curved && cf.tris.length > 100, cf && String(cf.tris.length));
+  check('the cylinder caps are not part of the curved face', cf && cf.tris.every((t) => !planarFace(V, T, t)));
+  check('a flat cap is not a curved face', curvedFace(V, T, cap) === null);
+  check('faceOf gives the flat face for a cap and the curved face for the side', !faceOf(V, T, cap).curved && faceOf(V, T, side).curved);
+  const t2 = findCurvedTri(V, T, cf.point, cf.normal);
+  check('a stored curved face is found again', t2 >= 0 && curvedFace(V, T, t2)?.tris.length === cf.tris.length);
+  check('its reference point is the same wherever the face was clicked', (() => { const other = cf.tris[Math.floor(cf.tris.length / 2)]; const o = curvedFace(V, T, other); return o && JSON.stringify(o.point) === JSON.stringify(cf.point); })());
+  const sph = bodyOf(evaluate(doc([prim('s', 'sphere', { radius: 10 })])), 's');
+  const sm = mesh(sph), sf = curvedFace(sm.V, sm.T, 0);
+  check('a sphere is one curved face', sf && sf.tris.length === sm.T.length / 3, sf && `${sf.tris.length} of ${sm.T.length / 3}`);
+  const box = bodyOf(evaluate(doc([prim('b', 'box', { sx: 20, sy: 20, sz: 20, radius: 0 })])), 'b'), bm = mesh(box);
+  check('a box has no curved faces', Array.from({ length: bm.T.length / 3 }, (_, t) => t).every((t) => curvedFace(bm.V, bm.T, t) === null));
+  const rb = bodyOf(evaluate(doc([prim('r', 'box', { sx: 20, sy: 20, sz: 20, radius: 4 })])), 'r'), rm = mesh(rb);
+  let corner = -1; for (let t = 0; t < rm.T.length / 3; t++) if (!planarFace(rm.V, rm.T, t)) { corner = t; break; }
+  const cr = corner >= 0 && curvedFace(rm.V, rm.T, corner);
+  check('a rounded corner is curved and does not swallow the flat faces beside it', cr && cr.tris.every((t) => !planarFace(rm.V, rm.T, t)));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

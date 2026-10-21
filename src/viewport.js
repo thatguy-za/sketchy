@@ -26,9 +26,9 @@ function bvhRaycast(raycaster, intersects) {
   intersects.push({ distance: hit.t, point: new THREE.Vector3(o.x + d.x * hit.t, o.y + d.y * hit.t, o.z + d.z * hit.t), object: this, faceIndex: i, face: { a, b, c, normal: n } });
 }
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { PLANES, planeFrame } from './kernel.js';
-import { look } from './materials.js';
-import { planarFace } from './edges.js';
+import { PLANES, planeFrame, findFaceTri } from './kernel.js';
+import { look, textureById } from './materials.js';
+import { planarFace, curvedFace, findCurvedTri, faceOf } from './edges.js';
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -409,7 +409,7 @@ export class Viewport {
     }
     for (const [k, m] of old) if (!kept.has(k)) this.disposeMesh(m);
     this.prepareLOD();
-    this.refreshMaterials();
+    if (this.facePaint?.length || this.paintGroup?.children.length) this.rebuildFacePaint(); else this.refreshMaterials();
     this.rebuildSection();
     if (this.opts.render) this.fitRenderLights();
     if (!this.fitted && bodies.length) { this.fit(); this.fitted = true; }
@@ -446,14 +446,69 @@ export class Viewport {
     this.sectionGroup = g; this.scene.add(g);
   }
 
-  // Per-body appearance (doc.appearance): a material and/or a colour; falls back to the default grey material.
+  // Per-body appearance (doc.appearance): a material, a colour and/or a texture; falls back to the default grey material.
   bodyMat(id) {
     const lk = look(this.bodyColors?.[id]);
-    if (!lk.custom) return this.mats.body;
+    return lk.custom ? this.matFor(lk) : this.mats.body;
+  }
+  /** One shared material per look. overlay: for a painted face, drawn just in front of the body's own surface. */
+  matFor(lk, overlay = false) {
     this.colorMats ||= {};
-    const key = `${lk.color}|${lk.metalness}|${lk.roughness}|${lk.opacity}`;
-    if (!this.colorMats[key]) this.colorMats[key] = new THREE.MeshStandardMaterial({ color: lk.color, metalness: lk.metalness, roughness: lk.roughness, transparent: lk.opacity < 1, opacity: lk.opacity, side: THREE.DoubleSide, depthWrite: lk.opacity >= 1 });
+    const key = `${overlay ? 'p' : 'b'}|${lk.color}|${lk.metalness}|${lk.roughness}|${lk.opacity}|${lk.texture || ''}|${lk.texSize || 0}`;
+    if (!this.colorMats[key]) {
+      const m = new THREE.MeshStandardMaterial({ color: lk.color, metalness: lk.metalness, roughness: lk.roughness, transparent: lk.opacity < 1, opacity: lk.opacity, side: THREE.DoubleSide, depthWrite: lk.opacity >= 1, ...(overlay ? { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 } : {}) });
+      if (lk.metalness > 0.2) { m.envMap = this.ensureEnv(); m.envMapIntensity = 0.9; }
+      if (lk.texture) this.applyTexture(m, lk.texture, lk.texSize);
+      this.colorMats[key] = m;
+    }
     return this.colorMats[key];
+  }
+  /** The soft studio reflections used by render mode, also given to metals in the working view (a metal with nothing to reflect looks black). */
+  ensureEnv() {
+    if (!this.envTex) { const pm = new THREE.PMREMGenerator(this.renderer); this.envTex = pm.fromScene(new RoomEnvironment(), 0.04).texture; pm.dispose(); }
+    return this.envTex;
+  }
+  /** Map a texture onto a material from where the surface is in space (a box projection), so no UV coordinates are needed. */
+  applyTexture(m, id, size) {
+    this.texCache ||= {};
+    if (!this.texCache[id]) {
+      const def = textureById(id), n = 256, cv = document.createElement('canvas');
+      cv.width = cv.height = n; def.draw(cv.getContext('2d'), n);
+      const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+      this.texCache[id] = t;
+    }
+    const tex = this.texCache[id];
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.triTex = { value: tex }; sh.uniforms.triSize = { value: size };
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vTriPos;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvTriPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vTriPos;\nuniform sampler2D triTex;\nuniform float triSize;')
+        .replace('#include <map_fragment>', `vec3 triN = abs(normalize(cross(dFdx(vTriPos), dFdy(vTriPos))));
+          vec3 triW = pow(triN, vec3(16.0)); triW /= (triW.x + triW.y + triW.z);
+          vec4 triC = texture2D(triTex, vTriPos.yz / triSize) * triW.x + texture2D(triTex, vTriPos.xz / triSize) * triW.y + texture2D(triTex, vTriPos.xy / triSize) * triW.z;
+          diffuseColor *= triC;`);
+    };
+    m.customProgramCacheKey = () => 'tri' + id + size;
+  }
+  /** Painted faces: [{ body, point, normal, color?, material?, texture?, texSize? }], drawn over the body they belong to. */
+  setFacePaint(list) { this.facePaint = list || []; this.rebuildFacePaint(); }
+  rebuildFacePaint() {
+    if (!this.paintGroup) { this.paintGroup = new THREE.Group(); this.scene.add(this.paintGroup); }
+    for (const c of [...this.paintGroup.children]) { c.geometry.dispose(); this.paintGroup.remove(c); }
+    for (const f of this.facePaint || []) {
+      const lk = look(f), mesh = lk.custom && this.bodyGroup.children.find((c) => c.userData.id === f.body);
+      if (!mesh || !mesh.userData.src) continue;
+      const { verts, tris } = mesh.userData.src, ft = this.faceTris(mesh, f);
+      if (!ft) continue;
+      const pos = [];
+      for (const t of ft) for (let k = 0; k < 3; k++) { const vi = tris[t * 3 + k]; pos.push(verts[vi * 3], verts[vi * 3 + 1], verts[vi * 3 + 2]); }
+      let g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g = f.curved ? toCreasedNormals(g, (35 * Math.PI) / 180) : (g.computeVertexNormals(), g); // a curved face shades smoothly like the body does
+      const m = new THREE.Mesh(g, this.matFor(lk, true));
+      m.raycast = () => {}; m.renderOrder = 1;
+      this.paintGroup.add(m);
+    }
+    this.refreshMaterials();
   }
   /**
    * Render mode: image-based lighting, a fixed sun with soft shadows on a ground plane, filmic tone mapping, and no grid,
@@ -461,7 +516,7 @@ export class Viewport {
    */
   setRender(on) {
     this.opts.render = !!on;
-    if (on && !this.envTex) { const pm = new THREE.PMREMGenerator(this.renderer); this.envTex = pm.fromScene(new RoomEnvironment(), 0.04).texture; pm.dispose(); }
+    if (on) this.ensureEnv();
     this.scene.environment = on ? this.envTex : null;
     this.renderer.toneMapping = on ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -543,6 +598,24 @@ export class Viewport {
     if (!face) return { curved: true, id, point: hit.point.toArray().map(r4), normal: hit.face.normal.toArray().map(r4) };
     const n = face.normal.map((c) => +c.toFixed(6));
     return { face: true, id, point: hit.point.toArray().map(r4), normal: n, tris: face.tris, mesh: hit.object };
+  }
+  /** Like pickPlanarFace, but a curved surface gives its whole curved face too ({face, curved: true, tris, mesh}). */
+  pickFace(ev) {
+    this.setRay(ev);
+    const hit = this.ray.intersectObjects(this.bodyGroup.children, false)[0];
+    if (!hit) return null;
+    const id = hit.object.userData.id, src = hit.object.userData.src, r4 = (v) => +v.toFixed(4);
+    const face = faceOf(src.verts, src.tris, hit.faceIndex);
+    if (!face) return null;
+    if (face.curved) return { face: true, curved: true, id, point: face.point, normal: face.normal, tris: face.tris, mesh: hit.object };
+    return { face: true, id, point: hit.point.toArray().map(r4), normal: face.normal.map((c) => +c.toFixed(6)), tris: face.tris, mesh: hit.object };
+  }
+  /** The triangles of a stored face {point, normal, curved?} on a body mesh now, or null. */
+  faceTris(mesh, f) {
+    const { verts, tris } = mesh.userData.src;
+    if (f.curved) { const t = findCurvedTri(verts, tris, f.point, f.normal); const c = t >= 0 ? curvedFace(verts, tris, t) : null; return c ? c.tris : null; }
+    const t = findFaceTri(verts, tris, f.point, f.normal), pf = t >= 0 ? planarFace(verts, tris, t) : null;
+    return pf ? pf.tris : null;
   }
   // Closest mesh vertex to the cursor (within `px` pixels) or the surface hit: {point, vertex, id}
   /** Where the mouse ray meets the horizontal plane z = `z` (for picking in empty space): [x, y, z] or null. */
@@ -878,22 +951,8 @@ export class Viewport {
     };
     for (const f of selected || []) {
       const mesh = this.bodyGroup.children.find((c) => c.userData.id === f.id);
-      if (!mesh) continue;
-      const { verts, tris } = mesh.userData.src;
-      let best = -1, bd = Infinity;
-      for (let i = 0; i < tris.length / 3; i++) {
-        const a = [0, 1, 2].map((k) => verts[tris[i * 3] * 3 + k]), b = [0, 1, 2].map((k) => verts[tris[i * 3 + 1] * 3 + k]), c = [0, 1, 2].map((k) => verts[tris[i * 3 + 2] * 3 + k]);
-        const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
-        const l = Math.hypot(...n) || 1; n = n.map((q) => q / l);
-        if (n[0] * f.normal[0] + n[1] * f.normal[1] + n[2] * f.normal[2] < 0.999) continue;
-        if (Math.abs((f.point[0] - a[0]) * f.normal[0] + (f.point[1] - a[1]) * f.normal[1] + (f.point[2] - a[2]) * f.normal[2]) > 0.02) continue;
-        const d = Math.hypot((a[0] + b[0] + c[0]) / 3 - f.point[0], (a[1] + b[1] + c[1]) / 3 - f.point[1], (a[2] + b[2] + c[2]) / 3 - f.point[2]);
-        if (d < bd) { bd = d; best = i; }
-      }
-      if (best < 0) continue;
-      const face = planarFace(verts, tris, best);
-      if (face) draw(face.tris, mesh, 0xe0453a, 0.5);
+      const ft = mesh && this.faceTris(mesh, f);
+      if (ft) draw(ft, mesh, 0xe0453a, 0.5);
     }
     if (hover?.face) draw(hover.tris, hover.mesh, 0xf08c00, 0.4);
   }

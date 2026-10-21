@@ -68,7 +68,7 @@ export const CMD = {
   printer: C('Printer…', 'printer', { desc: 'Chooses the printer whose build volume is shown and checked against.' }),
   printcheck: C('Print Check', 'properties', { desc: 'Checks the bodies for printing: will they fit the bed, where do they need supports, and are any walls too thin.' }),
   buildvol: C('Show Build Volume', 'box', { desc: 'Shows the printer build volume as a box in the viewport.' }),
-  appearance: C('Appearance', 'insertmesh', { desc: 'Gives bodies a material (colour, shine, transparency and density for the mass) or a custom colour.' }),
+  appearance: C('Appearance', 'insertmesh', { desc: 'Gives a body, or a selected flat face, a material (colour, shine, transparency and density for the mass), a custom colour and/or a texture.' }),
   render: C('Render View', 'sectionan', { desc: 'Shows the model with reflections, soft shadows and no grid. Toggle it off to go back to the working view.' }),
   saveimage: C('Save Image', 'exportfile', { desc: 'Saves the current view as a PNG at a chosen size, optionally transparent.' }),
   export: C('Export', 'exportfile', { desc: 'Saves the design as STL, 3MF, OBJ, STEP or a Sketchy project file.' }),

@@ -927,6 +927,17 @@ table.cfg .cfg-name { font-weight: 600; width: 104px; }
 .ap-mat { display: grid; grid-template-columns: 26px 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; text-align: left; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--c-ffffff); color: inherit; cursor: pointer; font: inherit; }
 .ap-mat i { grid-row: 1 / 3; width: 24px; height: 24px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,.15); }
 .ap-mat span { font-weight: 600; } .ap-mat small { color: var(--muted); font-size: var(--fs-xs); }
+.ap-texs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.ap-tex { display: grid; grid-template-columns: 26px 1fr; column-gap: 8px; align-items: center; text-align: left; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--c-ffffff); color: inherit; cursor: pointer; font: inherit; }
+.ap-tex i { width: 24px; height: 24px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.15); }
+.ap-tex span { font-weight: 600; }
+.ap-tex:hover { border-color: var(--accent); }
+.ap-tex[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
+.ap-tex:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ap-size { margin-top: 8px; }
+.ap-apply { display: flex; align-items: center; gap: 6px; }
+.ap-apply span { color: var(--muted); font-size: var(--fs-sm); margin-right: 4px; }
+.ap-apply .btn[aria-checked="true"] { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .ap-mat:hover { border-color: var(--accent); }
 .ap-mat[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
 .ap-mat:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -1059,3 +1070,14 @@ body.touch .row { margin: 10px 0; }
 .lt-row .seg { display: flex; gap: 3px; flex-wrap: wrap; width: 100%; }
 .lt-row .seg .btn { padding: 3px 6px; font-size: var(--fs-xs); white-space: nowrap; flex: 0 0 auto; }
 .lt-row .seg .btn.on { background: var(--accent, #3d8bfd); color: #fff; border-color: transparent; }
+
+/* ---- Appearance panel (stays open while you drag swatches onto the model) */
+#ap-panel { position: absolute; right: 16px; top: 112px; width: 300px; max-height: calc(100% - 128px); display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--c-b4b6bb); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18), 0 1px 3px rgba(0,0,0,.12); overflow: hidden; z-index: 6; }
+#ap-panel .body { flex: 1; overflow: auto; }
+#ap-panel .ap-mats, #ap-panel .ap-texs { grid-template-columns: repeat(2, 1fr); max-height: none; overflow: visible; }
+#ap-panel .ap-mat, #ap-panel .ap-tex { cursor: grab; }
+#ap-panel .ap-mat:active, #ap-panel .ap-tex:active { cursor: grabbing; }
+#ap-panel .ap-hint { color: var(--muted); font-size: var(--fs-xs); margin: 2px 0 8px; }
+#ap-panel .foot { display: flex; gap: 8px; justify-content: flex-end; padding: 8px 12px; border-top: 1px solid var(--line); }
+#ap-panel .title .grow { flex: 1; }
+.tree-row.drop { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft); }

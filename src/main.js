@@ -27,7 +27,7 @@ import { createSketchUI } from './sketchui.js';
 import { smoothPath } from './solids.js';
 import { bedFit, overhangs, wallThickness } from './printcheck.js';
 import { withoutSkins } from './skins.js';
-import { MATERIALS, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
+import { MATERIALS, TEXTURES, textureById, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
 import { resolveSketch } from './sketchdims.js';
 import { CON_GLYPH, CON_LABEL, definedState } from './sketchcons.js';
 import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR } from './commands.js';
@@ -43,7 +43,7 @@ const PRINTERS = {
 // ------------------------------------------------------------------ state
 /** The unit new designs start in: a personal setting kept in this browser (Settings, Units). */
 const defaultUnits = () => { try { const u = localStorage.getItem('sketchy.units'); return UNIT_TABLE[u] ? u : 'mm'; } catch { return 'mm'; } };
-const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, units: defaultUnits(), components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
+const blankDoc = () => ({ name: 'Untitled', features: [], marker: 0, nextId: 1, params: [], appearance: {}, faceAppearance: [], units: defaultUnits(), components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
 /** Printers the person added themselves (a name and a build volume), kept in this browser. */
 const customPrinters = () => { try { const l = JSON.parse(localStorage.getItem('sketchy.printers') || '[]'); return Array.isArray(l) ? l.filter((x) => x && typeof x.name === 'string' && Array.isArray(x.size) && x.size.length === 3 && x.size.every((v) => v > 0)) : []; } catch { return []; } };
 const saveCustomPrinters = (l) => { try { localStorage.setItem('sketchy.printers', JSON.stringify(l)); } catch { /* storage unavailable */ } };
@@ -74,6 +74,7 @@ let selPriority = prefPriority;
 const savePriority = (v) => { prefPriority = v; try { localStorage.setItem('sketchy.selPriority', v); } catch { /* storage unavailable */ } };
 let selMode = 'click';           // click | window | freeform | paint (drag-selection tools)
 let selFace = null;
+let paintMode = null; // Appearance picked with nothing selected: { val, target: 'faces' | 'bodies' }; each click applies it, Esc finishes
 let viewBodies = [], skinCount = 0, skinWarned = false; // what the viewport draws, and how many triangles of zero-thickness walls were left out of it
 let selFaceB = null; // a second flat face (Shift or Ctrl-click) to measure against; only valid while selFace is still the face it was added to
 const faceB = () => (selFace && selFaceB && selFaceB.base === selFace ? selFaceB : null);
@@ -90,8 +91,8 @@ const sketchVis = {};
 const collapsed = { views: true, origin: true };
 
 let vp;
-const snapshot = () => ({ features: [...doc.features], marker: doc.marker, nextId: doc.nextId, params: [...(doc.params || [])], appearance: { ...(doc.appearance || {}) }, components: (doc.components || []).map((c) => ({ ...c })), bodyComp: { ...(doc.bodyComp || {}) }, configs: JSON.parse(JSON.stringify(doc.configs || [])), activeConfig: doc.activeConfig || null, canvases: (doc.canvases || []).map((c) => ({ ...c })) });
-const restore = (s) => { doc.features = [...s.features]; doc.marker = s.marker; doc.nextId = s.nextId; doc.params = [...(s.params || [])]; doc.appearance = { ...(s.appearance || {}) }; doc.components = (s.components || []).map((c) => ({ ...c })); doc.bodyComp = { ...(s.bodyComp || {}) }; doc.configs = JSON.parse(JSON.stringify(s.configs || [])); doc.activeConfig = s.activeConfig || null; doc.canvases = (s.canvases || []).map((c) => ({ ...c })); };
+const snapshot = () => ({ features: [...doc.features], marker: doc.marker, nextId: doc.nextId, params: [...(doc.params || [])], appearance: { ...(doc.appearance || {}) }, faceAppearance: (doc.faceAppearance || []).map((f) => ({ ...f })), components: (doc.components || []).map((c) => ({ ...c })), bodyComp: { ...(doc.bodyComp || {}) }, configs: JSON.parse(JSON.stringify(doc.configs || [])), activeConfig: doc.activeConfig || null, canvases: (doc.canvases || []).map((c) => ({ ...c })) });
+const restore = (s) => { doc.features = [...s.features]; doc.marker = s.marker; doc.nextId = s.nextId; doc.params = [...(s.params || [])]; doc.appearance = { ...(s.appearance || {}) }; doc.faceAppearance = (s.faceAppearance || []).map((f) => ({ ...f })); doc.components = (s.components || []).map((c) => ({ ...c })); doc.bodyComp = { ...(s.bodyComp || {}) }; doc.configs = JSON.parse(JSON.stringify(s.configs || [])); doc.activeConfig = s.activeConfig || null; doc.canvases = (s.canvases || []).map((c) => ({ ...c })); };
 function pushUndo(s) { undoStack.push(s); if (undoStack.length > 100) undoStack.shift(); redoStack = []; markDirty(); }
 function markDirty() { dirty = true; $('#doc-dirty').classList.add('on'); scheduleAutosave(); scheduleServerSave(); nameUntitled(); }
 function toast(msg, err = false) {
@@ -229,6 +230,7 @@ function applyResult(evalErr) {
   viewBodies = result.bodies.map((b) => withoutSkins(b)); // zero-thickness walls are not drawn: they hold no material and would not print
   skinCount = viewBodies.reduce((a, b) => a + (b.skinned || 0), 0);
   if (skinCount && !skinWarned) { skinWarned = true; toast('Some walls have no thickness, so they are hidden: they hold no material and would not print.'); } else if (!skinCount) skinWarned = false;
+  vp.facePaint = doc.faceAppearance || [];
   vp.setBodies([...viewBodies, ...(result.surfaces || [])].filter((b) => !hiddenBodies.has(b.id)));
   for (const id of [...vp.selected]) if (!result.bodies.some((b) => b.id === id)) vp.selected.delete(id);
   vp.refreshMaterials();
@@ -477,6 +479,7 @@ function faceGap(a, b) {
   return { parallel: false, ang };
 }
 function renderStatus() {
+  if (paintMode) { $('#statusbar').textContent = `Appearance: click ${paintMode.target === 'faces' ? 'a face' : 'a body'} to apply it · Esc to finish`; return; }
   const fb = faceB();
   if (fb) {
     const g = faceGap(selFace, fb);
@@ -504,7 +507,7 @@ const CUSTOM = {
   printcheck: () => showPrintCheck(),
   interference: () => showInterference(),
   section: () => showSection(),
-  appearance: () => appearanceDialog(vp.selected.size ? [...vp.selected] : selFace ? [selFace.id] : result.bodies.length === 1 ? [result.bodies[0].id] : []),
+  appearance: () => openAppearance(),
   render: () => toggleRender(),
   saveimage: () => saveImageDialog(),
   drivejoints: () => showDriveJoints(),
@@ -518,10 +521,12 @@ const CUSTOM = {
 function runCommand(id, ev) {
   const c = CMD[id];
   if (!c) return;
+  if (paintMode && id !== 'appearance') endPaint(); // starting anything else ends the painting
   if (c.sk) { if (sketch && !sketch.picking) setSketchTool(c.sk); return; }
   if (c.skAction === 'delete') return sketchDeleteSelected();
   if (sketch && !['select', 'finishsketch', 'cancelpick', 'svg', 'dxf', 'sk_text'].includes(id)) return toast('Finish the sketch first.');
   if (id === 'remove') { lastCmd = id; return deleteSelection(); }
+  if (selFace?.curved && (id === 'extrude' || id === 'sketch')) return toast('A sketch or Press/Pull needs a flat face. Pick a flat face, or use a plane.', true);
   if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
   if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
   if (c.feature) { lastCmd = id; return startFeature(c.feature, c.preset); }
@@ -558,6 +563,7 @@ function sketchOnSelectedFace() {
   enterSketch(sketch.index, true, { plane: 'custom', origin: n.map((c) => +(c * d).toFixed(4)), normal: nn.map((c) => +c.toFixed(6)), xdir });
 }
 function renderRibbon() {
+  apPanel?.sync();
   renderStatus(); // the status line follows the selection (two faces show the distance between them)
   vp.hold('sketch', !!sketch);
   const picking = !!sketch?.picking, inSketch = !!sketch && !picking;
@@ -657,6 +663,13 @@ function renderTree() {
     if (r.dbl) el.ondblclick = r.dbl;
     if (r.ctx) el.oncontextmenu = (e) => { e.preventDefault(); treeMenu(e, r.ctx); };
     if (r.ctx?.kind === 'body') { el.onmouseenter = () => { vp.hover = r.ctx.id; vp.refreshMaterials(); }; el.onmouseleave = () => { vp.hover = null; vp.refreshMaterials(); }; }
+    if (r.ctx?.kind === 'body' || r.ctx?.kind === 'component') { // an appearance dragged from the Appearance panel lands on a body (or on every body of a component)
+      const ids = () => (r.ctx.kind === 'body' ? [r.ctx.id] : result.bodies.filter((b) => doc.bodyComp?.[b.id] === r.ctx.id).map((b) => b.id));
+      const ours = (e) => [...(e.dataTransfer?.types || [])].includes(AP_MIME) && apPanel;
+      el.addEventListener('dragover', (e) => { if (!ours(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; el.classList.add('drop'); });
+      el.addEventListener('dragleave', () => el.classList.remove('drop'));
+      el.addEventListener('drop', (e) => { if (!ours(e)) return; e.preventDefault(); el.classList.remove('drop'); let val; try { val = JSON.parse(e.dataTransfer.getData(AP_MIME)); } catch { val = apDrag; } const list = ids(); if (!list.length || !val) return; setBodyAppearance(list, val); toast(`Appearance applied to ${list.length} ${list.length > 1 ? 'bodies' : 'body'}`); });
+    }
     if (r.onEye) el.querySelector('.eyeb').onclick = (e) => { e.stopPropagation(); r.onEye(); };
     host.appendChild(el);
   }
@@ -913,7 +926,7 @@ function treeMenu(ev, c) {
       { label: isolated ? 'Unisolate' : 'Isolate', run: () => { if (isolated) hiddenBodies.clear(); else bodies.forEach((x) => (x.id === c.id ? hiddenBodies.delete(x.id) : hiddenBodies.add(x.id))); refresh(); } },
       ...((doc.components || []).length || true ? [{ sep: true }, { head: 'COMPONENT' }, ...(doc.components || []).map((cp) => ({ label: cp.name, check: doc.bodyComp?.[c.id] === cp.id, run: () => moveToComponent(vp.selected.size > 1 ? [...vp.selected] : [c.id], cp.id) })), { label: 'New component with this body', run: () => newComponent() }, ...(doc.bodyComp?.[c.id] ? [{ label: 'Remove from component', run: () => moveToComponent([c.id], null) }] : [])] : []),
       { sep: true },
-      { label: 'Appearance…', ficon: 'insertmesh', run: () => appearanceDialog(vp.selected.has(c.id) ? [...vp.selected] : [c.id]) },
+      { label: 'Appearance…', ficon: 'insertmesh', run: () => { if (!vp.selected.has(c.id)) { selFace = null; vp.showFaces([], null); vp.selected.clear(); vp.selected.add(c.id); vp.refreshMaterials(); renderTree(); } openAppearance(); } },
       { sep: true },
       { label: 'Properties', uicon: 'help', run: showInfo },
       { label: 'Delete', hint: 'Del', run: deleteSelection },
@@ -1152,6 +1165,7 @@ const ctx = () => {
 
 function startFeature(key, overrides = {}) {
   if (dialog || sketch) return;
+  apPanel?.close();
   endMeasure();
   const def = FEATURES[key];
   if (key === 'sketch') return startSketchPlanePick();
@@ -1165,6 +1179,7 @@ function startFeature(key, overrides = {}) {
   const params = { ...def.make(c), ...overrides };
   if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
   if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
+  if (selFace?.curved && !selEdges.length && ['fillet', 'chamfer', 'presspull', 'hole', 'shell', 'draft'].includes(key)) return toast('That tool needs a flat face (or edges). A curved face can be given an appearance.', true);
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
     params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
     if (!params.edges.length) toast('That face has no edges to round.', true);
@@ -1678,6 +1693,7 @@ function startSketchPlanePick() {
   renderRibbon();
 }
 function enterSketch(index, isNew, plane) {
+  apPanel?.close();
   const wasMarker = sketch?.picking ? sketch.marker ?? doc.marker : doc.marker;
   const pre = snapshot();
   if (isNew) {
@@ -2133,37 +2149,143 @@ function showDriveJoints() {
   });
   $('#i-close').onclick = () => { wrap.classList.remove('open'); };
 }
-/** Appearance: choose a material (colour, shine, transparency and density for the mass) and/or a custom colour for bodies. */
-function appearanceDialog(ids) {
-  const bodies = result.bodies.filter((b) => ids.includes(b.id));
-  if (!bodies.length) return toast('Select a body first (click it in the Browser, or double-click it in the model).', true);
-  const cur = appearanceOf((doc.appearance || {})[bodies[0].id]);
-  let material = cur.material || '', customOn = !!cur.color, color = cur.color || '#c3c7cd';
+/** The stored appearance of a face (doc.faceAppearance), matched by body and plane. */
+const faceEntryIdx = (f) => (doc.faceAppearance || []).findIndex((e) => e.body === f.id && (f.curved ? e.curved && Math.hypot(e.point[0] - f.point[0], e.point[1] - f.point[1], e.point[2] - f.point[2]) < 0.05 : !e.curved) && e.normal[0] * f.normal[0] + e.normal[1] * f.normal[1] + e.normal[2] * f.normal[2] > 0.999 && Math.abs((e.point[0] - f.point[0]) * f.normal[0] + (e.point[1] - f.point[1]) * f.normal[1] + (e.point[2] - f.point[2]) * f.normal[2]) < 0.05);
+const texPreview = (t) => { try { const c = document.createElement('canvas'); c.width = c.height = 48; const x = c.getContext('2d'); const big = document.createElement('canvas'); big.width = big.height = 256; t.draw(big.getContext('2d'), 256); x.fillStyle = x.createPattern(big, 'repeat'); x.scale(48 / 128, 48 / 128); x.fillRect(0, 0, 128, 128); return c.toDataURL(); } catch { return ''; } };
+function setFaceAppearance(face, val) {
+  const any = !!(val.material || val.color || val.texture);
+  mutate(() => {
+    const list = (doc.faceAppearance || []).map((x) => ({ ...x })), i = faceEntryIdx(face);
+    if (!any) { if (i >= 0) list.splice(i, 1); } else { const ent = { body: face.id, point: [...face.point], normal: [...face.normal], ...(face.curved ? { curved: true } : {}), ...val }; if (i >= 0) list[i] = ent; else list.push(ent); }
+    doc.faceAppearance = list;
+  });
+}
+function setBodyAppearance(ids, val) {
+  const any = !!(val.material || val.color || val.texture);
+  mutate(() => { const ap = { ...(doc.appearance || {}) }; for (const id of ids) { if (any) ap[id] = val; else delete ap[id]; } doc.appearance = ap; });
+}
+const endPaint = () => { paintMode = null; vp.showFaces([], null); renderStatus(); };
+/** One click while an appearance is being painted on: the face (or body) under the cursor takes it. */
+function paintClick(e) {
+  if (paintMode.target === 'faces') {
+    const tg = vp.pickFace(e);
+    if (!tg?.face) return;
+    setFaceAppearance({ id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) }, paintMode.val);
+  } else {
+    const hit = vp.pickBody(e);
+    if (hit) setBodyAppearance([hit.id], paintMode.val);
+  }
+}
+let apPanel = null; // the open Appearance panel: { el, close, sync, spec }
+/** The looks being dragged from the Appearance panel (kept here because dragover cannot read dataTransfer values). */
+let apDrag = null;
+const AP_MIME = 'application/x-sketchy-appearance';
+/** What a drop (or click) at a point applies it to: faces or bodies, whichever the panel is set to. */
+function appearanceTargetsAt(e) {
+  if (apPanel?.target() === 'faces') { const tg = vp.pickFace(e); return tg?.face ? { face: { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) }, tg } : null; }
+  const hit = vp.pickBody(e);
+  return hit ? { bodies: [hit.id] } : null;
+}
+function applyLook(t, val) { if (t?.face) setFaceAppearance(t.face, val); else if (t?.bodies) setBodyAppearance(t.bodies, val); }
+/**
+ * Appearance, as a panel that stays open while you work (like Fusion's): choose a material, a custom colour and/or a texture,
+ * set Apply to Bodies or Faces, then drag a swatch onto a face, a body or a body in the Browser, or press Apply to
+ * change what is selected. Closing it with the X (or Esc) leaves the changes in place.
+ */
+function openAppearance() {
+  if (apPanel) { apPanel.sync(); return; }
+  if (dialog || sketch) return toast('Finish the open tool first.', true);
+  const selBodies = () => (vp.selected.size ? [...vp.selected] : []);
+  const first = selFace ? { face: selFace } : selBodies().length ? { bodies: selBodies() } : result.bodies.length === 1 ? { bodies: [result.bodies[0].id] } : {};
+  const fi = first.face ? faceEntryIdx(first.face) : -1;
+  const cur = appearanceOf(first.face ? (fi >= 0 ? doc.faceAppearance[fi] : {}) : first.bodies ? (doc.appearance || {})[first.bodies[0]] : {});
+  let material = cur.material || '', customOn = !!cur.color, color = cur.color || '#c3c7cd', texture = cur.texture || '', target = first.face ? 'faces' : 'bodies';
+  const texMm = cur.texSize || (textureById(texture)?.size ?? 20);
   const swatch = (m) => `background:radial-gradient(circle at 32% 28%, #fff 0, ${m.color} 32%, #000 140%);${m.opacity < 1 ? 'opacity:.7' : ''}`;
   const groups = ['Printing', 'Metal', 'Other'];
-  const md = modal(`<div class="modal-title">Appearance</div>
-    <form class="modal-body ap">
-      <p class="rp-lead">${bodies.length === 1 ? `<b>${esc(bodies[0].name)}</b>` : `<b>${bodies.length} bodies</b>`}</p>
+  const el = document.createElement('div');
+  el.id = 'ap-panel'; el.className = 'props';
+  el.innerHTML = `<div class="title"><span>APPEARANCE</span><span class="grow"></span><button type="button" class="tmin" id="ap-x" aria-label="Close Appearance" title="Close">×</button></div>
+    <div class="body ap">
+      <div class="ap-apply" role="radiogroup" aria-label="Apply to"><span>Apply to</span><button type="button" class="btn sm" role="radio" data-ap="bodies">Bodies</button><button type="button" class="btn sm" role="radio" data-ap="faces">Faces</button></div>
+      <p class="rp-lead" id="ap-lead"></p>
+      <div class="ap-hint">Drag a swatch onto a face, a body, or a body in the Browser.</div>
       <div role="radiogroup" aria-label="Material" class="ap-mats">
-        <button type="button" class="ap-mat" role="radio" data-m="" aria-checked="${material === ''}"><i class="sw-default"></i><span>Default</span></button>
-        ${groups.map((g) => `<div class="ap-gh">${g}</div>` + MATERIALS.filter((m) => m.group === g).map((m) => `<button type="button" class="ap-mat" role="radio" data-m="${m.id}" aria-checked="${material === m.id}"><i data-mid="${m.id}"></i><span>${esc(m.name)}</span><small>${m.density} g/cm³</small></button>`).join('')).join('')}
+        <button type="button" draggable="true" class="ap-mat" role="radio" data-m=""><i class="sw-default"></i><span>Default</span></button>
+        ${groups.map((g) => `<div class="ap-gh">${g}</div>` + MATERIALS.filter((m) => m.group === g).map((m) => `<button type="button" draggable="true" class="ap-mat" role="radio" data-m="${m.id}"><i data-mid="${m.id}"></i><span>${esc(m.name)}</span><small>${m.density} g/cm³</small></button>`).join('')).join('')}
       </div>
       <label class="ex-chk"><input type="checkbox" name="custom" ${customOn ? 'checked' : ''}><span>Custom colour</span><input type="color" name="color" value="${color}" aria-label="Colour"></label>
-      <div class="modal-foot flush"><button type="button" class="btn" id="ap-c">Cancel</button><button type="submit" class="btn primary">Apply</button></div>
-    </form>`);
-  const form = md.el.querySelector('form'), mats = [...md.el.querySelectorAll('.ap-mat')];
-  md.el.querySelectorAll('[data-mid]').forEach((i) => { const m = MATERIALS.find((x) => x.id === i.dataset.mid); if (m) i.style.cssText = swatch(m); });
-  const pick = (id) => { material = id; mats.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.m === id))); };
-  mats.forEach((b) => (b.onclick = () => pick(b.dataset.m)));
-  form.color.oninput = () => { form.custom.checked = true; };
-  md.el.querySelector('#ap-c').onclick = () => md.close();
-  form.onsubmit = (e) => {
-    e.preventDefault();
-    const val = { ...(material ? { material } : {}), ...(form.custom.checked ? { color: form.color.value } : {}) };
-    mutate(() => { const ap = { ...(doc.appearance || {}) }; for (const b of bodies) { if (val.material || val.color) ap[b.id] = val; else delete ap[b.id]; } doc.appearance = ap; });
-    md.close(); toast(val.material || val.color ? `Appearance applied to ${bodies.length} ${bodies.length > 1 ? 'bodies' : 'body'}` : 'Appearance reset');
+      <div class="ap-gh">Texture</div>
+      <div role="radiogroup" aria-label="Texture" class="ap-texs">
+        <button type="button" draggable="true" class="ap-tex" role="radio" data-t=""><i class="sw-default"></i><span>None</span></button>
+        ${TEXTURES.map((t) => `<button type="button" draggable="true" class="ap-tex" role="radio" data-t="${t.id}"><i data-tid="${t.id}"></i><span>${esc(t.name)}</span></button>`).join('')}
+      </div>
+      <label class="sv-row ap-size"><span>Texture size (${getUnits()})</span><input name="tsize" type="number" min="0.1" step="any" value="${+(texMm / lenF()).toPrecision(4)}" aria-label="Width of one texture tile"></label>
+    </div>
+    <div class="foot"><button type="button" class="btn" id="ap-pick" title="Then click faces or bodies in the model; Esc finishes">Click to apply</button><button type="button" class="btn primary" id="ap-go">Apply</button></div>`;
+  $('#viewport').appendChild(el);
+  const $$ = (q) => el.querySelector(q), form = { color: $$('[name=color]'), custom: $$('[name=custom]'), tsize: $$('[name=tsize]') };
+  const mats = [...el.querySelectorAll('.ap-mat')], texs = [...el.querySelectorAll('.ap-tex')];
+  el.querySelectorAll('[data-mid]').forEach((i) => { const m = MATERIALS.find((x) => x.id === i.dataset.mid); if (m) i.style.cssText = swatch(m); });
+  el.querySelectorAll('[data-tid]').forEach((i) => { const t = textureById(i.dataset.tid); if (t) i.style.cssText = `background:url(${texPreview(t)}) center/cover`; });
+  /** The look as it is set now, optionally with one swatch swapped in (what dragging that swatch carries). */
+  const spec = (over = {}) => {
+    const m = 'm' in over ? over.m : material, t = 't' in over ? over.t : texture;
+    const size = Math.max(0.1, +form.tsize.value || 0) * lenF();
+    return { ...(m ? { material: m } : {}), ...(form.custom.checked ? { color: form.color.value } : {}), ...(t ? { texture: t, texSize: +(('t' in over ? (textureById(t)?.size ?? size) : size)).toPrecision(5) } : {}) };
   };
-  setTimeout(() => md.el.querySelector('.ap-mat[aria-checked="true"]')?.focus(), 0);
+  const selSummary = () => {
+    if (target === 'faces') return selFace ? `${selFace.curved ? 'A curved face' : 'A face'} of <b>${esc(result.bodies.find((b) => b.id === selFace.id)?.name || '')}</b> is selected` : 'No face selected';
+    const ids = selBodies().length ? selBodies() : selFace ? [selFace.id] : [];
+    return ids.length ? (ids.length === 1 ? `<b>${esc(result.bodies.find((b) => b.id === ids[0])?.name || '')}</b> is selected` : `<b>${ids.length} bodies</b> are selected`) : 'No body selected';
+  };
+  const sync = () => {
+    $$('#ap-lead').innerHTML = selSummary();
+    el.querySelectorAll('.ap-apply [data-ap]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.ap === target)));
+    mats.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.m === material)));
+    texs.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.t === texture)));
+  };
+  const pick = (id) => { material = id; sync(); };
+  const pickTex = (id) => { texture = id; const t = textureById(id); if (t) form.tsize.value = +(t.size / lenF()).toPrecision(4); sync(); };
+  const beginDrag = (e, val) => { apDrag = val; e.dataTransfer.setData(AP_MIME, JSON.stringify(val)); e.dataTransfer.setData('text/plain', 'Sketchy appearance'); e.dataTransfer.effectAllowed = 'copy'; };
+  const endDrag = () => { apDrag = null; clearDropHover(); };
+  mats.forEach((b) => { b.onclick = () => pick(b.dataset.m); b.ondragstart = (e) => beginDrag(e, spec({ m: b.dataset.m })); b.ondragend = endDrag; });
+  texs.forEach((b) => { b.onclick = () => pickTex(b.dataset.t); b.ondragstart = (e) => beginDrag(e, spec({ t: b.dataset.t })); b.ondragend = endDrag; });
+  el.querySelectorAll('.ap-apply [data-ap]').forEach((b) => (b.onclick = () => { target = b.dataset.ap; sync(); }));
+  form.color.oninput = () => { form.custom.checked = true; };
+  const close = () => { el.remove(); apPanel = null; if (paintMode) endPaint(); clearDropHover(); };
+  $$('#ap-x').onclick = close;
+  $$('#ap-go').onclick = () => {
+    const val = spec(), any = !!(val.material || val.color || val.texture);
+    if (target === 'faces' && selFace) { setFaceAppearance(selFace, val); toast(any ? 'Appearance applied to the face' : 'Face appearance reset'); }
+    else if (target === 'bodies' && (selBodies().length || selFace)) { const ids = selBodies().length ? selBodies() : [selFace.id]; setBodyAppearance(ids, val); toast(any ? `Appearance applied to ${ids.length} ${ids.length > 1 ? 'bodies' : 'body'}` : 'Appearance reset'); }
+    else toast(`Select ${target === 'faces' ? 'a face' : 'a body'} first, drag a swatch onto it, or use Click to apply.`, true);
+  };
+  $$('#ap-pick').onclick = () => { paintMode = { get val() { return spec(); }, get target() { return target; } }; selFace = null; vp.showFaces([], null); vp.selected.clear(); vp.refreshMaterials(); renderRibbon(); renderStatus(); toast(`Click ${target === 'faces' ? 'faces' : 'bodies'} to apply it. Esc to finish.`); };
+  apPanel = { el, close, sync, spec, target: () => target };
+  sync();
+}
+/** Dragging a swatch over the model or the Browser: show what would change. */
+function clearDropHover() { vp.showFaces(shownFaces(), null); if (vp.hover) { vp.hover = null; vp.refreshMaterials(); } document.querySelectorAll('.tree-row.drop').forEach((r) => r.classList.remove('drop')); }
+function bindAppearanceDrop() {
+  const cv = $('#gl'), has = (e) => [...(e.dataTransfer?.types || [])].includes(AP_MIME);
+  let raf = false;
+  cv.addEventListener('dragover', (e) => {
+    if (!has(e) || !apPanel) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+    if (raf) return; raf = true;
+    requestAnimationFrame(() => { raf = false; const t = appearanceTargetsAt(e); if (t?.face) { vp.showFaces(shownFaces(), t.tg); if (vp.hover) { vp.hover = null; vp.refreshMaterials(); } } else { vp.showFaces(shownFaces(), null); const h = t?.bodies?.[0] || null; if (h !== vp.hover) { vp.hover = h; vp.refreshMaterials(); } } });
+  });
+  cv.addEventListener('dragleave', () => { if (apPanel) clearDropHover(); });
+  cv.addEventListener('drop', (e) => {
+    if (!has(e) || !apPanel) return;
+    e.preventDefault();
+    let val; try { val = JSON.parse(e.dataTransfer.getData(AP_MIME)); } catch { val = apDrag; }
+    const t = appearanceTargetsAt(e);
+    clearDropHover();
+    if (!t || !val) return toast(`Drop it on ${apPanel.target() === 'faces' ? 'a face' : 'a body'}. Change Apply to in the panel to switch.`, true);
+    applyLook(t, val);
+  });
 }
 /** Render view on or off (image-based lighting, soft shadows, tone mapping). */
 function toggleRender() {
@@ -2667,7 +2789,7 @@ const projectJSON = (name = doc.name, withThumb = false) => { const { rev, viewi
 function loadProject(txt, rev = 0, seq = rev) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev, seq };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev, seq };
   setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
@@ -3085,6 +3207,7 @@ function bindViewport() {
       return;
     }
     if (measure) { measureClick(e); return; }
+    if (paintMode && !dialog) { paintClick(e); return; }
     if (dialog) {
       if (defOf(doc.features[dialog.index])?.pickEdges) { const en = vp.pickEdge(e); if (en) toggleEdge(en); }
       else if (dialog.pick) dialogPick(e);
@@ -3109,11 +3232,10 @@ function bindViewport() {
     if (profSel.size && !add) { profSel.clear(); updateProfileView(); }
     if (selEdges.length && !(multiSel(e))) { selEdges = []; updateEdgeView(); }
     if (selPriority === 'face') {
-      const tg = vp.pickPlanarFace(e);
+      const tg = vp.pickFace(e);
       vp.selected.clear(); vp.refreshMaterials();
-      if (add && selFace && tg?.face && !faceB()) selFaceB = { id: tg.id, point: tg.point, normal: tg.normal, base: selFace }; // a second face: measure between them
-      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal } : null;
-      if (tg?.curved) { vp.selected.add(tg.id); vp.refreshMaterials(); toast('Curved face: selected the whole body. Flat faces select on their own.'); } // something is always selectable
+      if (add && selFace && tg?.face && !tg.curved && !selFace.curved && !faceB()) selFaceB = { id: tg.id, point: tg.point, normal: tg.normal, base: selFace }; // a second flat face: measure between them
+      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) } : null;
       vp.showFaces(shownFaces(), null);
       renderTree(); renderRibbon();
       return;
@@ -3202,7 +3324,7 @@ function bindViewport() {
       if (pf) { $('#gl').style.cursor = 'pointer'; return; }
       $('#gl').style.cursor = '';
       if (selPriority === 'face') {
-        const tg = vp.pickPlanarFace(e);
+        const tg = vp.pickFace(e);
         vp.showFaces(shownFaces(), tg?.face ? tg : null);
         if (vp.hover) { vp.hover = null; vp.refreshMaterials(); }
         return;
@@ -3430,7 +3552,8 @@ function openMarking(x, y) {
   const items = [];
   if (dialog) items.push({ uicon: 'check', label: 'OK', key: '⏎', run: () => closeDialog(true) }, { uicon: 'close', label: 'Cancel', key: 'Esc', run: () => closeDialog(false) }, { sep: true });
   if (sketch && !sketch.picking) items.push({ ficon: 'finish', label: 'Finish Sketch', run: finishSketch }, { sep: true });
-  if (selEdges.length || selFace) items.push({ ficon: 'fillet', label: selEdges.length ? `Fillet ${selEdges.length} edge${selEdges.length > 1 ? 's' : ''}` : 'Fillet face edges', key: 'F', run: () => runCommand('fillet') }, { ficon: 'chamfer', label: selEdges.length ? 'Chamfer edges' : 'Chamfer face edges', run: () => runCommand('chamfer') }, { sep: true });
+  if (selFace?.curved && !selEdges.length) items.push({ ficon: 'insertmesh', label: 'Face appearance…', run: () => openAppearance() }, { sep: true });
+  else if (selEdges.length || selFace) items.push({ ficon: 'fillet', label: selEdges.length ? `Fillet ${selEdges.length} edge${selEdges.length > 1 ? 's' : ''}` : 'Fillet face edges', key: 'F', run: () => runCommand('fillet') }, { ficon: 'chamfer', label: selEdges.length ? 'Chamfer edges' : 'Chamfer face edges', run: () => runCommand('chamfer') }, ...(selFace && !selEdges.length ? [{ ficon: 'insertmesh', label: 'Face appearance…', run: () => openAppearance() }] : []), { sep: true });
   items.push({ uicon: 'zoomwin', label: 'Fit', run: () => vp.fit(true) }, { uicon: 'camera', label: 'Look At', run: lookAtNearest }, { uicon: 'home', label: 'Home View', run: () => vp.home(true) },
     { sep: true }, { uicon: 'eye', label: 'Show All', run: showAll }, { sep: true });
   for (const id of ['extrude', 'fillet', 'hole', 'sketch', 'measure', 'parameters', 'importstl']) items.push({ ficon: CMD[id].icon, label: CMD[id].label, key: CMD[id].key, run: () => runCommand(id) });
@@ -3799,6 +3922,8 @@ function bindKeys() {
     if (mod && key === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     if (mod && key === 'y') { e.preventDefault(); redo(); return; }
     if (e.key === 'Escape') {
+      if (paintMode) { endPaint(); return; }
+      if (apPanel && !dialog && !sketch) { apPanel.close(); return; }
       if (navMode !== 'orbit') { setNavMode('orbit'); return; }
       if (selMode !== 'click' && !sketch && !dialog && !measure) { selMode = 'click'; toast('Click selection'); return; }
       if (sketch && !sketch.picking) { SU.key(e); return; }
@@ -3850,7 +3975,7 @@ async function boot() {
     toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, paramScope, kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
   if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('touch');
-  buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip();
+  buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip(); bindAppearanceDrop();
   bindTooltips();
   $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
   $('#btn-data').onclick = () => toggleDataPanel();

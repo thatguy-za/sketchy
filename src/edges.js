@@ -179,12 +179,13 @@ export function edgeRef(body, chain) {
 
 export const roundPts = (pts) => pts.map((p) => p.map((v) => +v.toFixed(3)));
 
-// ---------- planar face region (for sketch-on-face) ----------
-/**
- * Flood-fill coplanar triangles around `tri`. Returns {tris, normal, point} or null if the
- * triangle belongs to a curved (non-planar) surface.
- */
-export function planarFace(verts, tris, tri) {
+// ---------- face regions (flat and curved) ----------
+const SMOOTH = Math.cos((30 * Math.PI) / 180); // triangles of one curved face turn by less than this from each neighbour
+const topoCache = new WeakMap();
+/** Welded vertices, edge to triangle map and triangle normals for a mesh, built once per mesh. */
+function meshTopo(verts, tris) {
+  const hit = topoCache.get(tris);
+  if (hit && hit.nv === verts.length) return hit;
   const weld = new Map(), remap = new Uint32Array(verts.length / 3), pos = [];
   for (let i = 0; i < remap.length; i++) {
     const key = `${Math.round(verts[i * 3] * 1e3)},${Math.round(verts[i * 3 + 1] * 1e3)},${Math.round(verts[i * 3 + 2] * 1e3)}`;
@@ -194,7 +195,8 @@ export function planarFace(verts, tris, tri) {
   }
   const T = tris.length / 3, N = pos.length;
   const ids = (t) => [remap[tris[t * 3]], remap[tris[t * 3 + 1]], remap[tris[t * 3 + 2]]];
-  const nrm = (t) => { const [a, b, c] = ids(t); return norm(cross(sub(pos[b], pos[a]), sub(pos[c], pos[a]))); };
+  const nrmCache = new Array(T);
+  const nrm = (t) => nrmCache[t] || (nrmCache[t] = (() => { const [a, b, c] = ids(t); return norm(cross(sub(pos[b], pos[a]), sub(pos[c], pos[a]))); })());
   const emap = new Map();
   for (let t = 0; t < T; t++) {
     const v = ids(t);
@@ -205,6 +207,17 @@ export function planarFace(verts, tris, tri) {
       emap.get(key).push(t);
     }
   }
+  const area = (t) => { const [a, b, c] = ids(t); return len(cross(sub(pos[b], pos[a]), sub(pos[c], pos[a]))) / 2; };
+  const topo = { nv: verts.length, pos, N, T, ids, nrm, area, emap, nbrs: (t) => { const v = ids(t), out = []; for (let k = 0; k < 3; k++) { const a = v[k], b = v[(k + 1) % 3]; for (const o of emap.get(a < b ? a * N + b : b * N + a)) if (o !== t) out.push(o); } return out; } };
+  topoCache.set(tris, topo);
+  return topo;
+}
+/**
+ * Flood-fill coplanar triangles around `tri`. Returns {tris, normal, point} or null if the
+ * triangle belongs to a curved (non-planar) surface.
+ */
+export function planarFace(verts, tris, tri) {
+  const { pos, ids, nrm, area, nbrs } = meshTopo(verts, tris);
   const n0 = nrm(tri);
   if (len(n0) === 0) return null;
   const p0 = pos[ids(tri)[0]];
@@ -212,20 +225,15 @@ export function planarFace(verts, tris, tri) {
   const region = new Set([tri]);
   const stack = [tri];
   let smoothArea = 0;
-  const area = (t) => { const [a, b, c] = ids(t); return len(cross(sub(pos[b], pos[a]), sub(pos[c], pos[a]))) / 2; };
   while (stack.length) {
     const t = stack.pop();
-    const v = ids(t);
-    for (let k = 0; k < 3; k++) {
-      const a = v[k], b = v[(k + 1) % 3];
-      for (const o of emap.get(a < b ? a * N + b : b * N + a)) {
-        if (o === t || region.has(o)) continue;
-        const no = nrm(o);
-        if (len(no) === 0) continue;
-        const coplanar = dot(no, n0) > 1 - 1e-6 && ids(o).every((i) => Math.abs(dot(n0, pos[i]) - d0) < 2e-3);
-        if (coplanar) { region.add(o); stack.push(o); }
-        else if (dot(no, n0) > CREASE) smoothArea = Math.max(smoothArea, area(o));
-      }
+    for (const o of nbrs(t)) {
+      if (region.has(o)) continue;
+      const no = nrm(o);
+      if (len(no) === 0) continue;
+      const coplanar = dot(no, n0) > 1 - 1e-6 && ids(o).every((i) => Math.abs(dot(n0, pos[i]) - d0) < 2e-3);
+      if (coplanar) { region.add(o); stack.push(o); }
+      else if (dot(no, n0) > CREASE) smoothArea = Math.max(smoothArea, area(o));
     }
   }
   // A facet of a curved surface is about as big as its smooth neighbours; a flat face blending into a fillet is much bigger.
@@ -234,3 +242,48 @@ export function planarFace(verts, tris, tri) {
   if (smoothArea > 0 && regionArea <= 3 * smoothArea) return null;
   return { tris: [...region], normal: n0, point: p0 };
 }
+/**
+ * The curved face around `tri`: the triangles reached through smooth joins, leaving out flat faces that blend into it
+ * (a fillet stops where the flat face starts). Returns {tris, normal, point, curved: true} or null when `tri` is on a flat face.
+ * point and normal come from the same triangle every time (the lowest one), so the face can be recognised again.
+ */
+export function curvedFace(verts, tris, tri) {
+  const topo = meshTopo(verts, tris), { pos, ids, nrm, nbrs } = topo;
+  const flat = new Map(); // triangle -> true when it lies on a flat face
+  const isFlat = (t) => {
+    if (flat.has(t)) return flat.get(t);
+    const pf = planarFace(verts, tris, t);
+    if (pf) { for (const q of pf.tris) flat.set(q, true); return true; }
+    flat.set(t, false); return false;
+  };
+  if (len(nrm(tri)) === 0 || isFlat(tri)) return null;
+  const region = new Set([tri]), stack = [tri];
+  while (stack.length) {
+    const t = stack.pop(), nt = nrm(t);
+    for (const o of nbrs(t)) {
+      if (region.has(o)) continue;
+      const no = nrm(o);
+      if (len(no) === 0 || dot(no, nt) < SMOOTH || isFlat(o)) continue;
+      region.add(o); stack.push(o);
+    }
+  }
+  const ctr = (t) => { const [a, b, c] = ids(t); return scl(add(add(pos[a], pos[b]), pos[c]), 1 / 3); };
+  let best = tri, bc = ctr(tri);
+  for (const t of region) { const c = ctr(t); if (c[2] < bc[2] - 1e-6 || (Math.abs(c[2] - bc[2]) <= 1e-6 && (c[1] < bc[1] - 1e-6 || (Math.abs(c[1] - bc[1]) <= 1e-6 && c[0] < bc[0] - 1e-6)))) { best = t; bc = c; } }
+  return { tris: [...region], normal: nrm(best).map((c) => +c.toFixed(6)), point: bc.map((c) => +c.toFixed(4)), curved: true };
+}
+/** The triangle on a curved face that a stored {point, normal} now refers to (the nearest one that faces the same way), or -1. */
+export function findCurvedTri(verts, tris, point, normal) {
+  const { pos, ids, nrm, T } = meshTopo(verts, tris);
+  let best = -1, bd = Infinity, lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of pos) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
+  const tol = Math.max(0.5, 0.02 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+  for (let t = 0; t < T; t++) {
+    if (dot(nrm(t), normal) < 0.7) continue;
+    const [a, b, c] = ids(t), q = scl(add(add(pos[a], pos[b]), pos[c]), 1 / 3), d = len(sub(q, point));
+    if (d < bd) { bd = d; best = t; }
+  }
+  return bd <= tol ? best : -1;
+}
+/** Any face under a triangle: flat ({tris, normal, point}) or curved (same, plus curved: true). */
+export function faceOf(verts, tris, tri) { return planarFace(verts, tris, tri) || curvedFace(verts, tris, tri); }
