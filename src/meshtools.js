@@ -14,6 +14,7 @@ export function soupOfMesh(verts, tris) {
  * than `maxDeviation`. A collapse that would flip a triangle or pinch the mesh into a non-manifold edge is not done.
  * Returns { verts, tris, from, to }.
  */
+const progress = (stage, done, total) => { try { globalThis.__sketchyProgress?.(stage, done, total); } catch { /* nobody is listening */ } };
 export function reduceMesh(verts0, tris0, { keepPercent = 50, maxDeviation = 0.2 } = {}) {
   const nv = verts0.length / 3, from = tris0.length / 3, target = Math.max(8, Math.round((from * keepPercent) / 100));
   const V = Float64Array.from(verts0), T = Uint32Array.from(tris0), alive = new Uint8Array(from).fill(1);
@@ -40,7 +41,9 @@ export function reduceMesh(verts0, tris0, { keepPercent = 50, maxDeviation = 0.2
   const nbrs = (v) => { const s = new Set(); for (const t of vt[v]) for (let k = 0; k < 3; k++) if (T[t * 3 + k] !== v) s.add(T[t * 3 + k]); return s; };
   let count = from;
   const maxErr = maxDeviation * maxDeviation;
+  let spin = 0;
   while (count > target && heap.length) {
+    if (++spin % 500 === 0) progress('Reducing triangles', from - count, from - target);
     const it = pop();
     if (ver[it.u] !== it.vu || ver[it.v] !== it.vv) continue;
     if (it.e > maxErr) break;

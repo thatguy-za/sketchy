@@ -970,8 +970,11 @@ body.touch input, body.touch select, body.touch textarea { font-size: 16px; min-
 body.touch .row { margin: 10px 0; }
 @media (max-width: 900px) {
   #browser { width: min(240px, calc(100% - 16px)); }
-  #props-wrap, #props-wrap.sketch { top: auto; bottom: 0; right: 0; left: 0; width: 100%; max-height: 55%; border-radius: 12px 12px 0 0; }
   #touchbar { bottom: calc(56px + 8px); }
+}
+/* the tool panel stays a narrow floating panel on laptops and tablets; only on a phone does it become a sheet along the bottom */
+@media (max-width: 560px) {
+  #props-wrap, #props-wrap.sketch { top: auto; bottom: 0; right: 0; left: 0; width: 100%; max-height: 55%; border-radius: 12px 12px 0 0; }
 }
 
 /* ---- Server settings tabs, per-person storage, two-step sign-in ---- */

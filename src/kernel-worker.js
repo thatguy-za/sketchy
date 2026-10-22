@@ -9,7 +9,9 @@ import { rebuild, clearKernelCache } from './kernel.js';
 import { loadBrep } from './backend-brep.js';
 
 let ready = null, sent = new Set(); // keys of the bodies the page already holds from the last result
-let latest = 0, chain = Promise.resolve();
+let latest = 0, chain = Promise.resolve(), currentId = 0, lastProgress = 0;
+// long steps (sewing a mesh, reducing it) report how far they are; the page shows it next to the Stop button
+globalThis.__sketchyProgress = (stage, done, total) => { const now = performance.now(); if (now - lastProgress < 150) return; lastProgress = now; self.postMessage({ type: 'progress', id: currentId, stage, done, total }); };
 const PIECES = 6;
 const yieldToMessages = () => new Promise((r) => setTimeout(r, 0));
 
@@ -25,6 +27,7 @@ async function handle(m) {
     await yieldToMessages(); // messages that arrived while the last rebuild ran are read first, so that only the newest one is built
     if (m.id !== latest) { self.postMessage({ type: 'superseded', id: m.id }); return; }
     if (m.resend) sent = new Set();
+    currentId = m.id;
     const t0 = performance.now();
     try {
       const n = Math.min(m.count, m.features.length), pieces = n >= 12 ? PIECES : 1;

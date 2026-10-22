@@ -6,13 +6,22 @@
 import { flatFaces } from './exporters.js';
 import { pieces } from './meshtools.js';
 
-export const MAX_FACES = 12000; // about 10 s to sew; the cost grows faster than the number of faces
+/** Tell whoever is watching (the kernel worker relays it to the page) how far a long step has got: stage, units done, units in all. */
+export const progress = (stage, done, total) => { try { globalThis.__sketchyProgress?.(stage, done, total); } catch { /* nobody is listening */ } };
+
+export const MAX_FACES = 32000; // about 10 s to sew; the cost grows faster than the number of faces
 
 /** Weld a triangle soup (9 floats per triangle) into indexed vertices; vertices closer than `tol` become one. Degenerate triangles go. */
 export function weldSoup(soup, tol = 1e-4) {
-  const key = (x, y, z) => `${Math.round(x / tol)},${Math.round(y / tol)},${Math.round(z / tol)}`;
-  const map = new Map(), verts = [], tris = [];
-  const id = (x, y, z) => { const k = key(x, y, z); let i = map.get(k); if (i === undefined) { i = verts.length / 3; map.set(k, i); verts.push(x, y, z); } return i; };
+  // vertices that coincide to `tol` become one; a hash of the rounded coordinates picks the cell, the rounded values themselves decide
+  const map = new Map(), verts = [], tris = [], q = [], inv = 1 / tol;
+  const id = (x, y, z) => {
+    const qx = Math.round(x * inv), qy = Math.round(y * inv), qz = Math.round(z * inv);
+    let h = Math.imul(qx, 73856093) ^ Math.imul(qy, 19349663) ^ Math.imul(qz, 83492791), i = map.get(h);
+    while (i !== undefined && (q[i * 3] !== qx || q[i * 3 + 1] !== qy || q[i * 3 + 2] !== qz)) i = map.get(++h); // another point with the same hash: probe on
+    if (i === undefined) { i = verts.length / 3; map.set(h, i); verts.push(x, y, z); q.push(qx, qy, qz); }
+    return i;
+  };
   for (let t = 0; t < soup.length; t += 9) {
     const a = id(soup[t], soup[t + 1], soup[t + 2]), b = id(soup[t + 3], soup[t + 4], soup[t + 5]), c = id(soup[t + 6], soup[t + 7], soup[t + 8]);
     if (a !== b && b !== c && a !== c) tris.push(a, b, c);
@@ -63,7 +72,9 @@ function sewFaces(R, verts, faces, track) {
   let skipped = 0, made = 0;
   const add = (face) => { builder.Add(shell, face); made++; };
   try {
+    let nDone = 0;
     for (const fc of faces) {
+      if (++nDone % 250 === 0) progress('Sewing faces', nDone, faces.length);
       const [outer, ...holes] = fc.loops;
       if (outer.length < 3) continue;
       try {

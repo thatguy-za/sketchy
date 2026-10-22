@@ -385,7 +385,30 @@ export class Viewport {
     }
     this.lodSwapped = on;
   }
+  /**
+   * A stand-in while the exact rebuild runs: the body's current mesh moved by `translate` and stretched by `scale` about `about` (world
+   * coordinates), with no kernel involved. setBodies puts every body back as the kernel made it, so the exact result replaces the stand-in.
+   */
+  previewBody(id, { translate = [0, 0, 0], scale = [1, 1, 1], about = [0, 0, 0] } = {}) {
+    const mesh = this.bodyGroup.children.find((c) => c.userData.id === id && !c.userData.surface);
+    if (!mesh) return false;
+    const m = new THREE.Matrix4().makeTranslation(...translate).multiply(new THREE.Matrix4().makeTranslation(...about)).multiply(new THREE.Matrix4().makeScale(...scale)).multiply(new THREE.Matrix4().makeTranslation(-about[0], -about[1], -about[2]));
+    mesh.matrixAutoUpdate = false; mesh.matrix.copy(m); mesh.matrixWorldNeedsUpdate = true; mesh.userData.previewed = true;
+    return true;
+  }
+  clearBodyPreviews() {
+    for (const c of this.bodyGroup.children) if (c.userData.previewed) { c.matrixAutoUpdate = true; c.matrix.identity(); c.position.set(0, 0, 0); c.scale.set(1, 1, 1); c.updateMatrix(); c.userData.previewed = false; }
+  }
+  /** The centre of a body's bounding box as drawn (what Scale and Move stretch about). */
+  bodyCentre(id) {
+    const mesh = this.bodyGroup.children.find((c) => c.userData.id === id && !c.userData.surface);
+    const b = mesh?.userData.src; if (!b) return null;
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < b.verts.length; i += 3) for (let k = 0; k < 3; k++) { const v = b.verts[i + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
+    return lo.map((v, k) => (v + hi[k]) / 2);
+  }
   setBodies(bodies) {
+    this.clearBodyPreviews();
     // A body whose shape did not change keeps its mesh (same key from the kernel): building the smooth normals and the edge
     // lines of a big body is the slow part, and most edits change one body of many.
     const old = new Map();

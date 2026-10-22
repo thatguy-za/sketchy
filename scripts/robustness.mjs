@@ -73,6 +73,7 @@ function check(name, ok, detail = '') {
 const errs = (res) => Object.entries(res.result.errors).map(([k, v]) => `${k}: ${v}`).join('; ');
 const set = (d, id, patch) => { const f = d.features.find((x) => x.id === id); f.params = { ...f.params, ...patch }; return d; };
 
+async function ascenario(title, fn) { console.log(title); try { await fn(); } catch (e) { failed++; console.log('  FAIL threw: ' + e.stack.split('\n').slice(0, 3).join(' | ')); } }
 function scenario(title, fn) { console.log(title); try { fn(); } catch (e) { failed++; console.log('  FAIL threw: ' + e.stack.split('\n').slice(0, 3).join(' | ')); } }
 
 // ------------------------------------------------------------------
@@ -884,6 +885,51 @@ scenario('An edit rebuilds only what depends on it, and the result equals a clea
   const r = evaluate(first, { cache: true });
   check('editing the first body leaves the other three bodies, their holes, the mirror and the pattern alone', r.result.stats.reused >= 5, JSON.stringify(r.result.stats));
 });
+await ascenario('Pipes along 3D paths hollow exactly, and shells of STEP imports stay exact', async () => {
+  const paths = { straight: [[0, 0, 0], [40, 0, 0]], cornered: [[0, 0, 0], [20, 0, 0], [20, 20, 10], [40, 20, 10]], curved: [[0, 0, 0], [20, 0, 0], [30, 15, 8], [50, 20, 15], [60, 20, 30]] };
+  for (const [name, pts] of Object.entries(paths)) {
+    let len = 0; for (let i = 1; i < pts.length; i++) len += Math.hypot(...pts[i].map((v, k) => v - pts[i - 1][k]));
+    for (const smooth of [false, true]) {
+      const k3 = { id: 'k3', type: 'sketch3d', name: '3D', params: { points: pts, closed: false, smooth } };
+      for (const wall of [0.3, 0.5, 1]) {
+        const r = evaluate(doc([k3, { id: 'pp', type: 'pipe', name: 'P', params: { path: 'k3', smooth: false, diameter: 6, wall, op: 'new', target: '' } }]), { backend: 'brep' }), b = r.result.bodies[0];
+        const want = Math.PI * (9 - (3 - wall) ** 2) * len, tol = smooth && name !== 'straight' ? 0.2 : 0.02; // a smoothed path cuts its corners, so it is shorter
+        check(`a hollow pipe along a ${smooth ? 'smoothed ' : ''}${name} 3D path, wall ${wall}: open-ended wall of the right volume`, !errs(r) && b && (tol > 0.05 ? b.volume < want * 1.02 && b.volume > want * 0.7 : Math.abs(b.volume - want) < want * tol), errs(r) + ' ' + b?.volume + ' vs ' + want.toFixed(0));
+      }
+      const sol = evaluate(doc([k3, { id: 'pp', type: 'pipe', name: 'P', params: { path: 'k3', smooth: false, diameter: 6, wall: 0, op: 'new', target: '' } }]), { backend: 'brep' }).result.bodies[0].volume;
+      for (const side of ['inside', 'outside', 'both']) {
+        const r = evaluate(doc([k3, { id: 'pp', type: 'pipe', name: 'P', params: { path: 'k3', smooth: false, diameter: 6, wall: 0, op: 'new', target: '' } }, { id: 'sh', type: 'shell', name: 'S', params: { body: 'pp', thickness: 0.5, open: [], side } }]), { backend: 'brep' }), b = r.result.bodies[0];
+        check(`a closed hollow of a ${smooth ? 'smoothed ' : ''}${name} 3D pipe, ${side}`, !errs(r) && b && (side === 'inside' ? b.volume < sol * 0.8 && b.volume > sol * 0.2 : b.volume > sol * 0.05), errs(r) + ' ' + b?.volume + ' of ' + sol);
+      }
+    }
+  }
+  // STEP imports: the wall keeps true surfaces
+  const prim2 = (id, shape, params) => prim(id, shape, params);
+  for (const [name, feat, analytic] of [['cylinder', prim2('a', 'cylinder', { radius: 15, height: 30 }), (t) => Math.PI * (225 * 30 - (15 - t) ** 2 * (30 - 2 * t))], ['sphere', prim2('a', 'sphere', { radius: 15 }), (t) => (4 / 3) * Math.PI * (3375 - (15 - t) ** 3)]]) {
+    const { blob } = exactStep(evaluate(doc([feat])).resolved), imp = { id: 'i', type: 'importstep', name: 'I', params: { data: await blob.text() } };
+    const r = evaluate(doc([imp, { id: 'sh', type: 'shell', name: 'S', params: { body: 'i', thickness: 1, open: [], side: 'inside' } }]), { backend: 'brep' }), b = r.result.bodies[0];
+    const flat = b && b.faces.every((f) => ['PLANE', 'CYLINDRE', 'SPHERE', 'TORUS', 'CONE'].includes(f.type));
+    check(`a closed hollow of an imported STEP ${name} is exact (true surfaces, analytic volume)`, !errs(r) && flat && Math.abs(b.volume - analytic(1)) < analytic(1) * 0.01, errs(r) + ' ' + b?.volume + ' vs ' + analytic(1).toFixed(1) + ' ' + b?.faces.map((f) => f.type));
+  }
+  // a sweep joined to a box loses its exact recipe: the wall is faceted inside, says so, and is not computed with a boolean
+  const sw = [skch('p', [{ t: 'circle', cx: 0, cy: 0, r: 5 }], 'YZ'), skch('w', [{ t: 'path', open: true, pts: [[0, 0], [20, 0], [30, 15], [50, 15]] }]), { id: 'sw', type: 'sweep', name: 'S', params: { profile: 'p', path: 'w', smooth: true, op: 'new', target: '' } }, prim('bx', 'box', { sx: 10, sy: 10, sz: 10, pos: [0, -5, -5] }), { id: 'cb', type: 'combine', name: 'C', params: { target: 'sw', tool: 'bx', op: 'join', keepTool: false } }];
+  const t0 = Date.now(), r = evaluate(doc([...sw, { id: 'sh', type: 'shell', name: 'S', params: { body: 'sw', thickness: 1, open: [], side: 'inside' } }]), { backend: 'brep' }), solid = evaluate(doc(sw), { backend: 'brep' }).result.bodies[0].volume;
+  check('a hollow of a joined sweep is a wall, in seconds, with a note that the inside is faceted', !errs(r) && r.result.bodies[0].volume < solid * 0.6 && r.result.bodies[0].volume > solid * 0.2 && /faceted/.test(JSON.stringify(r.result.warnings)) && Date.now() - t0 < 12000, errs(r) + ' ' + r.result.bodies[0]?.volume + ' ' + (Date.now() - t0) + 'ms');
+});
+scenario('Non-uniform scale is exact for primitives and plain extrudes, and says when it is faceted', () => {
+  const scale = (body, s) => ({ id: 'sc', type: 'scale', name: 'Scale1', params: { body, mode: 'nonuniform', s, factor: 1, about: 'center', copy: false } });
+  const ext = [skch('s', [{ t: 'circle', cx: 0, cy: 0, r: 8 }, { t: 'rect', x: 12, y: -5, w: 10, h: 10 }]), { id: 'e', type: 'extrude', name: 'E', params: { sketch: 's', profiles: null, extent: 'distance', distance: 15, op: 'new', target: '', thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } }];
+  const cases = [['cylinder', [prim('a', 'cylinder', { radius: 10, height: 20, pos: [5, 5, 5] })], 'a'], ['sphere', [prim('a', 'sphere', { radius: 12, pos: [5, 5, 5] })], 'a'], ['cone', [prim('a', 'cone', { radius: 10, radius2: 4, height: 20 })], 'a'], ['box', [prim('a', 'box', { sx: 10, sy: 20, sz: 30, radius: 0 })], 'a'], ['extrude of a circle and a rectangle', ext, 'e']];
+  for (const [name, feats, id] of cases) for (const f of [[2, 1, 0.5], [1.5, 3, 0.7]]) {
+    const r0 = evaluate(doc(feats), { backend: 'brep' }), v0 = r0.result.bodies.find((b) => b.id === id), r = evaluate(doc([...feats, scale(id, f)]), { backend: 'brep' }), b = r.result.bodies.find((x) => x.id === id);
+    const want = v0.volume * f[0] * f[1] * f[2], bb = (q) => q.bbox.max.map((v, k) => v - q.bbox.min[k]), d0 = bb(v0), d1 = bb(b);
+    check(`${name} scaled by [${f}]: exact, volume is the product of the factors, sizes follow`, !errs(r) && b && b.faces.length <= v0.faces.length + 6 && Math.abs(b.volume - want) < want * 0.01 && d1.every((v, k) => Math.abs(v - d0[k] * f[k]) < d0[k] * f[k] * 0.01) && /exactly/.test(JSON.stringify(r.result.notes)), errs(r) + ' ' + b?.volume + ' vs ' + want + ' faces ' + b?.faces.length);
+  }
+  const tor = [prim('a', 'torus', { major: 20, minor: 5 })], rt = evaluate(doc([...tor, scale('a', [2, 1, 0.5])]), { backend: 'brep' });
+  check('a torus (no exact route) is faceted and the feature says why', !errs(rt) && rt.result.bodies[0].faces.length > 50 && /facets/.test(JSON.stringify(rt.result.warnings)), errs(rt) + ' ' + rt.result.bodies[0]?.faces.length);
+  const mv = evaluate(doc([prim('a', 'cylinder', { radius: 10, height: 20 }), { id: 'm', type: 'move', name: 'M', params: { body: 'a', mode: 'xyz', t: [5, 0, 0], r: [0, 0, 0], s: [1, 1, 1], copy: false } }, scale('a', [2, 1, 0.5])]), { backend: 'brep' });
+  check('a cylinder that was moved first is faceted (the recipe is gone) but still scaled', !errs(mv) && mv.result.bodies[0].faces.length > 10, errs(mv) + ' ' + mv.result.bodies[0]?.faces.length);
+});
 const swProf = (id, shapes, plane) => skch(id, shapes, plane);
 bothBackends('Both backends: sweep a circle and a rectangle along lines and arcs', doc([
   swProf('p1', [{ t: 'circle', cx: 0, cy: 0, r: 3 }], 'YZ'), skch('w1', [{ t: 'path', open: true, pts: [[0, 0], [30, 0, 0.41421356], [50, 20]] }]),
@@ -1181,13 +1227,22 @@ scenario('Interference, version compare and polygon offset on the exact kernel',
   check('offsetting a square by 1 makes a 12 wide square', o && approx(w, 12, 0.001), JSON.stringify(o));
 });
 scenario('An import over the face limit says so, and reducing it in the import step makes it fit', () => {
-  const n = 200, m = 100, P = (i, j) => { const u = (2 * Math.PI * i) / n, v = (2 * Math.PI * j) / m; return [(20 + 5 * Math.cos(v)) * Math.cos(u), (20 + 5 * Math.cos(v)) * Math.sin(u), 5 * Math.sin(v)]; };
+  const n = 400, m = 200, P = (i, j) => { const u = (2 * Math.PI * i) / n, v = (2 * Math.PI * j) / m; return [(20 + 5 * Math.cos(v)) * Math.cos(u), (20 + 5 * Math.cos(v)) * Math.sin(u), 5 * Math.sin(v)]; };
   const s = []; for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) { const a = P(i, j), b = P(i + 1, j), c = P(i + 1, j + 1), e = P(i, j + 1); s.push(...a, ...b, ...e, ...b, ...c, ...e); }
   const soup = new Float32Array(s), imp = (extra) => doc([{ id: 'i', type: 'import', name: 'i', params: { data: encodeFloats(soup), tris: soup.length / 9, ...extra } }]);
   const big = evaluate(imp({}));
-  check('40,000 triangles are over the limit, with a message that points to Reduce', /more than the 12,000/.test(errs(big)) && /educe/.test(errs(big)), errs(big));
-  const red = evaluate(imp({ reduce: { keep: 20, tolerance: 0.4 } }));
-  check('with a reduce in the import step it sews', !errs(red) && bodyOf(red, 'i').faces.length < 12000 && approx(bodyOf(red, 'i').volume, 2 * Math.PI * Math.PI * 20 * 25, 0.1), errs(red) + bodyOf(red, 'i')?.faces.length);
+  check('160,000 triangles are over the limit, with a message that points to Reduce', /more than the 32,000/.test(errs(big)) && /educe/.test(errs(big)), errs(big));
+  const red = evaluate(imp({ reduce: { keep: 10, tolerance: 0.4 } }));
+  check('with a reduce in the import step it sews', !errs(red) && bodyOf(red, 'i').faces.length < 32000 && approx(bodyOf(red, 'i').volume, 2 * Math.PI * Math.PI * 20 * 25, 0.1), errs(red) + bodyOf(red, 'i')?.faces.length);
+});
+scenario('A 30,000 triangle import, none of them flat together, sews in seconds', () => {
+  const n = 100, m = 75, P = (i, j) => { const u = (2 * Math.PI * i) / n, v = (2 * Math.PI * j) / m, r = 20 + 5 * Math.cos(v) + 0.1 * Math.sin(7 * u) * Math.cos(5 * v); return [r * Math.cos(u), r * Math.sin(u), 5 * Math.sin(v) + 0.05 * Math.sin(3 * u)]; };
+  const s = []; for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) { const a = P(i, j), b = P(i + 1, j), c = P(i + 1, j + 1), e = P(i, j + 1); s.push(...a, ...b, ...e, ...b, ...c, ...e); }
+  const soup = new Float32Array(s), t0 = Date.now(), r = evaluate(doc([{ id: 'i', type: 'import', name: 'i', params: { data: encodeFloats(soup), tris: soup.length / 9 } }]));
+  check('it builds one solid (volume of the torus) without hitting the limit, in under 15 s', !errs(r) && approx(bodyOf(r, 'i').volume, 2 * Math.PI * Math.PI * 20 * 25, 0.05) && Date.now() - t0 < 15000, errs(r) + ' ' + (Date.now() - t0) + ' ms ' + bodyOf(r, 'i')?.faces.length + ' faces');
+  const seen = []; globalThis.__sketchyProgress = (stage, done, total) => seen.push([stage, done, total]);
+  try { clearKernelCache(); evaluate(doc([{ id: 'i', type: 'import', name: 'i', params: { data: encodeFloats(soup), tris: soup.length / 9 } }])); } finally { delete globalThis.__sketchyProgress; }
+  check('sewing reports progress (stage, faces done, faces in all) that ends near the total', seen.length > 20 && seen.every(([st, d, t]) => st === 'Sewing faces' && d <= t) && seen.at(-1)[1] > seen.at(-1)[2] * 0.9, String(seen.length));
 });
 scenario('Chamfers and fillets that run into rounded corners build at every size that fits, and say what fits when it does not', () => {
   const box60 = prim('box', 'box', { sx: 60, sy: 40, sz: 20, radius: 0 }), pick = (res, pred) => edgesWhere(res, 'box', pred);

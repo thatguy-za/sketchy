@@ -115,3 +115,27 @@ and spatial hashing of the welding (the weld is 10 % of the total).
 * Cancelling inside one feature: a single long boolean cannot be interrupted, only the gaps between pieces.
 * Cold start measurements (see above) and the throttled-network picture.
 * Frame-rate numbers need a visible browser pane; the machine had a 120 Hz display so frame rates top out at 120.
+
+## Round two: imports at size, preview, a second look at booleans
+
+### Imports at 14,400, 30,000 and 60,000 triangles (Node, whole import: weld, flat-face merge, sewing, tessellation; resident memory of the process, which starts near 450 MB)
+
+| mesh | triangles | merged faces | time | memory |
+|---|---|---|---|---|
+| a torus of flat quads (merges well) | 14,400 | 7,680 | 1.7 s | 0.84 GB |
+| | 30,000 | 16,200 | 3.6 s | 1.36 GB |
+| | 59,780 | 32,342 | 7.6 s | 1.87 GB |
+| the same torus with a ripple (no two triangles flat together) | 15,000 | 14,896 | 2.6 s | 1.24 GB |
+| | 29,960 | 29,047 | 5.7 s | 1.53 GB |
+
+Time is about 0.19 to 0.23 ms per merged face; memory about 45 KB per face. The limit on merged faces went from 12,000 to **32,000** (about 7 s, about 1.5 GB in the worst case, which stays under the 2 GB that WebAssembly memory can reach); over it the import is refused with the same message that points to Reduce. The Large model dialog now starts at 30,000 triangles and reduces to about 20,000. A 30,000 triangle import in the app (the browser, on the worker) took about 6 s and showed "Sewing faces: 11,500 of 12,150…" on its bar.
+
+Progress and Cancel: sewing and reducing report how many faces or triangles they have done (about six times a second, relayed from the worker); the import bar and the busy bar show it. Cancel stops the worker, which ends the step at once (it does not wait for the next one), undoes the import step and rebuilds the design in a fresh worker. Checked in the app: a cancelled import left the design as it was (6 features before and after). The vertex weld uses a hash of the rounded coordinates instead of strings; it was 10 % of the sewing time, and the gain is small (the weld of 30,000 triangles is about 40 ms).
+
+### Preview while the exact result is built
+
+A Move or Scale that is being dragged (the gizmo) or typed, when the kernel runs in the worker (a design that takes more than 150 ms): the body on screen is moved or stretched by the change since the shapes on screen were built, at once, with no kernel; the kernel's shape replaces it when it arrives (`previewBody` and `clearBodyPreviews` in `viewport.js`, `cheapPreview` in `main.js`). Checked in the app: the mesh matrix showed the 30 mm move one frame after the edit while the worker was still building, and was back to identity with the exact bounding box when the result arrived. Not done for extrude distance and fillet radius: those change the shape of the body, not its place, and a moved copy of the old mesh would be wrong where the body is joined to others.
+
+### Second look at booleans and tessellation (`profile-ui.mjs`, `bench-brep.mjs`)
+
+Nothing safe left. Reuse across rebuilds is in (bodies a join did not change are not meshed again: two meshes per rebuild on the 41 feature bench, both final), the per-feature cost is OpenCascade's, and the things tried changed nothing measurable: simplifying without unifying edges (CPU time 997 to 1,032 ms against 987 to 1,025 ms, same faces), skipping simplify (breaks face picking, see the first round), glue, non-destructive and OBB options. A coarse first mesh refined when idle would save about 60 ms of 740 (the tessellation of the two final bodies is 86 ms of OpenCascade) at the price of a second message and a visible change after a beat; not done. Closed hollows of spline sweeps are still 2 to 3 s, and a join of a sweep and a box after the hollow of it 1.4 s (booleans between near-parallel B-spline surfaces and `solidWithVoid`, respectively).

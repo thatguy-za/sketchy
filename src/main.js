@@ -124,6 +124,7 @@ let pending = false;
 // ------------------------------------------------------------------ rebuilding off the main thread
 // A design that takes a while to rebuild is rebuilt in a Web Worker instead (kernel-worker.js), so orbiting, menus and typing stay
 // responsive. Small designs keep rebuilding on the page itself: no round trip, and the result is there straight away.
+let appliedParams = new Map();
 let kernelOk = false, kernelReady = null; // the geometry kernel downloads while the page starts
 const HEAVY_MS = 150; // a rebuild slower than this moves the kernel to the worker
 const canWorker = typeof Worker !== 'undefined';
@@ -139,6 +140,7 @@ function ensureKernelWorker() {
   } catch (e) { console.error(e); kw.worker = null; kernelHeavy = false; }
 }
 function stopKernelWorker() {
+  kw.stops = (kw.stops || 0) + 1; kw.progress = null;
   kw.worker?.terminate(); kw.worker = null; kw.running = null; kw.pending = null; kw.meshes = new Map();
   showBusy(false); for (const f of kw.idle.splice(0)) f();
 }
@@ -158,6 +160,7 @@ function sendRebuild(req, resend = false) {
 function onKernelMessage(e) {
   const m = e.data;
   if (m.type === 'ready') { kw.ready = true; return; }
+  if (m.type === 'progress') { if (kw.running && m.id === kw.running.id) { kw.progress = m; kw.onProgress?.(m); const t = $('#busy-text'); if (t) t.textContent = progressText(m); } return; }
   if (m.type === 'superseded') { kw.abandoned = (kw.abandoned || 0) + 1; return; } // an older rebuild given up for a newer one
   const run = kw.running;
   if (!run || m.id !== run.id) return; // an answer for a request that was stopped
@@ -178,6 +181,7 @@ function onKernelMessage(e) {
   if (kw.pending) { const next = kw.pending; kw.pending = null; sendRebuild(next); }
   else { showBusy(false); for (const f of kw.idle.splice(0)) f(); }
 }
+const progressText = (m) => `${m.stage}: ${Math.round(m.done).toLocaleString()} of ${Math.round(m.total).toLocaleString()}…`;
 function showBusy(on) {
   clearTimeout(kw.busyTimer);
   let el = $('#busybar');
@@ -191,7 +195,7 @@ function showBusy(on) {
   el.hidden = false;
   const t0 = kw.running?.t0 || performance.now();
   clearInterval(kw.busyTick);
-  kw.busyTick = setInterval(() => { const t = $('#busy-text'); if (t) t.textContent = `Rebuilding the design… ${((performance.now() - t0) / 1000).toFixed(1)} s`; }, 200);
+  kw.busyTick = setInterval(() => { const t = $('#busy-text'); if (t && !(kw.progress && kw.running && kw.progress.id === kw.running.id)) t.textContent = `Rebuilding the design… ${((performance.now() - t0) / 1000).toFixed(1)} s`; }, 200);
 }
 
 function refresh() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; refreshNow(); }); } }
@@ -227,7 +231,7 @@ function refreshNow() {
   vp.setConstructionLines(feats.filter((f, i) => (f.type === 'axis' || f.type === 'cpoint') && !f.suppressed && !f.params.error && i < limit()).map((f) => (f.type === 'axis' ? { id: f.id, kind: 'axis', origin: f.params.origin, dir: f.params.dir, hidden: planeHidden.has(f.id) } : { id: f.id, kind: 'point', origin: (f.params.pos || [0, 0, 0]).map(Number), hidden: planeHidden.has(f.id) })));
   vp.setConstructionPlanes(feats.filter((f, i) => f.type === 'plane' && !f.suppressed && i < limit()).map((f) => ({ id: f.id, name: f.name, origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir, hidden: planeHidden.has(f.id) })));
   const req = { features: feats, count: limit(), opts: { bodyComp: doc.bodyComp, capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null } };
-  if (kernelHeavy && canWorker) { rebuildInWorker(req, (res) => { result = res; applyResult(evalErr); }); return; } // a big design: the page stays usable while it rebuilds
+  if (kernelHeavy && canWorker) { cheapPreview(feats); rebuildInWorker(req, (res) => { result = res; applyResult(evalErr); }); return; } // a big design: the page stays usable while it rebuilds
   const t0 = performance.now();
   try { result = rebuild(req.features, req.count, req.opts); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
@@ -235,8 +239,34 @@ function refreshNow() {
   if (lastRebuildMs > HEAVY_MS && canWorker) { kernelHeavy = true; clearKernelCache(); ensureKernelWorker(); } // from the next change on, rebuild off the main thread
   applyResult(evalErr);
 }
+/**
+ * While the worker builds the exact result of a Move or Scale being dragged or typed, show the body's current mesh moved or stretched the
+ * same way at once (a stand-in: it is replaced by the kernel's shape when that arrives). Only the plain cases: a translation, or a
+ * stretch about the body's centre, from the values the shapes on screen were built with.
+ */
+function cheapPreview(feats) {
+  try {
+    if (!dialog || !vp) return;
+    const f = feats[dialog.index], prev = f && appliedParams.get(f.id);
+    if (!f || !prev || f.suppressed || !['move', 'scale'].includes(f.type) || f.params.body !== prev.body) return;
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    if (f.type === 'move') {
+      if (f.params.mode === 'points' || !same(f.params.r, prev.r) || !same(f.params.s, prev.s) || !!f.params.copy !== !!prev.copy || f.params.copy) return;
+      const d = f.params.t.map((v, k) => v - prev.t[k]);
+      if (d.some((v) => Math.abs(v) > 1e-12)) vp.previewBody(f.params.body, { translate: d });
+    } else {
+      const fac = (q) => (q.mode === 'nonuniform' ? q.s : [q.factor, q.factor, q.factor]);
+      if (f.params.copy || prev.copy || (f.params.about || 'center') !== (prev.about || 'center')) return;
+      const a = fac(f.params), b = fac(prev);
+      if (!a.every((v) => v > 0) || !b.every((v) => v > 0)) return;
+      const c = f.params.about === 'origin' ? [0, 0, 0] : vp.bodyCentre(f.params.body);
+      if (c) vp.previewBody(f.params.body, { scale: a.map((v, k) => v / b[k]), about: c });
+    }
+  } catch { /* a preview is a nicety */ }
+}
 /** Everything that follows a rebuild: colours, meshes, selection, panels. */
 function applyResult(evalErr) {
+  appliedParams = new Map(resolvedFeats.map((f) => [f.id, f.params])); // what the shapes on screen were built from (cheapPreview compares against it)
   if (!performance.getEntriesByName('sketchy-first-result').length) performance.mark('sketchy-first-result');
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   for (const [id, origin] of Object.entries(result.shifted || {})) if (resolvedMap[id]) resolvedMap[id] = { ...resolvedMap[id], origin }; // sketches that followed their face
@@ -2714,7 +2744,7 @@ function exportDialog() {
 /** Add one imported piece as a body: try it as it is, and repair it (weld, flip, fill holes) if that doesn't make a solid. */
 /** Rebuild the design now, and wait for it (the page rebuilds in place; a big design rebuilds in the worker). */
 async function rebuildNow() { refreshNow(); if (kernelHeavy && canWorker) await kernelIdle(); }
-async function importPart(part) {
+async function importPart(part, prog = null) {
   if (part.stepText && brepReady()) { // a STEP file keeps its true surfaces (the exact kernel reads it)
     const pre = snapshot(), f = { id: 'f' + doc.nextId++, type: 'importstep', name: part.name, params: { data: part.stepText } };
     doc.features.splice(doc.marker, 0, f); doc.marker++;
@@ -2725,11 +2755,15 @@ async function importPart(part) {
   }
   let soup = part.soup;
   const attempt = async (data) => {
-    const pre = snapshot();
+    const pre = snapshot(), stops0 = kw.stops || 0;
+    if (data.length / 9 > 2000 && canWorker && !kernelHeavy) { kernelHeavy = true; clearKernelCache(); ensureKernelWorker(); } // sewing a big mesh takes seconds: not on the page, so that it can show progress and be cancelled
     const f = { id: 'f' + doc.nextId++, type: 'import', name: part.name, params: { data: encodeFloats(data), tris: data.length / 9, ...(part.reduce ? { reduce: part.reduce } : {}) } };
     doc.features.splice(doc.marker, 0, f); doc.marker++;
     pushUndo(pre);
+    if (prog) { prog.onCancel = () => { if (kernelBusy()) stopKernelWorker(); }; kw.onProgress = (m) => prog.set(`${part.name}: ${progressText(m)}`); }
     await rebuildNow();
+    kw.onProgress = null; if (prog) prog.onCancel = null;
+    if (prog?.cancelled || (kw.stops || 0) !== stops0) { restore(pre); undoStack.pop(); refresh(); return { cancelled: true }; }
     if (result.errors[f.id]) { restore(pre); undoStack.pop(); return { err: result.errors[f.id] }; }
     if (part.color) doc.appearance = { ...(doc.appearance || {}), [f.id]: part.color };
     return { id: f.id };
@@ -2778,8 +2812,8 @@ function repairDialog(part, why = '') {
   });
 }
 // ---- importing big models: say what is happening, offer to cancel, and offer to reduce a very dense mesh
-const IMPORT_WARN = 20000; // triangles: above this a mesh takes long to sew into a solid (about 0.5 s per thousand faces) and may be over the limit
-const IMPORT_TARGET = 10000;
+const IMPORT_WARN = 30000; // triangles: above this a mesh takes long to sew into a solid (about 0.2 s per thousand faces, 6 s at 30,000) and may be over the 32,000 face limit
+const IMPORT_TARGET = 20000;
 const tick = () => new Promise((r) => setTimeout(r, 30)); // let the page paint between steps
 function importProgress(name) {
   const el = document.createElement('div');
@@ -2787,7 +2821,7 @@ function importProgress(name) {
   el.innerHTML = '<span class="spin"></span><span id="imp-text"></span><button type="button" class="btn small" id="imp-cancel">Cancel</button>';
   $('#viewport').appendChild(el);
   const ctl = { cancelled: false, set: (t) => { el.querySelector('#imp-text').textContent = t; }, close: () => el.remove() };
-  el.querySelector('#imp-cancel').onclick = () => { ctl.cancelled = true; ctl.set('Cancelling after this step…'); };
+  el.querySelector('#imp-cancel').onclick = () => { ctl.cancelled = true; ctl.set('Cancelling…'); ctl.onCancel?.(); };
   ctl.set(`Reading ${name}…`);
   return ctl;
 }
@@ -2797,7 +2831,7 @@ function askLargeImport(name, tris) {
     let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
     const keep = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / tris) * 100)));
     const m = modal(`<div class="modal-title">Large model</div>
-      <div class="modal-body"><p class="p0"><b>${esc(name)}</b> has ${tris.toLocaleString()} triangles. A mesh becomes a solid made of flat faces, and sewing and editing that gets slower the denser it is; more than about ${(IMPORT_TARGET + 2000).toLocaleString()} faces is refused. Most designs do not need more than about ${IMPORT_TARGET.toLocaleString()} triangles.</p>
+      <div class="modal-body"><p class="p0"><b>${esc(name)}</b> has ${tris.toLocaleString()} triangles. A mesh becomes a solid made of flat faces, and sewing and editing that gets slower the denser it is; more than about 32,000 faces is refused. Most designs do not need more than about ${IMPORT_TARGET.toLocaleString()} triangles.</p>
       <p class="p0">Importing with a <b>Reduce</b> keeps about ${keep}% of the triangles (the import step remembers the amount, so you can change it later).</p>
       <div class="modal-foot flush"><button type="button" class="btn primary" id="li-reduce">Import and reduce to ~${keep}%</button><button type="button" class="btn" id="li-asis">Import as it is</button><button type="button" class="btn" id="li-cancel">Cancel</button></div></div>`);
     m.el.querySelector('#li-reduce').onclick = () => { m.close(); finish({ keep }); };
@@ -2825,13 +2859,15 @@ async function importModel(file, { always = false } = {}) {
     for (const part of parts) {
       if (prog.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       prog.set(`Checking ${part.name} (${(part.soup.length / 9).toLocaleString()} triangles)…`); await tick();
-      let r = always ? { err: '' } : await importPart(part);
+      let r = always ? { err: '' } : await importPart(part, prog);
+      if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       if (r.limit) { errs.push(`${part.name}: ${r.err}`); continue; }
       if (r.err !== undefined && (always || r.err)) { // won't make a solid by itself: let the user steer the repair
         const fixed = await repairDialog(part, r.err);
         if (!fixed) { errs.push(`${part.name}: cancelled`); continue; }
         prog.set(`Building ${part.name}…`); await tick();
-        r = await importPart({ ...part, soup: fixed });
+        r = await importPart({ ...part, soup: fixed }, prog);
+        if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       }
       if (r.err) errs.push(`${part.name}: ${r.err}`); else {
         made++; tris += r.tris; if (r.note) notes.add(r.exact ? r.note : `repaired: ${r.note}`);

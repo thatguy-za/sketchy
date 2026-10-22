@@ -241,7 +241,7 @@ export function profilesOfExact(sk) {
  * and the code here used to simplify it again afterwards, and it leaves the builder filling a history (which shape came from which) and
  * checking for inverted solids, none of which is used. About 12 % faster on the 41-feature bench, with the same faces in the result.
  */
-function boolean(kind, a, b) {
+function boolean(kind, a, b, simplify = true) {
   const oc = R.getOC();
   const builder = kind === 'fuse' ? new oc.BRepAlgoAPI_Fuse(a.wrapped, b.wrapped) : new oc.BRepAlgoAPI_Cut(a.wrapped, b.wrapped);
   try {
@@ -249,7 +249,7 @@ function boolean(kind, a, b) {
     builder.SetCheckInverted(false);
     builder.Build(new oc.Message_ProgressRange());
     if (builder.HasErrors()) throw new Error(`The ${kind === 'fuse' ? 'join' : 'cut'} could not be computed`);
-    builder.SimplifyResult(true, true, 0.001); // merge faces that now lie on one surface
+    if (simplify) builder.SimplifyResult(true, true, 0.001); // merge faces that now lie on one surface
     const out = R.cast(builder.Shape());
     if (!R.isShape3D?.(out)) throw new Error(`The ${kind === 'fuse' ? 'join' : 'cut'} did not give a solid`);
     return out;
@@ -486,6 +486,58 @@ export function rebuildBrep(features, count, opts = {}) {
   };
   const opState = { get preview() { return preview; }, set preview(v) { preview = v; } };
   const applyOp = makeApplyOp({ live, notes, warnings, ops: brepOps, opts, addBody, getBody, state: opState });
+  /**
+   * A body stretched by `s3` (about `c`) as an exact solid, or null. OpenCascade has no general stretch in this build (no GTransform, no
+   * NURBS conversion), so it is rebuilt from what made it: an axis-aligned primitive with its dimensions stretched (a cylinder becomes an
+   * elliptic cylinder, a sphere an ellipsoid, a cone an elliptic cone) or a plain extrude with its sketch shapes and height stretched.
+   * A stretch preserves axis-aligned bounding boxes, so the result is moved to where the stretched box of the original lies.
+   */
+  const scaleExact = (b, s3, c) => {
+    const src = b.s;
+    let cand = null;
+    const dir = (v) => { const i = v.findIndex((q) => Math.abs(Math.abs(q) - 1) < 1e-9); return i >= 0 && v.every((q, k) => k === i || Math.abs(q) < 1e-9) ? i : -1; };
+    if (src._prim) {
+      const q = src._prim, [a, bb, cc] = s3;
+      if (q.shape === 'box' && !(q.radius > 0)) cand = makePrimitive({ ...q, sx: q.sx * a, sy: q.sy * bb, sz: q.sz * cc, pos: [0, 0, 0] }, track);
+      else if (q.shape === 'cylinder') cand = Math.abs(a - bb) < 1e-9 ? makePrimitive({ ...q, radius: q.radius * a, height: q.height * cc, pos: [0, 0, 0] }, track)
+        : track(track(track(shapeDrawing({ t: 'ellipse', cx: 0, cy: 0, rx: q.radius * a, ry: q.radius * bb, rot: 0 })).sketchOnPlane('XY')).extrude(q.height * cc));
+      else if (q.shape === 'sphere') cand = track(R.makeEllipsoid(q.radius * a, q.radius * bb, q.radius * cc));
+      else if (q.shape === 'cone' && q.radius2 > 1e-9) {
+        const ell = (r, z) => track(track(shapeDrawing({ t: 'ellipse', cx: 0, cy: 0, rx: r * a, ry: r * bb, rot: 0 })).sketchOnPlane('XY', z));
+        cand = track(ell(q.radius, 0).loftWith([ell(q.radius2, q.height * cc)], { ruled: true }));
+      }
+    } else if (src._extrude) {
+      const { sk, p, X } = src._extrude, fr = planeFrame(sk.params), iu = dir(fr.x), iv = dir(fr.y), inn = dir(fr.n);
+      if (iu >= 0 && iv >= 0 && inn >= 0) {
+        const sU = s3[iu], sV = s3[iv], sN = s3[inn], uni = Math.abs(sU - sV) < 1e-9;
+        const one = (sh) => {
+          switch (sh.t) {
+            case 'rect': return { ...sh, x: sh.x * sU, y: sh.y * sV, w: sh.w * sU, h: sh.h * sV };
+            case 'circle': return uni ? { ...sh, cx: sh.cx * sU, cy: sh.cy * sV, r: sh.r * sU } : { t: 'ellipse', cx: sh.cx * sU, cy: sh.cy * sV, rx: sh.r * sU, ry: sh.r * sV, rot: 0 };
+            case 'ellipse': { const rot = sh.rot || 0; if (rot % 90) return null; const flip = (rot / 90) % 2 !== 0; return { ...sh, cx: sh.cx * sU, cy: sh.cy * sV, rx: sh.rx * (flip ? sV : sU), ry: sh.ry * (flip ? sU : sV) }; }
+            case 'ngon': { const n = Math.max(3, Math.round(sh.n)), rot = (sh.rot || 0) * DEG; return { t: 'path', open: false, pts: Array.from({ length: n }, (_, i) => [(sh.cx + Math.cos(rot + (i / n) * TWO_PI) * sh.r) * sU, (sh.cy + Math.sin(rot + (i / n) * TWO_PI) * sh.r) * sV]) }; }
+            case 'path': return sh.pts.some((q) => q[2]) && !uni ? null : { ...sh, pts: sh.pts.map((q) => [q[0] * sU, q[1] * sV, ...q.slice(2)]) };
+            case 'rrect': return uni ? { ...sh, x: sh.x * sU, y: sh.y * sU, w: sh.w * sU, h: sh.h * sU, r: sh.r * sU } : null;
+            case 'slot': return uni ? { ...sh, x1: sh.x1 * sU, y1: sh.y1 * sU, x2: sh.x2 * sU, y2: sh.y2 * sU, w: sh.w * sU } : null;
+            default: return null;
+          }
+        };
+        const shapes = (sk.params.shapes || []).filter((sh) => !sh.lt && sh.t !== 'point').map(one);
+        if (shapes.length && shapes.every(Boolean)) {
+          const sk2 = { ...sk, params: { ...sk.params, shapes } };
+          const drawings = profileDrawings(sk2, track, p.profiles);
+          if (drawings.length) cand = union(X.ranges.map(([z0, z1]) => slab(drawings, sk2.params, z0 * sN, z1 * sN)));
+        }
+      }
+    }
+    if (!cand) return null;
+    const bb0 = bboxFast(src), bb1 = bboxFast(cand);
+    const want = bb0.min.map((v, k) => c[k] + (v - c[k]) * s3[k]);
+    const moved = track(cand.translate(want.map((v, k) => v - bb1.min[k])));
+    const v0 = vol(src), v1 = vol(moved), ratio = s3[0] * s3[1] * s3[2];
+    if (!(Math.abs(v1 - v0 * ratio) <= 0.005 * v0 * ratio)) return null; // a stretch must scale the volume by the product of the factors
+    return moved;
+  };
 
   const n = Math.min(count, features.length), useCache = opts.cache !== false && !opts.keepShapes;
   let firstDiff = 0;
@@ -548,7 +600,7 @@ export function rebuildBrep(features, count, opts = {}) {
     if (!f.suppressed) try {
       const p = f.params;
       switch (f.type) {
-        case 'primitive': addBody(f.id, makePrimitive(p, track), f.name); break;
+        case 'primitive': { const sh = makePrimitive(p, track); sh._prim = p; addBody(f.id, sh, f.name); break; } // _prim: what a non-uniform Scale rebuilds from
         case 'sketch': {
           const fr = p.faceRef, fb = fr && live.get(fr.id), now = fb && faceNow(fb.s, fr);
           if (now && p.origin) {
@@ -573,6 +625,7 @@ export function rebuildBrep(features, count, opts = {}) {
             if (tp) q = taperSolid(q, sk.params, X.off, (z0 + z1) / 2 >= X.off ? 1 : -1, tp);
             return q;
           }));
+          if (p.op === 'new' && !p.thin && !p.taper && !p.taper2 && !twisted) m._extrude = { sk, p, X }; // what a non-uniform Scale rebuilds from
           applyOp(f, m, p.op, p.target);
           break;
         }
@@ -828,6 +881,11 @@ export function rebuildBrep(features, count, opts = {}) {
             if (!s3all.every((v) => v > 0)) throw new Error('Scale factors must be positive');
             const c = f.type === 'move' ? mid : p.about === 'origin' ? [0, 0, 0] : mid, d = f.type === 'move' && p.mode === 'points' && Array.isArray(p.from) && Array.isArray(p.to) ? p.to.map((v, k) => v - p.from[k]) : [0, 0, 0];
             const rot = f.type === 'move' ? p.r : [0, 0, 0], tr = f.type === 'move' ? p.t : [0, 0, 0];
+            if (f.type === 'scale') { // exact when the body can be rebuilt stretched (see scaleExact)
+              const ex = (() => { try { return scaleExact(b, s3all, c); } catch { return null; } })();
+              if (ex) { notes[f.id] = { op: 'scale', bodies: [b.id], text: 'Stretched exactly: the body was rebuilt from its primitive or extrude with stretched dimensions' }; if (p.copy) addBody(f.id, ex, f.name); else b.s = ex; break; }
+              if (meshShape(b.s).faces.some((fc) => fc.type !== 'PLANE')) warnings[f.id] = [{ text: 'Stretching differently along each axis turns curved faces into facets here: OpenCascade cannot stretch them, and only an unchanged box, cylinder, sphere, cone or a plain extrude of simple shapes is rebuilt exactly. Scale it before other features, or sketch the stretched shape.' }];
+            }
             const me = meshShape(b.s), V = new Float32Array(me.verts.length);
             const spinXYZ = (q) => { let [x, y, z] = q; const rx = (rot[0] * Math.PI) / 180, ry = (rot[1] * Math.PI) / 180, rz = (rot[2] * Math.PI) / 180; [y, z] = [y * Math.cos(rx) - z * Math.sin(rx), y * Math.sin(rx) + z * Math.cos(rx)]; [x, z] = [x * Math.cos(ry) + z * Math.sin(ry), -x * Math.sin(ry) + z * Math.cos(ry)]; [x, y] = [x * Math.cos(rz) - y * Math.sin(rz), x * Math.sin(rz) + y * Math.cos(rz)]; return [x, y, z]; };
             for (let i = 0; i < V.length; i += 3) { const q = spinXYZ([0, 1, 2].map((k) => (me.verts[i + k] - c[k]) * s3all[k])); for (let k = 0; k < 3; k++) V[i + k] = q[k] + c[k] + tr[k] + d[k]; }
@@ -1027,9 +1085,13 @@ export function rebuildBrep(features, count, opts = {}) {
               for (const grow of [off, hollow]) {
                 try {
                   const g = (d) => (grow === off ? off(d) : grow(b.s, d));
-                  const r = side === 'inside' ? cut(b.s, g(-p.thickness)) : side === 'outside' ? cut(g(p.thickness), b.s) : cut(g(p.thickness / 2), g(-p.thickness / 2));
+                  // A faceted cavity lies wholly inside the body, so it is not cut out with a boolean (24 s against a spline sweep): the wall is
+                  // made as a solid with an inner shell, which needs no computing. Checked by volume; a boolean is the fallback.
+                  const cx = grow === off ? cut : (x, y) => { try { return solidWithVoid(x, y, track); } catch { return cut(x, y); } };
+                  const r = side === 'inside' ? cx(b.s, g(-p.thickness)) : side === 'outside' ? cx(g(p.thickness), b.s) : cx(g(p.thickness / 2), g(-p.thickness / 2));
                   const v = vol(r), v0 = vol(b.s);
                   if (empty(r) || v >= v0 * 1.0001 + (side === 'inside' ? 0 : 1e9)) throw new Error('no wall');
+                  if (grow === hollow) warnings[f.id] = [{ text: 'This body could not be offset exactly, so the inside of the wall is a faceted copy of the surface. Swept bodies that have been joined to other solids lose their exact hollow; shell the sweep before joining.' }];
                   out = r; break;
                 } catch { /* try the other way */ }
               }
@@ -1401,6 +1463,22 @@ function thickenCurved(face, t, both, track) {
 }
 
 /**
+ * `outer` with `inner` taken out of it, made without a boolean for an inner solid that lies wholly inside the outer one: a solid with two
+ * shells, the inner one turned inside out. Throws when the volume is not the difference (the inner solid touches or leaves the outer one).
+ */
+function solidWithVoid(outer, inner, track) {
+  const oc = R.getOC(), shellOf = (x) => { const ex = new oc.TopExp_Explorer(x.wrapped, oc.TopAbs_ShapeEnum.TopAbs_SHELL, oc.TopAbs_ShapeEnum.TopAbs_SHAPE); try { if (!ex.More()) throw new Error('no shell'); return oc.TopoDS.Shell(ex.Current()); } finally { ex.delete(); } };
+  const ms = new oc.BRepBuilderAPI_MakeSolid();
+  try {
+    ms.Add(shellOf(outer)); ms.Add(oc.TopoDS.Shell(shellOf(inner).Reversed()));
+    const solid = track(R.cast(ms.Solid()));
+    const v = R.measureVolume(solid), want = R.measureVolume(outer) - R.measureVolume(inner);
+    if (!(v > 0) || Math.abs(v - want) > 0.02 * Math.abs(want)) throw new Error('not a wall');
+    return solid;
+  } finally { ms.delete(); }
+}
+
+/**
  * A solid grown (d > 0) or shrunk (d < 0) by `d` on every side, for the bodies OpenCascade cannot offset (swept along a spline or around
  * corners): a coarse tessellation is moved along its surface normals (mitred where faces meet at an edge, so the wall keeps its thickness at
  * corners) and sewn back into a faceted solid. Throws when the moved surface folds over itself.
@@ -1411,7 +1489,7 @@ function offsetByMesh(shape, d, track) {
   let m, tol = Math.max(0.02, diag * 1.5e-3), ang = 0.35;
   const tolMax = Math.max(tol, Math.abs(d) * 0.4); // coarser than that and the wall would no longer follow the surface
   for (let k = 0; k < 9; k++, tol = Math.min(tolMax, tol * 2), ang = Math.min(1, ang * 1.4)) { m = shape.mesh({ tolerance: tol, angularTolerance: ang }); if (m.triangles.length / 3 <= 1500 || tol >= tolMax) break; }
-  if (m.triangles.length / 3 > 2500) throw new Error('This curved body has too much surface to hollow in one piece; pick its end faces to open instead.');
+  if (m.triangles.length / 3 > 12000) throw new Error('This curved body has too much surface to hollow as a faceted wall (more than 12,000 triangles at the coarsest setting); pick faces to open instead.');
   const nv = m.vertices.length / 3, tri = m.triangles, P = (i) => [m.vertices[i * 3], m.vertices[i * 3 + 1], m.vertices[i * 3 + 2]];
   // per output vertex position (the mesh repeats a vertex per face): group by position, and per B-rep face the area-weighted normal there
   const key = (i) => `${Math.round(m.vertices[i * 3] * 1e4)},${Math.round(m.vertices[i * 3 + 1] * 1e4)},${Math.round(m.vertices[i * 3 + 2] * 1e4)}`;
@@ -1447,7 +1525,7 @@ function offsetByMesh(shape, d, track) {
   const soup = new Float32Array(T.length * 9);
   T.forEach(([a, b, c], k) => [a, b, c].forEach((v, q) => { soup[k * 9 + q * 3] = moved[v][0]; soup[k * 9 + q * 3 + 1] = moved[v][1]; soup[k * 9 + q * 3 + 2] = moved[v][2]; }));
   const w = weldSoup(soup, 1e-6);
-  return sewMesh(R, w.verts, w.tris, { track, maxFaces: 4000 }).solid;
+  return sewMesh(R, w.verts, w.tris, { track, maxFaces: 12000 }).solid;
 }
 /**
  * A sweep along a path of straight segments with mitred corners: each segment is its own straight sweep of the profile (turned with the
