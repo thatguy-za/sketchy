@@ -13,9 +13,9 @@
     if (m.type === 'boot') {
       if (worker) return;
       const url = URL.createObjectURL(new Blob([m.runtime], { type: 'text/javascript' }));
-      worker = new Worker(url, { type: 'module' });
+      try { worker = new Worker(url); } catch (err) { toParent({ ch: 'sketchy', type: 'crash', message: 'Could not start the add-in worker: ' + String(err && err.message || err) }); return; } // a classic worker: the runtime has no static imports, and it loads the add-in with import()
       worker.onmessage = (ev) => toParent(ev.data);
-      worker.onerror = (ev) => toParent({ ch: 'sketchy', type: 'crash', message: String(ev.message || 'The add-in stopped with an error') });
+      worker.onerror = (ev) => toParent({ ch: 'sketchy', type: 'crash', message: String(ev.message || 'The add-in worker stopped') + (ev.filename ? ' (' + String(ev.filename).slice(0, 60) + ':' + ev.lineno + ')' : '') });
       const { runtime, ...rest } = m; void runtime;
       worker.postMessage(rest);
     } else if (worker) worker.postMessage(m);

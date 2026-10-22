@@ -1,4 +1,4 @@
-// This file runs INSIDE an add-in's sandbox (a module worker in a sandboxed iframe with no network and no access to the app's
+// This file runs INSIDE an add-in's sandbox (a worker in a sandboxed iframe with no network and no access to the app's
 // page, cookies or storage). It is sent to the sandbox as text by src/addins.js. It gives the add-in's main module the `sketchy`
 // object and carries calls between the add-in and the app. Everything the add-in can do goes through the app, which checks the
 // add-in's permissions on every call.
