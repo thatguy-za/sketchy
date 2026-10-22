@@ -248,8 +248,10 @@ function cheapPreview(feats) {
   try {
     if (!dialog || !vp) return;
     const f = feats[dialog.index], prev = f && appliedParams.get(f.id);
-    if (!f || !prev || f.suppressed || !['move', 'scale'].includes(f.type) || f.params.body !== prev.body) return;
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    if (f && prev && !f.suppressed && f.type === 'extrude') { stretchExtrudePreview(f, prev, same); return; }
+    if (f && !f.suppressed && (f.type === 'fillet' || f.type === 'chamfer')) { const r = f.type === 'fillet' ? (f.params.mode === 'chord' ? +f.params.chord / 2 : +f.params.radius) : +f.params.distance; if (r > 0 && f.params.edges?.length) vp.previewEdgeSize(f.params.edges.map((e) => e.pts), r, f.type); return; }
+    if (!f || !prev || f.suppressed || !['move', 'scale'].includes(f.type) || f.params.body !== prev.body) return;
     if (f.type === 'move') {
       if (f.params.mode === 'points' || !same(f.params.r, prev.r) || !same(f.params.s, prev.s) || !!f.params.copy !== !!prev.copy || f.params.copy) return;
       const d = f.params.t.map((v, k) => v - prev.t[k]);
@@ -263,6 +265,27 @@ function cheapPreview(feats) {
       if (c) vp.previewBody(f.params.body, { scale: a.map((v, k) => v / b[k]), about: c });
     }
   } catch { /* a preview is a nicety */ }
+}
+/**
+ * A plain straight Extrude whose only change is the distance: the translucent tool solid on screen is a prism, so it is stretched along the
+ * profile's normal about the profile plane at once (the exact result replaces it when the kernel is done).
+ */
+function stretchExtrudePreview(f, prev, same) {
+  const a = f.params, b = prev;
+  const { distance: da, distance2: da2, ...ra } = a, { distance: db, distance2: db2, ...rb } = b;
+  if (!same(ra, rb) || (a.extent && a.extent !== 'distance')) return;
+  if (a.taper || a.taper2 || a.thin || a.twist || (a.scaleTop ?? 1) !== 1) return;
+  const two = (a.direction || (a.symmetric ? 'symmetric' : 'one')) === 'two';
+  const k1 = da / db, k2 = two ? Math.abs(da2) / Math.abs(db2) : k1;
+  if (!da || !db || Math.sign(da) !== Math.sign(db) || !isFinite(k1) || !isFinite(k2) || (k1 === 1 && k2 === 1)) return;
+  if (two && (a.extent2 === 'all' || !da2 || !db2)) return;
+  const sk = resolvedFeats.find((k) => k.id === a.sketch);
+  if (!sk || sk.type !== 'sketch') return;
+  const fr = planeFrame(resolvedMap[sk.id] || sk.params);
+  const off = a.start === 'offset' && a.startOffset ? a.startOffset : 0; // the extrusion begins off the profile plane: that plane stays put
+  const o = [0, 1, 2].map((k) => fr.o[k] + fr.n[k] * off);
+  // side 1 lies on the side the distance points to (a negative distance goes against the normal), side 2 on the other
+  vp.previewToolStretch(o, fr.n, k1, two ? { k2, side1: Math.sign(da) } : undefined);
 }
 /** Everything that follows a rebuild: colours, meshes, selection, panels. */
 function applyResult(evalErr) {
@@ -4150,7 +4173,7 @@ async function boot() {
   startRemotePolling();
   setupAssistant();
   setupAddins();
-  window.__sketchy = { kernelState: () => ({ abandoned: kw.abandoned || 0, heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
+  window.__sketchy = { kernelState: () => ({ abandoned: kw.abandoned || 0, heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, editFeature, rebuild, refresh, runCommand, openMarking };
   performance.mark('sketchy-shell');
   try { await kernelReady; } catch { return; }
   refresh();

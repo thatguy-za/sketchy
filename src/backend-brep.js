@@ -1066,13 +1066,21 @@ export function rebuildBrep(features, count, opts = {}) {
                 for (const cap of caps) c = track(c.fuse(cap));
                 return c;
               };
-              let r, failed;
+              let r, failed, viaVoid = false;
+              const allClosed = !openEnd.some(Boolean);
               for (const k of [1, 1.002, 0.998]) { // a boolean between surfaces that nearly coincide sometimes fails; a hair more or less thickness gets round it
+                if (allClosed) { // the cavity lies wholly inside the outer sweep: the wall is a solid with an inner shell, which needs no boolean (they cost seconds on spline sweeps)
+                  try {
+                    r = side === 'inside' ? solidWithVoid(b.s, cavity(t * k), track) : side === 'outside' ? solidWithVoid(outer(t * k), b.s, track) : solidWithVoid(outer(t * k / 2), cavity(t * k / 2), track);
+                    if (side === 'inside' && R.measureVolume(r) > R.measureVolume(b.s) * 0.99) throw new Error('no wall'); // a cavity that folds over itself leaves next to nothing taken out: let the cut decide
+                    failed = null; viaVoid = true; break;
+                  } catch (e) { if (/closed|end of the sweep/.test(e?.message || '')) throw e; }
+                }
                 try { r = side === 'inside' ? rawCut(b.s, cavity(t * k)) : side === 'outside' ? rawCut(outer(t * k), b.s) : rawCut(outer(t * k / 2), cavity(t * k / 2)); failed = null; break; } // plain booleans: simplifying spline faces costs seconds
                 catch (e) { failed = e; if (/closed|end of the sweep/.test(e?.message || '')) throw e; }
               }
               if (failed) throw new Error('Wall thickness is too large for this body, or its sections cannot be moved by this amount.');
-              if (empty(r) || (side === 'inside' && volumeOf(r) > volumeOf(b.s) * 0.9999)) throw new Error('Wall thickness is too large for this body'); // an offset profile that folds over itself leaves the body whole
+              if (empty(r) || (!viaVoid && side === 'inside' && volumeOf(r) > volumeOf(b.s) * 0.9999)) throw new Error('Wall thickness is too large for this body'); // an offset profile that folds over itself leaves the body whole
               open.forEach(track);
               b.s = r; break;
             }

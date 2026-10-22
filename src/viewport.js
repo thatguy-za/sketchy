@@ -867,6 +867,42 @@ export class Viewport {
     this.previewGroup.add(m);
   }
 
+  /**
+   * Stretch the translucent tool solid by `k` along the unit vector `n` about the point `o` (a stand-in for a straight extrusion whose distance
+   * changed). With `two` ({ k2, side1 }) the solid has two sides with their own distances: the side the distance points to (`side1` is 1 along
+   * `n`, -1 against it) stretches by `k`, the other side by `k2`.
+   */
+  previewToolStretch(o, n, k, two) {
+    const N = new THREE.Vector3(...n).normalize(), O = new THREE.Vector3(...o);
+    for (const c of this.previewGroup.children) {
+      const pos = c.geometry.getAttribute('position');
+      if (!c.userData.base) c.userData.base = pos.array.slice();
+      const base = c.userData.base, arr = pos.array, v = new THREE.Vector3();
+      for (let i = 0; i < base.length; i += 3) {
+        v.set(base[i], base[i + 1], base[i + 2]).sub(O);
+        const t = v.dot(N), f = two && Math.sign(t || 1) !== two.side1 ? two.k2 : k;
+        v.addScaledVector(N, t * (f - 1)).add(O);
+        arr[i] = v.x; arr[i + 1] = v.y; arr[i + 2] = v.z;
+      }
+      pos.needsUpdate = true; c.geometry.computeBoundingSphere();
+      const e = c.children[0]; if (e) { e.geometry.dispose(); e.geometry = new THREE.EdgesGeometry(c.geometry, 30); }
+    }
+  }
+
+  /** A stand-in for a Fillet or Chamfer being rebuilt: a translucent tube of the radius (or distance) along each picked edge, until the kernel's result arrives. */
+  previewEdgeSize(chains, r, kind) {
+    for (const c of [...this.previewGroup.children]) { c.traverse((o) => o.geometry?.dispose()); this.previewGroup.remove(c); }
+    for (const pts of chains) {
+      const v = pts.map((p) => new THREE.Vector3(...p));
+      if (v.length < 2) continue;
+      const path = new THREE.CurvePath();
+      for (let i = 0; i < v.length - 1; i++) path.add(new THREE.LineCurve3(v[i], v[i + 1]));
+      const m = new THREE.Mesh(new THREE.TubeGeometry(path, Math.max(2, v.length * 2), r, kind === 'chamfer' ? 4 : 12, false), new THREE.MeshStandardMaterial({ color: 0x2f7cf6, transparent: true, opacity: 0.35, depthWrite: false, roughness: 0.7 }));
+      m.raycast = () => {}; m.renderOrder = 3;
+      this.previewGroup.add(m);
+    }
+  }
+
   // ---- on-canvas distance manipulator (arrow) ----
   setManip(base, dir, dist) {
     for (const c of [...this.manipGroup.children]) { c.traverse((o) => { o.geometry?.dispose(); }); this.manipGroup.remove(c); }
