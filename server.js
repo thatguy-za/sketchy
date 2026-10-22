@@ -756,6 +756,7 @@ async function api(req, res, url) {
     liveState.set(user, { at: Date.now(), state: {
       design: nameOk(str(b.design)) ? str(b.design) : '', dirty: !!b.dirty, openDesigns: list(b.openDesigns, 12, 80), tool: str(b.tool, 40), sketch: str(b.sketch, 64),
       selection: { bodies: list(sel.bodies), features: list(sel.features), edges: Math.min(1e6, +sel.edges || 0), ...(face && face.point && face.normal ? { face } : {}) },
+      ...(Array.isArray(b.section) && b.section.length ? { section: b.section.slice(0, 6).map((q) => ({ origin: num3(q?.origin), normal: num3(q?.normal) })).filter((q) => q.origin && q.normal) } : {}),
       view: num3(b.view), units: str(b.units, 4), appVersion: str(b.appVersion, 20),
     } });
     return send(res, 200, {});

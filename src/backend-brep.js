@@ -1003,7 +1003,14 @@ export function rebuildBrep(features, count, opts = {}) {
           const wire = track(track(prof.sketchOnPlane(pl)).wire);
           const coil = track(R.genericSweep(wire, helix, { frenet: true }));
           if (R.measureVolume(coil) < 0) throw new Error('The coil came out inside out');
-          applyOp(f, placeAlong(coil, p.origin, ({ X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] })[p.axis] || [0, 0, 1], track), p.op, p.target);
+          const axisV = ({ X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] })[p.axis] || [0, 0, 1];
+          const placed = placeAlong(coil, p.origin, axisV, track);
+          // OpenCascade cannot offset a helical sweep, so a shell is made from sweeps of the offset section along the same helix (as for other sweeps)
+          const sectionAt = (dt) => track(track((p.section === 'square' ? R.draw([Rr - h - dt, -h - dt]).lineTo([Rr + h + dt, -h - dt]).lineTo([Rr + h + dt, h + dt]).lineTo([Rr - h - dt, h + dt]).close() : R.drawCircle(h + dt).translate(Rr, 0)).sketchOnPlane(pl)).wire);
+          placed._hollow = (dt) => { if (!(h + dt > 0)) throw new Error('Wall thickness is too large for this body'); return placeAlong(track(R.genericSweep(sectionAt(dt), helix, { frenet: true })), p.origin, axisV, track); };
+          const caps = placed.faces.filter((fc) => fc.geomType === 'PLANE');
+          if (caps.length === 2) placed._hollowEnds = caps.map((fc) => { const n = fc.normalAt(), c = fc.center; return { at: [c.x, c.y, c.z], dir: [n.x, n.y, n.z], local: 2.2 * h }; }); // local: the other turns of a coil lie on the far side of an end plane, so its end is trimmed with a block near the end, not a half space
+          applyOp(f, placed, p.op, p.target);
           break;
         }
         case 'importstep': { // a STEP file keeps its true surfaces: one body per solid in the file
@@ -1051,7 +1058,7 @@ export function rebuildBrep(features, count, opts = {}) {
               const rawCut = (x, y) => track(x.cut(y)), t = p.thickness, sub = (u, v) => u.map((x, k) => x - v[k]);
               const cavity = (d) => { // the inner sweep, cut back by d from each closed end so the wall closes there
                 let c = b.s._hollow(-d);
-                ends.forEach((e, i) => { if (!openEnd[i]) c = rawCut(c, halfSpace(sub(e.at, scl(e.dir, d)), e.dir, track)); });
+                ends.forEach((e, i) => { if (!openEnd[i]) c = rawCut(c, halfSpace(sub(e.at, scl(e.dir, d)), e.dir, track, e.local)); });
                 return c;
               };
               const outer = (d) => { // the sweep of the profile moved out by d, with each closed end face pushed out by d
@@ -1574,8 +1581,7 @@ function offsetSolid(shape, d, track) {
   } finally { o.delete(); }
 }
 /** A huge block filling the half space on the side `nrm` points to of the plane through `o`, for splitting. */
-function halfSpace(o, nrm, track) {
-  const L = 1e5;
+function halfSpace(o, nrm, track, L = 1e5) {
   return placeAlong(track(R.makeBox([-L, -L, 0], [L, L, L])), o, nrm, track);
 }
 /** The solids of a STEP file (its text), with their true surfaces. */

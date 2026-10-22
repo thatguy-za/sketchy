@@ -1159,3 +1159,12 @@ body.touch .row { margin: 10px 0; }
 .ai-dlg { min-width: 0; }
 
 #exact-note { position: absolute; left: 12px; bottom: 12px; max-width: 60%; padding: 3px 9px; border-radius: 4px; font-size: 12px; color: var(--c-555, #555); background: rgba(255,255,255,.82); border: 1px solid rgba(0,0,0,.12); pointer-events: none; z-index: 5; }
+
+/* section analysis panel */
+#sa-root .sa-plane { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--c-d6d8dc, rgba(128,128,128,.25)); }
+#sa-root .sa-plane:last-of-type { border-bottom: 0; }
+#sa-root .sa-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sa-root .sa-name.warn { color: var(--c-d83b3b, #d83b3b); }
+#sa-root .sa-choices, #sa-root .sa-add { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+#sa-root .row input[type=text] { min-width: 0; }
+#sa-root input.bad { border-color: #d83b3b; }

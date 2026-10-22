@@ -3,6 +3,9 @@ import * as THREE from 'three';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
 import { loadBrep, brepSupport, brepReady, replicad, exactStep, profilesOfExact, interferenceOf, compareResults } from './backend-brep.js';
+import { buildExtrudePreview } from './extrude-preview.js';
+import { boxCuts, cutsFromSpec } from './section.js';
+import { extrudeRanges } from './featurespec.js';
 import { rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { writeSTL } from './stl.js';
@@ -270,8 +273,23 @@ function cheapPreview(feats) {
  * A plain straight Extrude whose only change is the distance: the translucent tool solid on screen is a prism, so it is stretched along the
  * profile's normal about the profile plane at once (the exact result replaces it when the kernel is done).
  */
+function standInExtrude(f) {
+  const a = f.params;
+  if (a.extent && a.extent !== 'distance') return;
+  const sk = resolvedFeats.find((k) => k.id === a.sketch);
+  if (!sk || sk.type !== 'sketch') return;
+  const sp = resolvedMap[sk.id] || sk.params, fr = planeFrame(sp);
+  const sel = effectiveProfiles(f, sk), profiles = profilesFor(sk).filter((q) => sel.has(q.id)).map((q) => q.polys);
+  if (!profiles.length) return;
+  const X = extrudeRanges(a, { params: sp }, () => null);
+  const off = a.start === 'offset' && a.startOffset ? a.startOffset : 0;
+  const pv = buildExtrudePreview(profiles, fr, X.ranges, { twist: +a.twist || 0, endFactor: +(a.scaleTop ?? 1) || 1, taper: +a.taper || 0, thin: a.thin ? { wall: +a.wall || 1, side: a.wallSide || 'inside' } : null, planeZ: off });
+  if (pv.tris.length) vp.setPreview({ op: a.op === 'cut' ? 'cut' : 'join', ...pv });
+}
 function stretchExtrudePreview(f, prev, same) {
   const a = f.params, b = prev;
+  const special = (q) => q.taper || q.taper2 || q.thin || q.twist || (q.scaleTop ?? 1) !== 1;
+  if (special(a) || special(b)) { if (!same(a, b)) { try { standInExtrude(f); } catch { /* a stand-in is a nicety */ } } return; }
   const { distance: da, distance2: da2, ...ra } = a, { distance: db, distance2: db2, ...rb } = b;
   if (!same(ra, rb) || (a.extent && a.extent !== 'distance')) return;
   if (a.taper || a.taper2 || a.thin || a.twist || (a.scaleTop ?? 1) !== 1) return;
@@ -314,6 +332,7 @@ function applyResult(evalErr) {
   $('#btn-undo').disabled = !undoStack.length || !!dialog || !!sketch;
   $('#btn-redo').disabled = !redoStack.length || !!dialog || !!sketch;
   if (dialog) renderDialogErrors();
+  if (sec) applySection(); // the cut follows the rebuilt bodies, construction planes and parameters
 }
 
 // ---- sketch profile regions
@@ -703,6 +722,13 @@ function renderTree() {
     });
     const planes = doc.features.map((f, i) => [f, i]).filter(([f, i]) => (f.type === 'plane' || f.type === 'axis' || f.type === 'cpoint') && i < limit());
     if (planes.length) folder(1, 'construction', 'Construction', 'folder', {}, () => planes.forEach(([f]) => R(2, f.name, { kind: f.type === 'plane' ? 'plane' : f.type === 'axis' ? 'axis' : 'point', eye: !planeHidden.has(f.id), sel: selSet.has(f.id), onEye: () => { planeHidden.has(f.id) ? planeHidden.delete(f.id) : planeHidden.add(f.id); refresh(); }, click: (ev) => selectFeature(f.id, ev), dbl: () => editFeature(featureIndex(f.id)) })));
+    if (sec) {
+      const anyOn = sec.planes.some((q) => q.on) || !!sec.box?.on, redraw = () => { applySection(); renderTree(); if ($('#sa-root')) renderSectionPanel(); };
+      folder(1, 'analysis', 'Analysis', 'folder', { eye: anyOn, onEye: () => { const on = !anyOn; sec.planes.forEach((q) => (q.on = on)); if (sec.box) sec.box.on = on; redraw(); } }, () => {
+        if (sec.box) R(2, 'Section box', { kind: 'plane', eye: sec.box.on, onEye: () => { sec.box.on = !sec.box.on; redraw(); }, click: () => showSection() });
+        else sec.planes.forEach((q) => R(2, `Section: ${secSrcName(q.src)}`, { kind: 'plane', eye: q.on, onEye: () => { q.on = !q.on; redraw(); }, click: () => showSection() }));
+      });
+    }
     if ((doc.canvases || []).length) folder(1, 'canvases', 'Canvases', 'folder', {}, () => doc.canvases.forEach((c) => R(2, c.name, { kind: 'camera', ctx: { kind: 'canvas', id: c.id }, eye: !canvasHidden.has(c.id), onEye: () => { canvasHidden.has(c.id) ? canvasHidden.delete(c.id) : canvasHidden.add(c.id); refresh(); }, dbl: () => showCanvasDialog(c) })));
     if ((doc.params || []).length) folder(1, 'params', 'Parameters', 'gear', {}, () => { const ac = (doc.configs || []).find((c) => c.id === doc.activeConfig); if (ac) R(2, `Configuration: ${ac.name}`, { kind: 'file', dim: true }); doc.params.forEach((p) => R(2, p.name, { kind: 'file', val: paramState.errors[p.name] ? '⚠' : `= ${paramShow(p, paramState.values[p.name])}`, click: openParameters })); });
     const bodyRow = (b, d) => R(d, b.name, { kind: 'body', ctx: { kind: 'body', id: b.id }, eye: !hiddenBodies.has(b.id), sel: vp.selected.has(b.id), onEye: () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); refresh(); }, click: (ev) => selectBody(b.id, ev.shiftKey) });
@@ -2421,30 +2447,183 @@ new MutationObserver(() => {
   b.onclick = () => $('#props-wrap').querySelector(PANEL_CLOSE)?.click();
   t.appendChild(b);
 }).observe($('#props-wrap'), { childList: true, subtree: true });
+// ---- section analysis: up to three cutting planes (an origin plane, a construction plane or a flat face) or a box, view only
+const SEC_MAX = 3;
+const SEC_AXIS = { X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] }, SEC_AXIS_NAME = { X: 'YZ plane', Y: 'XZ plane', Z: 'XY plane' };
+let sec = null; // { planes: [{ src, mm, expr, flip, on }], box: null | { c: [{ mm, expr }], h: [{ mm, expr }], on } }; it outlives the panel and is not saved with the design
+let secPick = null; // choosing a plane: { index } (null: not choosing), or { index, face: true } while waiting for a click on a flat face
+/** Where a plane source lies now: { o, n } (n unit), or null when it is gone. */
+function secBase(src) {
+  if (src.kind === 'axis') return { o: [0, 0, 0], n: SEC_AXIS[src.axis] };
+  if (src.kind === 'plane') { const q = resolvedMap[src.id]; if (!q?.origin || !q?.normal) return null; const l = Math.hypot(...q.normal); return l > 1e-9 ? { o: q.origin.map(Number), n: q.normal.map((v) => v / l) } : null; }
+  const l = Math.hypot(...src.normal); return l > 1e-9 ? { o: src.point, n: src.normal.map((v) => v / l) } : null; // a face, or a plane an assistant sent
+}
+const secSrcName = (src) => (src.kind === 'axis' ? SEC_AXIS_NAME[src.axis] : src.kind === 'plane' ? (doc.features.find((f) => f.id === src.id)?.name || 'Plane') : src.kind === 'custom' ? 'Assistant plane' : `Face of ${result.bodies.find((b) => b.id === src.body)?.name || 'a body'}`);
+/** A length typed in the panel as { mm, expr } (a plain number in the display unit, or an expression); null when it does not parse. */
+function secLen(text, was) {
+  const t = String(text).trim();
+  if (!t) return { mm: 0, expr: null };
+  if (isPlainNumber(t)) return { mm: parseFloat(t) * lenF(), expr: null };
+  try { return { mm: evalExpr(t, paramScope, 'len'), expr: t }; } catch { return null; }
+}
+const secShow = (v) => v.expr ?? dispStr(v.mm);
+function secNewPlane(src) {
+  const base = secBase(src), b = vp.bounds(), c = b.getCenter(new THREE.Vector3()).toArray();
+  const mid = base ? [0, 1, 2].reduce((d, k) => d + (c[k] - base.o[k]) * base.n[k], 0) : 0; // through the middle of the model, parallel to the plane
+  return { src, mm: +mid.toFixed(3), expr: null, flip: false, on: true };
+}
+/** The cuts of the section as section.js has them, plus where to draw each one's arrow and what a drag of it changes. */
+function secCuts() {
+  if (!sec) return [];
+  const out = [], b = vp.bounds(), c = b.getCenter(new THREE.Vector3()).toArray();
+  sec.planes.forEach((p, i) => {
+    if (!p.on) return;
+    const base = secBase(p.src); if (!base) return;
+    const o = base.o.map((v, k) => v + base.n[k] * p.mm), n = p.flip ? base.n.map((v) => -v) : base.n;
+    const d = [0, 1, 2].reduce((t, k) => t + (c[k] - o[k]) * base.n[k], 0);
+    out.push({ o, n, arrow: o.map((v, k) => v + base.n[k] * d), kind: 'plane', i, bn: base.n });
+  });
+  if (sec.box?.on) {
+    const cc = sec.box.c.map((v) => v.mm), hh = sec.box.h.map((v) => v.mm);
+    boxCuts(cc, hh).forEach((q, j) => out.push({ ...q, arrow: q.o, kind: 'box', axis: Math.floor(j / 2), sign: j % 2 ? -1 : 1 }));
+  }
+  return out;
+}
+function applySection() {
+  if (!vp) return;
+  const cuts = result.bodies.length ? secCuts() : [];
+  secLastCuts = cuts;
+  vp.setSections(cuts.map(({ o, n }) => ({ o, n })));
+  vp.setSectionHandles(cuts.length ? cuts.map((q) => ({ base: q.arrow, n: q.n })) : null);
+}
+let secLastCuts = [];
+function secClose() { $('#props-wrap').classList.remove('open'); secPick = null; renderTree(); }
+function secEnd() { sec = null; secPick = null; applySection(); $('#props-wrap').classList.remove('open'); renderTree(); }
 function showSection() {
   if (dialog || sketch) return;
   if (!result.bodies.length) return toast('Nothing to section yet.', true);
-  const wrap = $('#props-wrap'), st = { axis: 'Z', offset: 0, flip: false };
-  const range = () => { const b = vp.bounds(), k = 'xyz'['XYZ'.indexOf(st.axis)]; return [b.min[k], b.max[k]]; };
-  const apply = () => vp.setSection({ ...st });
-  const render = () => {
-    const [lo, hi] = range(), u = getUnits();
-    st.offset = Math.min(hi, Math.max(lo, st.offset));
-    wrap.innerHTML = `<div class="props"><div class="title">${ficon('sectionan', 20)}SECTION ANALYSIS</div><div class="body">
-      <div class="row"><label>Plane</label><select id="sa-ax"><option value="X"${st.axis === 'X' ? ' selected' : ''}>YZ (normal X)</option><option value="Y"${st.axis === 'Y' ? ' selected' : ''}>XZ (normal Y)</option><option value="Z"${st.axis === 'Z' ? ' selected' : ''}>XY (normal Z)</option></select></div>
-      <div class="row"><label>Offset (${u})</label><input id="sa-off" type="number" step="any" value="${+(st.offset / lenF()).toFixed(4)}"></div>
-      <input id="sa-sl" type="range" min="${lo}" max="${hi}" step="${Math.max((hi - lo) / 400, 0.01)}" value="${st.offset}" class="w100">
-      <div class="row"><label>Flip side</label><input id="sa-fl" type="checkbox"${st.flip ? ' checked' : ''}></div>
-      <div class="note">Hides everything beyond the plane and caps the cut. Nothing is added to the timeline.</div></div>
-      <div class="foot"><button class="btn primary" id="i-close">Done</button></div></div>`;
-    $('#sa-ax').onchange = (e) => { st.axis = e.target.value; const [l, h] = range(); st.offset = (l + h) / 2; render(); apply(); };
-    $('#sa-off').oninput = (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { st.offset = v * lenF(); $('#sa-sl').value = st.offset; apply(); } };
-    $('#sa-sl').oninput = (e) => { st.offset = +e.target.value; $('#sa-off').value = +(st.offset / lenF()).toFixed(4); apply(); };
-    $('#sa-fl').onchange = (e) => { st.flip = e.target.checked; apply(); };
-    $('#i-close').onclick = () => { wrap.classList.remove('open'); vp.setSection(null); };
-  };
-  { const [l, h] = range(); st.offset = (l + h) / 2; }
-  render(); wrap.classList.add('open'); apply();
+  if (!sec) sec = { planes: [secNewPlane({ kind: 'axis', axis: 'Z' })], box: null };
+  secPick = null;
+  $('#props-wrap').classList.add('open');
+  renderSectionPanel(); applySection(); renderTree();
+}
+/** Click on a flat face while choosing one for the section. */
+function secFacePick(e) {
+  const tg = vp.pickPlanarFace(e);
+  if (!tg?.face) { toast('Click a flat face, or choose a plane in the panel.'); return; }
+  secChoose({ kind: 'face', body: tg.id, point: tg.point, normal: tg.normal });
+}
+function secChoose(src) {
+  const i = secPick.index, np = secNewPlane(src);
+  if (i === 'add') sec.planes.push(np); else sec.planes[i] = { ...np, flip: sec.planes[i].flip, on: sec.planes[i].on };
+  sec.box = null; sec.saved = null; secPick = null; vp.showFaces([], null);
+  renderSectionPanel(); applySection(); renderTree();
+}
+/** A section an assistant asked for (the forms of section.js): planes become rows, a box becomes the box. */
+function assistantSection(spec) {
+  const items = [].concat(spec), planes = [];
+  let box = null;
+  for (const it of items) {
+    if (it?.box) { const q = boxCuts(it.box.center, it.box.half); if (!q.length) throw new Error('a section box needs a centre and positive half sizes'); box = { c: it.box.center.map((v) => ({ mm: +v, expr: null })), h: it.box.half.map((v) => ({ mm: +v, expr: null })), on: true }; continue; }
+    for (const c of cutsFromSpec(it)) planes.push({ src: { kind: 'custom', point: c.o, normal: c.n }, mm: 0, expr: null, flip: false, on: true });
+  }
+  if (planes.length > SEC_MAX) throw new Error(`at most ${SEC_MAX} planes, or a box`);
+  sec = { planes: box ? [] : planes, box };
+  if (!sec.planes.length && !box) { sec = null; return; }
+  applySection(); renderTree();
+  if ($('#sa-root')) renderSectionPanel();
+}
+function renderSectionPanel() {
+  const wrap = $('#props-wrap'), u = getUnits();
+  const body = [];
+  if (secPick) {
+    const cps = resolvedFeats.filter((f) => f.type === 'plane' && !f.suppressed && resolvedMap[f.id]?.origin && !resolvedMap[f.id]?.error);
+    body.push(`<div class="note">Choose a plane, a construction plane or a flat face.</div><div class="sa-choices">
+      ${['Z', 'Y', 'X'].map((a) => `<button type="button" class="btn sm" data-src="axis:${a}">${SEC_AXIS_NAME[a]}</button>`).join('')}
+      ${cps.map((f) => `<button type="button" class="btn sm" data-src="plane:${esc(f.id)}">${esc(f.name)}</button>`).join('')}
+      <button type="button" class="btn sm${secPick.face ? ' primary' : ''}" data-src="face">A flat face…</button></div>
+      ${secPick.face ? '<div class="note">Click a flat face on the model.</div>' : ''}
+      <div class="foot-in"><button type="button" class="btn sm" id="sa-pcancel">Cancel</button></div>`);
+  } else {
+    if (sec.box) {
+      const ax = ['X', 'Y', 'Z'];
+      body.push(`<div class="sa-box">${ax.map((a, k) => `<div class="row"><label>Centre ${a} (${u})</label><input type="text" data-box="c${k}" value="${esc(secShow(sec.box.c[k]))}"></div>`).join('')}
+        ${ax.map((a, k) => `<div class="row"><label>Half-size ${a} (${u})</label><input type="text" data-box="h${k}" value="${esc(secShow(sec.box.h[k]))}"></div>`).join('')}
+        <div class="row"><label>Show section</label><input type="checkbox" id="sa-boxon"${sec.box.on ? ' checked' : ''}></div></div>`);
+    } else {
+      sec.planes.forEach((p, i) => {
+        const gone = !secBase(p.src);
+        body.push(`<div class="sa-plane" data-i="${i}">
+          <div class="row"><label>Plane ${sec.planes.length > 1 ? i + 1 : ''}</label><span class="sa-name${gone ? ' warn' : ''}">${esc(secSrcName(p.src))}${gone ? ' (gone)' : ''}</span><button type="button" class="btn sm" data-act="change">Change</button>${sec.planes.length > 1 ? '<button type="button" class="btn sm" data-act="remove">Remove</button>' : ''}</div>
+          <div class="row"><label>Offset (${u})</label><input type="text" class="sa-off" value="${esc(secShow(p))}" aria-label="Offset"></div>
+          <div class="row"><label>Flip side</label><input type="checkbox" class="sa-flip"${p.flip ? ' checked' : ''}></div>
+          <div class="row"><label>Show section</label><input type="checkbox" class="sa-on"${p.on ? ' checked' : ''}></div></div>`);
+      });
+    }
+    body.push(`<div class="sa-add">${!sec.box && sec.planes.length < SEC_MAX ? '<button type="button" class="btn sm" id="sa-add">Add plane</button>' : ''}${!sec.box ? '<button type="button" class="btn sm" id="sa-box">Box</button>' : '<button type="button" class="btn sm" id="sa-planes">Back to planes</button>'}</div>
+      <div class="note">${sec.box ? 'A box is six planes: what is outside it is cut away. Drag an arrow to move that face.' : `The model is cut away on the side each arrow points to. Drag an arrow to move its cut. Up to ${SEC_MAX} planes, or a box. Nothing is added to the timeline.`}</div>`);
+  }
+  wrap.innerHTML = `<div class="props" id="sa-root"><div class="title">${ficon('sectionan', 20)}SECTION ANALYSIS</div><div class="body">${body.join('')}</div>
+    <div class="foot"><button class="btn" id="sa-remove">Remove</button><button class="btn primary" id="i-close">Done</button></div></div>`;
+  $('#i-close').onclick = () => secClose();
+  $('#sa-remove').onclick = () => secEnd();
+  if (secPick) {
+    wrap.querySelectorAll('[data-src]').forEach((bt) => (bt.onclick = () => {
+      const [k, id] = bt.dataset.src.split(':');
+      if (k === 'face') { secPick.face = true; renderSectionPanel(); return; }
+      secChoose(k === 'axis' ? { kind: 'axis', axis: id } : { kind: 'plane', id });
+    }));
+    $('#sa-pcancel').onclick = () => { secPick = null; vp.showFaces([], null); renderSectionPanel(); };
+    return;
+  }
+  const bad = (el, v) => el.classList.toggle('bad', !v);
+  wrap.querySelectorAll('.sa-plane').forEach((row) => {
+    const p = sec.planes[+row.dataset.i];
+    row.querySelector('.sa-off').oninput = (e) => { const v = secLen(e.target.value); bad(e.target, v); if (v) { p.mm = v.mm; p.expr = v.expr; applySection(); } };
+    row.querySelector('.sa-flip').onchange = (e) => { p.flip = e.target.checked; applySection(); };
+    row.querySelector('.sa-on').onchange = (e) => { p.on = e.target.checked; applySection(); renderTree(); };
+    row.querySelector('[data-act="change"]').onclick = () => { secPick = { index: +row.dataset.i }; renderSectionPanel(); };
+    row.querySelector('[data-act="remove"]')?.addEventListener('click', () => { sec.planes.splice(+row.dataset.i, 1); renderSectionPanel(); applySection(); renderTree(); });
+  });
+  wrap.querySelectorAll('[data-box]').forEach((inp) => {
+    inp.oninput = (e) => {
+      const [t, k] = [inp.dataset.box[0], +inp.dataset.box[1]], v = secLen(e.target.value);
+      bad(e.target, v && (t === 'c' || v.mm > 0)); if (!v || (t === 'h' && !(v.mm > 0))) return;
+      sec.box[t][k] = v; applySection();
+    };
+  });
+  $('#sa-boxon')?.addEventListener('change', (e) => { sec.box.on = e.target.checked; applySection(); renderTree(); });
+  $('#sa-add')?.addEventListener('click', () => { secPick = { index: 'add' }; renderSectionPanel(); });
+  $('#sa-box')?.addEventListener('click', () => {
+    const b = vp.bounds(), c = b.getCenter(new THREE.Vector3()).toArray(), h = b.getSize(new THREE.Vector3()).toArray().map((v) => Math.max(v * 0.3, 0.5));
+    sec.saved = sec.planes; sec.planes = []; // a box and planes exclude each other; the planes come back with "Back to planes"
+    sec.box = { c: c.map((v) => ({ mm: +v.toFixed(3), expr: null })), h: h.map((v) => ({ mm: +v.toFixed(3), expr: null })), on: true }; renderSectionPanel(); applySection(); renderTree();
+  });
+  $('#sa-planes')?.addEventListener('click', () => { sec.box = null; sec.planes = sec.saved?.length ? sec.saved : [secNewPlane({ kind: 'axis', axis: 'Z' })]; sec.saved = null; renderSectionPanel(); applySection(); renderTree(); });
+}
+/** Dragging a section arrow in the view moves its plane (or a box's face). */
+function bindSectionDrag() {
+  const cv = $('#gl');
+  $('#viewport').addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target !== cv || !sec || dialog || sketch) return;
+    const i = vp.pickSectionHandle(e);
+    if (i < 0) return;
+    const cut = secLastCuts[i]; if (!cut) return;
+    e.stopPropagation(); e.preventDefault();
+    vp.controls.enabled = false;
+    const d0 = vp.sectionHandleDistance(e, i), p = cut.kind === 'plane' ? sec.planes[cut.i] : null, box = cut.kind === 'box' ? sec.box : null;
+    const start = p ? { mm: p.mm } : { c: box.c[cut.axis].mm, h: box.h[cut.axis].mm };
+    const move = (ev) => {
+      const d1 = vp.sectionHandleDistance(ev, i); if (d1 == null || d0 == null) return;
+      let d = d1 - d0; if (!ev.shiftKey) d = Math.round(d * 2) / 2;
+      if (p) { p.mm = +(start.mm + (p.flip ? -d : d)).toFixed(3); p.expr = null; }
+      else { const half = start.h + d / 2; if (!(half > 0.01)) return; box.h[cut.axis] = { mm: +half.toFixed(3), expr: null }; box.c[cut.axis] = { mm: +(start.c + (cut.sign * d) / 2).toFixed(3), expr: null }; }
+      applySection(); // the arrow follows the plane because it is rebuilt from it
+    };
+    const up = () => { removeEventListener('pointermove', move); vp.controls.enabled = true; if ($('#sa-root')) renderSectionPanel(); };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', up, { once: true });
+  }, true);
 }
 function pick2D(accept) { const i = $('#file-2d'); i.accept = accept; i.click(); }
 /** Add imported 2D shapes to the open sketch, or start a new one on the XY plane first. */
@@ -2925,6 +3104,7 @@ function captureThumb() {
 }
 const projectJSON = (name = doc.name, withThumb = false) => { const { rev, viewingRev, ...rest } = doc; return JSON.stringify({ format: 'sketchy', version: 1, ...rest, name, ...(withThumb ? { thumb: captureThumb() } : {}) }); };
 function loadProject(txt, rev = 0, seq = rev) {
+  if (sec) { sec = null; secPick = null; applySection(); } // a section belongs to what is on screen, not to the next design
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
   doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev, seq };
@@ -3344,6 +3524,7 @@ function bindViewport() {
       return;
     }
     if (measure) { measureClick(e); return; }
+    if (secPick?.face) { secFacePick(e); return; }
     if (paintMode && !dialog) { paintClick(e); return; }
     if (dialog) {
       if (defOf(doc.features[dialog.index])?.pickEdges) { const en = vp.pickEdge(e); if (en) toggleEdge(en); }
@@ -4124,7 +4305,7 @@ async function boot() {
     toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, paramScope, kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
   if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('touch');
-  buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip(); bindAppearanceDrop();
+  buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip(); bindSectionDrag(); bindAppearanceDrop();
   bindTooltips();
   $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
   $('#btn-data').onclick = () => toggleDataPanel();
@@ -4259,7 +4440,7 @@ function queueLive(force = false) {
     if (selEdges.length) sel.edges = selEdges.length;
     if (selFace) sel.face = { body: selFace.id, point: selFace.point, normal: selFace.normal, ...(selFace.curved ? { curved: true } : {}) };
     const cam = vp.camera.position.clone().sub(vp.controls.target).normalize();
-    const state = { design: doc.name && doc.name !== 'Untitled' && doc.rev ? doc.name : '', dirty, openDesigns: tabs.map(tabName).filter((n) => n && n !== 'Untitled'), tool: sketch ? 'sketch' : dialog ? (doc.features[dialog.index]?.type || 'feature') : measure ? 'measure' : '', sketch: sketch && !sketch.picking ? doc.features[sketch.index]?.id || '' : '', selection: sel, view: [cam.x, cam.y, cam.z], units: getUnits(), appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '' };
+    const state = { design: doc.name && doc.name !== 'Untitled' && doc.rev ? doc.name : '', dirty, openDesigns: tabs.map(tabName).filter((n) => n && n !== 'Untitled'), tool: sketch ? 'sketch' : dialog ? (doc.features[dialog.index]?.type || 'feature') : measure ? 'measure' : '', sketch: sketch && !sketch.picking ? doc.features[sketch.index]?.id || '' : '', selection: sel, ...(sec && secLastCuts.length ? { section: secLastCuts.slice(0, 6).map((q) => ({ origin: q.o.map((v) => +v.toFixed(3)), normal: q.n.map((v) => +v.toFixed(4)) })) } : {}), view: [cam.x, cam.y, cam.z], units: getUnits(), appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '' };
     const key = JSON.stringify({ ...state, view: state.view.map((v) => +v.toFixed(1)) });
     if (!force && key === liveLast) return;
     liveLast = key;
@@ -4287,6 +4468,8 @@ function setupAssistant() {
       if (ev.view && LIVE_VIEWS[ev.view]) { const d = LIVE_VIEWS[ev.view]; vp.lookAlong(d, Math.abs(d[2]) > 0.9 * Math.hypot(...d) ? [0, 1, 0] : [0, 0, 1], true); }
       if (ev.bodies?.length) { const ids = ev.bodies.filter((id) => result.bodies.some((b) => b.id === id)); selFace = null; vp.showFaces([], null); vp.selected.clear(); ids.forEach((id) => vp.selected.add(id)); vp.refreshMaterials(); renderTree(); renderRibbon(); }
       if (ev.face?.point && ev.face?.normal && result.bodies.some((b) => b.id === ev.face.body)) { vp.selected.clear(); vp.refreshMaterials(); selFace = { id: ev.face.body, point: ev.face.point, normal: ev.face.normal, ...(ev.face.curved ? { curved: true } : {}) }; vp.showFaces(shownFaces(), null); renderTree(); renderRibbon(); }
+      if (ev.clear_section && sec) secEnd();
+      if (ev.section) { try { assistantSection(ev.section); } catch (e) { toast(`Assistant: could not show the section (${e.message})`, true); } }
       if (ev.message) toast(`Assistant: ${ev.message}`);
     },
     designChanged: async (ev) => {

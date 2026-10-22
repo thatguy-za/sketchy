@@ -439,35 +439,79 @@ export class Viewport {
     if (!this.fitted && bodies.length) { this.fit(); this.fitted = true; }
   }
 
-  // ---- section analysis: clip plane + stencil-capped cut face
-  setSection(sec) { // {axis:'X'|'Y'|'Z', offset, flip} or null
+  // ---- section analysis: clip planes + stencil-capped cut faces
+  /**
+   * cuts: [{ o: [x, y, z], n: [x, y, z] }] (see section.js): a point on each plane and the unit normal of the side cut away. What stays is what is on
+   * the kept side of all of them. An empty list or null ends the section.
+   */
+  setSections(cuts) {
     this.section = null;
-    if (sec) {
-      const n = new THREE.Vector3(); n['xyz'['XYZ'.indexOf(sec.axis)]] = sec.flip ? 1 : -1;
-      this.section = { ...sec, plane: new THREE.Plane(n, -n.dot(this.sectionAxisVec(sec.axis).multiplyScalar(sec.offset))) };
-    }
+    this.sections = (cuts || []).map((c) => {
+      const n = new THREE.Vector3(...c.n).normalize(), o = new THREE.Vector3(...c.o);
+      return { o, n, plane: new THREE.Plane(n.clone().negate(), n.dot(o)) }; // three keeps the side the plane's normal points to
+    });
+    if (!this.sections.length) this.sections = null;
     this.refreshMaterials(); this.rebuildSection();
   }
-  sectionAxisVec(a) { const v = new THREE.Vector3(); v['xyz'['XYZ'.indexOf(a)]] = 1; return v; }
   rebuildSection() {
     if (this.sectionGroup) { this.scene.remove(this.sectionGroup); this.sectionGroup.traverse((o) => o.material?.dispose?.()); this.sectionGroup = null; }
-    if (!this.section) return;
-    const g = new THREE.Group(), plane = this.section.plane;
-    const stencil = (side, op) => new THREE.MeshBasicMaterial({ side, colorWrite: false, depthWrite: false, depthTest: false, clippingPlanes: [plane], stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op });
-    for (const m of this.bodyGroup.children) {
-      const back = new THREE.Mesh(m.geometry, stencil(THREE.BackSide, THREE.IncrementWrapStencilOp));
-      const front = new THREE.Mesh(m.geometry, stencil(THREE.FrontSide, THREE.DecrementWrapStencilOp));
-      for (const x of [back, front]) { x.renderOrder = 1; x.raycast = () => {}; g.add(x); }
-    }
-    const size = this.bounds().getSize(new THREE.Vector3()).length() * 4 + 100;
-    const cap = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshStandardMaterial({ color: 0xe0584d, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide, stencilWrite: true, stencilRef: 0, stencilFunc: THREE.NotEqualStencilFunc, stencilFail: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp, stencilZPass: THREE.ReplaceStencilOp }));
-    cap.renderOrder = 1.1; cap.raycast = () => {};
-    const n = plane.normal.clone();
-    cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
-    plane.coplanarPoint(cap.position);
-    cap.onAfterRender = (r) => r.clearStencil();
-    g.add(cap);
+    if (!this.sections) return;
+    const g = new THREE.Group(), size = this.bounds().getSize(new THREE.Vector3()).length() * 4 + 100;
+    this.sections.forEach((sc, i) => {
+      const plane = sc.plane, others = this.sections.filter((x) => x !== sc).map((x) => x.plane);
+      const stencil = (side, op) => new THREE.MeshBasicMaterial({ side, colorWrite: false, depthWrite: false, depthTest: false, clippingPlanes: [plane], stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op });
+      for (const m of this.bodyGroup.children) {
+        const back = new THREE.Mesh(m.geometry, stencil(THREE.BackSide, THREE.IncrementWrapStencilOp));
+        const front = new THREE.Mesh(m.geometry, stencil(THREE.FrontSide, THREE.DecrementWrapStencilOp));
+        for (const x of [back, front]) { x.renderOrder = 2 * i + 1; x.raycast = () => {}; x.matrixAutoUpdate = false; x.matrix.copy(m.matrix); g.add(x); }
+      }
+      // the cap is clipped by the other planes, so a box or several planes cap only what is left of the part
+      const cap = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshStandardMaterial({ color: 0xe0584d, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide, clippingPlanes: others, stencilWrite: true, stencilRef: 0, stencilFunc: THREE.NotEqualStencilFunc, stencilFail: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp, stencilZPass: THREE.ReplaceStencilOp }));
+      cap.renderOrder = 2 * i + 1.5; cap.raycast = () => {};
+      cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), plane.normal);
+      plane.coplanarPoint(cap.position);
+      cap.onAfterRender = (r) => r.clearStencil();
+      g.add(cap);
+    });
     this.sectionGroup = g; this.scene.add(g);
+  }
+  /**
+   * Arrows in the view, one per cut, pointing to the side that is cut away; `list` is [{ base: [x, y, z], n: [x, y, z] }] or null. The arrow's
+   * tip can be picked (pickSectionHandle) and dragged (sectionHandleDistance) to move that plane.
+   */
+  setSectionHandles(list) {
+    if (!this.sectionHandles) { this.sectionHandles = new THREE.Group(); this.scene.add(this.sectionHandles); }
+    for (const c of [...this.sectionHandles.children]) { c.traverse((o) => { o.geometry?.dispose(); }); this.sectionHandles.remove(c); }
+    this.secHit = [];
+    if (!list) return;
+    const diag = this.bounds().getSize(new THREE.Vector3()).length() || 100, size = Math.max(diag * 0.035, 1);
+    list.forEach((h, i) => {
+      const n = new THREE.Vector3(...h.n).normalize(), p0 = new THREE.Vector3(...h.base), tip = p0.clone().addScaledVector(n, size * 2.2);
+      const mat = new THREE.MeshBasicMaterial({ color: 0xe0584d, depthTest: false });
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.08, size * 0.08, size * 2.2, 8), mat);
+      shaft.position.copy(p0).addScaledVector(n, size * 1.1); shaft.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(size * 0.42, size * 1.1, 16), mat);
+      cone.position.copy(tip).addScaledVector(n, size * 0.5); cone.quaternion.copy(shaft.quaternion);
+      const hit = new THREE.Mesh(new THREE.SphereGeometry(size * 1.1, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+      hit.position.copy(tip).addScaledVector(n, size * 0.3); hit.userData.cut = i;
+      for (const o of [shaft, cone, hit]) { o.renderOrder = 13; o.raycast = o === hit ? THREE.Mesh.prototype.raycast : () => {}; this.sectionHandles.add(o); }
+      this.secHit.push({ hit, p0, n });
+    });
+  }
+  /** The index of the cut whose arrow is under the pointer, or -1. */
+  pickSectionHandle(ev) {
+    if (!this.secHit?.length) return -1;
+    this.setRay(ev);
+    const h = this.ray.intersectObjects(this.secHit.map((x) => x.hit), false)[0];
+    return h ? h.object.userData.cut : -1;
+  }
+  /** The signed distance from a cut's arrow base to the point on its axis closest to the pointer's ray. */
+  sectionHandleDistance(ev, i) {
+    const t = this.secHit?.[i]; if (!t) return null;
+    this.setRay(ev);
+    const o = this.ray.ray.origin, d = this.ray.ray.direction, w = t.p0.clone().sub(o), b = t.n.dot(d), dd = t.n.dot(w), e = d.dot(w), den = 1 - b * b;
+    if (Math.abs(den) < 1e-6) return null;
+    return (b * e - dd) / den;
   }
 
   // Per-body appearance (doc.appearance): a material, a colour and/or a texture; falls back to the default grey material.
@@ -570,7 +614,7 @@ export class Viewport {
   /** A PNG data URL of the current view at the given size. background: a CSS colour, or null for transparent. */
   snapshot({ width = 1920, height = 1080, background = null, clean = true } = {}) {
     const r = this.renderer, size = r.getSize(new THREE.Vector2()), pr = r.getPixelRatio(), cam = this.camera;
-    const hide = clean ? [this.sketchGroup, this.overlay, this.planeHandles, this.originGroup, this.faceHL, this.edgeSelGroup, this.measureGroup, this.manipGroup, this.profileGroup, this.previewGroup, this.gizmo.getHelper(), ...(this.opts.render ? [this.grid, this.originMarks] : [])] : [];
+    const hide = clean ? [this.sketchGroup, this.overlay, this.planeHandles, this.originGroup, this.faceHL, this.edgeSelGroup, this.measureGroup, this.manipGroup, this.profileGroup, this.previewGroup, this.sectionHandles, this.gizmo.getHelper(), ...(this.opts.render ? [this.grid, this.originMarks] : [])] : [];
     const was = hide.map((o) => o?.visible); hide.forEach((o) => o && (o.visible = false));
     const aspect0 = this.persp.aspect;
     r.setPixelRatio(1); r.setSize(width, height, false);
@@ -593,7 +637,7 @@ export class Viewport {
       e.visible = this.opts.edges && !this.opts.render;
       e.material = sel ? this.mats.edgeSel : this.mats.edge;
     }
-    const clip = this.section ? [this.section.plane] : this.slicePlane ? [this.slicePlane] : null;
+    const clip = this.sections ? this.sections.map((x) => x.plane) : this.slicePlane ? [this.slicePlane] : null;
     for (const mm of [this.mats.surface, this.mats.body, this.mats.sel, this.mats.hover, this.mats.edge, this.mats.edgeSel, ...Object.values(this.colorMats || {})]) {
       if ((mm.clippingPlanes === null) !== (clip === null)) mm.needsUpdate = true;
       mm.clippingPlanes = clip;

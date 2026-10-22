@@ -19,6 +19,7 @@ import { profilesOf, encodeFloats } from '../src/kernel.js';
 import { soupOfMesh } from '../src/meshtools.js';
 import { profilesOfExact, interferenceOf, compareResults, offsetPolygonExact, loadBrep, brepReady, brepSupport, exactStep } from '../src/backend-brep.js';
 import { flatFaces, writeSTEP } from '../src/exporters.js';
+import { cutsFromSpec, boxCuts, keepsPoint, MAX_CUTS } from '../src/section.js';
 
 await initHeadless();
 let failed = 0, passed = 0;
@@ -758,6 +759,28 @@ scenario('Shell hollows lofted bodies: closed and with the top opened, inside, o
     }
     check(`${name}: opening the top leaves less material than closed`, vols.insidetrue < vols.insidefalse && vols.outsidetrue < vols.outsidefalse, JSON.stringify(vols));
   }
+});
+scenario('Section analysis cuts: axis planes, any plane, a box, several at once', () => {
+  const one = (spec) => cutsFromSpec(spec)[0];
+  check('an axis section keeps the larger coordinate by default and the smaller when flipped', keepsPoint(cutsFromSpec({ axis: 'z', offset: 5 }), [0, 0, 6]) && !keepsPoint(cutsFromSpec({ axis: 'z', offset: 5 }), [0, 0, 4]) && keepsPoint(cutsFromSpec({ axis: 'z', offset: 5, flip: true }), [0, 0, 4]));
+  const c = one({ origin: [0, 0, 5], normal: [0, 0, 2], offset: -1 });
+  check('a plane by origin and normal cuts away the side the normal points to, moved along the normal by the offset', Math.abs(c.o[2] - 4) < 1e-9 && c.n[2] === 1 && keepsPoint([c], [0, 0, 3]) && !keepsPoint([c], [0, 0, 5]));
+  check('flip reverses the cut side of a plane', keepsPoint(cutsFromSpec({ origin: [0, 0, 0], normal: [0, 0, 1], flip: true }), [0, 0, 1]));
+  const box = boxCuts([1, 2, 3], [4, 5, 6]);
+  check('a box is six planes: inside stays, outside goes', box.length === 6 && keepsPoint(box, [1, 2, 3]) && keepsPoint(box, [5, 2, 3]) && !keepsPoint(box, [5.1, 2, 3]) && !keepsPoint(box, [1, 2, 9.1]) && !keepsPoint(box, [1, -3.1, 3]));
+  check('several planes keep only what is on the kept side of all of them', keepsPoint(cutsFromSpec([{ axis: 'x', offset: 0 }, { axis: 'y', offset: 0 }]), [1, 1, 0]) && !keepsPoint(cutsFromSpec([{ axis: 'x', offset: 0 }, { axis: 'y', offset: 0 }]), [1, -1, 0]));
+  const bad = (spec) => { try { cutsFromSpec(spec); return false; } catch { return true; } };
+  check('bad sections say so: no normal, a zero normal, an unknown axis, a flat box, too many planes', bad({ origin: [0, 0, 0] }) && bad({ origin: [0, 0, 0], normal: [0, 0, 0] }) && bad({ axis: 'w', offset: 1 }) && bad({ box: { center: [0, 0, 0], half: [1, 0, 1] } }) && bad(Array.from({ length: MAX_CUTS + 1 }, () => ({ axis: 'x', offset: 0 }))));
+});
+scenario('A coil hollows exactly: the wall is made from sweeps of the offset section along the helix, not a faceted copy', () => {
+  const coil = (section) => ({ id: 'c', type: 'coil', name: 'Coil1', params: { origin: [0, 0, 0], axis: 'Z', diameter: 20, section, size: 3, pitch: 8, turns: 3, left: false, op: 'new', target: '' } });
+  const len = Math.hypot(2 * Math.PI * 10, 8) * 3;
+  for (const [side, th, want] of [['inside', 1, Math.PI * (1.5 * 1.5 - 0.5 * 0.5) * len], ['outside', 1, Math.PI * (2.5 * 2.5 - 1.5 * 1.5) * len]]) {
+    const r = evaluate(doc([coil('circle'), { id: 'sh', type: 'shell', name: 'Shell1', params: { body: 'c', thickness: th, open: [], side } }]), { backend: 'brep' }), b = r.result.bodies[0];
+    check(`a coil hollowed ${side} is an exact wall of the right volume, with no faceted-copy warning`, !errs(r) && b && Math.abs(b.volume - want) < want * 0.1 && !Object.keys(r.result.warnings || {}).length, errs(r) + ' ' + b?.volume + ' vs ' + want.toFixed(0));
+  }
+  const big = evaluate(doc([coil('circle'), { id: 'sh', type: 'shell', name: 'Shell1', params: { body: 'c', thickness: 2, open: [], side: 'inside' } }]), { backend: 'brep' });
+  check('a coil wall thicker than the section radius says so', /too large/i.test(errs(big)), errs(big));
 });
 scenario('Fit-point splines are exact curves in profiles, extrudes, revolves, sweep paths and lofts', () => {
   const fit = [[0, 0], [20, 10], [40, -5], [60, 10], [60, 30], [30, 40], [0, 30]];
