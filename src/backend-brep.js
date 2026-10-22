@@ -42,13 +42,19 @@ export function loadBrep(opts = {}) {
     if (opts.wasmUrl && opts.onProgress) { // fetch the 23 MB file ourselves so the loading screen can show how much has arrived
       init.instantiateWasm = (imports, receive) => {
         (async () => {
-          const res = await fetch(opts.wasmUrl);
-          if (!res.ok) throw new Error(`The CAD kernel file could not be loaded (${res.status})`);
-          const total = opts.totalBytes || +res.headers.get('content-length') || 0, reader = res.body.getReader(), chunks = [];
-          let loaded = 0;
-          for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); loaded += value.length; opts.onProgress(loaded, total); }
-          const buf = new Uint8Array(loaded); let at = 0; for (const c of chunks) { buf.set(c, at); at += c.length; }
-          const { instance, module } = await WebAssembly.instantiate(buf, imports);
+          // Streaming compilation: the browser compiles the module while it downloads, and keeps the compiled code for the next visit
+          // (instantiate-from-bytes recompiled 23 MB on every load). A copy already in the HTTP cache is handed over as it is, which is
+          // what lets the browser use its compiled-code cache; a download is counted on the way through for the progress display.
+          let res = await fetch(opts.wasmUrl, { cache: 'only-if-cached', mode: 'same-origin' }).catch(() => null);
+          if (res?.ok) opts.onProgress(opts.totalBytes || 0, opts.totalBytes || 0);
+          else {
+            res = await fetch(opts.wasmUrl);
+            if (!res.ok) throw new Error(`The CAD kernel file could not be loaded (${res.status})`);
+            const total = opts.totalBytes || +res.headers.get('content-length') || 0, reader = res.body.getReader();
+            let loaded = 0;
+            res = new Response(new ReadableStream({ async pull(ctrl) { const { done, value } = await reader.read(); if (done) ctrl.close(); else { loaded += value.length; opts.onProgress(loaded, total); ctrl.enqueue(value); } }, cancel: (why) => reader.cancel(why) }), { headers: { 'content-type': 'application/wasm' } });
+          }
+          const { instance, module } = await WebAssembly.instantiateStreaming(res, imports);
           receive(instance, module);
         })().catch((e) => fail(e)); // a failed download rejects loadBrep instead of leaving it waiting
         return {}; // the module is delivered through `receive`
@@ -57,10 +63,25 @@ export function loadBrep(opts = {}) {
     const oc = await Promise.race([opencascade(init), failed]);
     replicad.setOC(oc);
     R = replicad;
+    fastFaces(oc);
     return R;
   })();
   loading.catch(() => { loading = null; });
   return loading;
+}
+
+/**
+ * replicad lists a shape's faces with a duplicate check that compares every face with every earlier one (one WebAssembly call each):
+ * a sewn mesh of 3,200 faces took a second just to be listed. A face of a solid, shell or compound is listed once by the explorer
+ * already, so the check is skipped.
+ */
+function fastFaces(oc) {
+  const FACE = oc.TopAbs_ShapeEnum.TopAbs_FACE, ANY = oc.TopAbs_ShapeEnum.TopAbs_SHAPE, Shape = R.Shape.prototype;
+  Object.defineProperty(Shape, 'faces', { configurable: true, get() {
+    const ex = new oc.TopExp_Explorer(this.wrapped, FACE, ANY), out = [];
+    try { while (ex.More()) { out.push(R.cast(ex.Current())); ex.Next(); } } finally { ex.delete(); }
+    return out;
+  } });
 }
 
 const TWO_PI = Math.PI * 2;
@@ -328,6 +349,29 @@ export function clearBrepCache() {
   BC.feats = []; BC.out = [];
 }
 
+const NO_REFS_OK = new Set(['primitive', 'import', 'importstep']); // these make a body without reading another
+const READS_ALL = new Set(['joint']); // these look at bodies they do not name
+/**
+ * May this unchanged feature take its result from the previous run? Only when nothing it reads has changed since: the bodies and sketches
+ * it names (any string in its parameters that is the id of an earlier feature), or, when it names none or leaves the target open
+ * ("all bodies", "the first body", automatic), any body at all.
+ */
+function canReuse(f, live, dirty, knownIds, baseId) {
+  if (READS_ALL.has(f.type) || ['sketch', 'sketch3d', 'plane', 'axis', 'cpoint'].includes(f.type)) return false; // cheap, and they set up what later features read
+  const found = new Set(), seen = new Set();
+  const walk = (v, depth) => {
+    if (typeof v === 'string') { const b = baseId(v); if (knownIds.has(b) && b !== f.id) found.add(b); }
+    else if (v && typeof v === 'object' && depth < 6 && !seen.has(v)) { seen.add(v); for (const k of Object.keys(v)) walk(v[k], depth + 1); }
+  };
+  walk(f.params, 0);
+  const p = f.params || {}, tgt = p.target, op = p.op;
+  const open = ('target' in p && (!tgt || tgt === 'all') && op !== 'new') || op === 'auto' || (tgt && !live.has(baseId(tgt)) && op && op !== 'new'); // reads some body it does not name
+  if (dirty.has('*')) return false;
+  if (open || (!found.size && !NO_REFS_OK.has(f.type))) return dirty.size === 0;
+  for (const id of found) if (dirty.has(id)) return false;
+  return true;
+}
+
 /**
  * Replay features[0..count) on OpenCascade. Same result shape as kernel.js rebuild() (bodies, errors, notes, snaps ...), with
  * result.backend = { kind: 'brep' }. Bodies carry faceOf (the B-rep face of every triangle) and faces (the face types).
@@ -449,7 +493,14 @@ export function rebuildBrep(features, count, opts = {}) {
   if (useCache && compKey === BC.comp) { const lim = Math.min(BC.feats.length, features.length); while (firstDiff < lim && sameValue(BC.feats[firstDiff], features[firstDiff])) firstDiff++; }
   const previewAt = opts.previewId ? features.findIndex((x) => x.id === opts.previewId) : -1;
   const wanted = Math.min(firstDiff, opts.capture >= 0 ? opts.capture : Infinity, previewAt >= 0 ? previewAt : Infinity);
-  if (useCache) { for (const i of [...BC.cps.keys()]) if (i > firstDiff) dropCheckpoint(i); BC.out.length = Math.min(BC.out.length, firstDiff); } // those were built on features that changed
+  // The states built on features that changed are kept aside while this run replays: a later feature that does not depend on anything that
+  // changed takes its result from them instead of being built again (see the loop), and whatever is not reused is freed at the end.
+  const stale = new Map(), oldFeats = useCache ? BC.feats : [], oldOut = useCache ? BC.out.slice() : [];
+  if (useCache) { for (const i of [...BC.cps.keys()]) if (i > firstDiff) { stale.set(i, BC.cps.get(i)); BC.cps.delete(i); } BC.out.length = Math.min(BC.out.length, firstDiff); }
+  const OLD_AT_FIRST = useCache ? BC.cps.get(firstDiff) : null; // the state before the first changed feature: still valid
+  const dirty = new Set(), knownIds = new Set(features.map((x) => x.id));
+  const baseId = (id) => String(id).split('~')[0];
+  let reused = 0;
   const resume = useCache ? [...BC.cps.values()].filter((c) => c.i <= Math.min(wanted, n)).sort((a, b) => b.i - a.i)[0] : null;
   const start = resume ? resume.i : 0;
   if (resume) {
@@ -477,6 +528,23 @@ export function rebuildBrep(features, count, opts = {}) {
     const sf = [...surfaces.values()].map((q) => ({ id: q.id, name: q.name }));
     snaps.push(sn); surfSnaps.push(sf);
     if (opts.capture === i) captured = [...live.values()].map((b) => { const me = meshShape(b.s); return { id: b.id, name: b.name, verts: me.verts, tris: me.tris }; });
+    const changed = !(oldFeats[i] && sameValue(oldFeats[i], f0));
+    if (stale.size && !changed && !f.suppressed && stale.has(i) && stale.has(i + 1) && oldOut[i] && opts.capture !== i && f.id !== opts.previewId && canReuse(f, live, dirty, knownIds, baseId)) {
+      const a = stale.get(i), b = stale.get(i + 1), o = oldOut[i];
+      const inA = new Map(a.live.map((e) => [e.id, e])), inB = new Set(b.live.map((e) => e.id));
+      for (const e of b.live) { const x = inA.get(e.id); if (!x || x.s !== e.s || x.name !== e.name) live.set(e.id, { id: e.id, name: e.name, s: e.s }); }
+      for (const e of a.live) if (!inB.has(e.id)) live.delete(e.id);
+      const sA = new Map(a.surfaces.map((e) => [e.id, e])), sB = new Set(b.surfaces.map((e) => e.id));
+      for (const e of b.surfaces) { const x = sA.get(e.id); if (!x || x.s !== e.s) surfaces.set(e.id, { id: e.id, name: e.name, s: e.s }); }
+      for (const e of a.surfaces) if (!sB.has(e.id)) surfaces.delete(e.id);
+      for (const id of b.used) sketchUsed.add(id);
+      counter = Math.max(counter, b.counter); surfCount = Math.max(surfCount, b.surfCount);
+      if (o.error) errors[f.id] = o.error; if (o.warnings) warnings[f.id] = o.warnings; if (o.note) notes[f.id] = o.note; if (o.lost) lost[f.id] = o.lost; if (o.shifted) shifted[f.id] = o.shifted;
+      BC.out[i] = { snap: sn, surf: sf, error: o.error, warnings: o.warnings, note: o.note, lost: o.lost, shifted: o.shifted };
+      reused++;
+      continue;
+    }
+    const liveBefore = stale.size ? new Map([...live].map(([k, v]) => [k, v.s])) : null, surfBefore = stale.size ? new Map([...surfaces].map(([k, v]) => [k, v.s])) : null;
     if (!f.suppressed) try {
       const p = f.params;
       switch (f.type) {
@@ -1218,17 +1286,42 @@ export function rebuildBrep(features, count, opts = {}) {
         default: throw new Error('Unknown feature ' + f.type);
       }
     } catch (e) { errors[f.id] = (e && e.message) || String(e); }
+    if (liveBefore) { // what this feature changed, so that later features that read any of it are built again
+      for (const [id, b] of live) if (liveBefore.get(id) !== b.s) dirty.add(baseId(id));
+      for (const id of liveBefore.keys()) if (!live.has(id)) dirty.add(baseId(id));
+      for (const [id, q] of surfaces) if (surfBefore.get(id) !== q.s) dirty.add(baseId(id));
+      for (const id of surfBefore.keys()) if (!surfaces.has(id)) dirty.add(baseId(id));
+      if (changed || shifted[f.id] || errors[f.id]) dirty.add(f.id);
+      { // what this feature did to the bodies in the previous run is gone too whenever it is built again (it may now be suppressed, fail, or do something else)
+        const a = stale.get(i) || (i === firstDiff ? OLD_AT_FIRST : null), b = stale.get(i + 1);
+        if (!a || !b) dirty.add('*');
+        else {
+          const inA = new Map(a.live.map((e) => [e.id, e.s])), inB = new Map(b.live.map((e) => [e.id, e.s]));
+          for (const [id, sh] of inB) if (inA.get(id) !== sh) dirty.add(baseId(id));
+          for (const id of inA.keys()) if (!inB.has(id)) dirty.add(baseId(id));
+          const sA = new Map(a.surfaces.map((e) => [e.id, e.s])), sB = new Map(b.surfaces.map((e) => [e.id, e.s]));
+          for (const [id, sh] of sB) if (sA.get(id) !== sh) dirty.add(baseId(id));
+          for (const id of sA.keys()) if (!sB.has(id)) dirty.add(baseId(id));
+        }
+      }
+    }
     BC.out[i] = { snap: sn, surf: sf, error: errors[f.id], warnings: warnings[f.id], note: notes[f.id], lost: lost[f.id], shifted: shifted[f.id] };
   }
   makeCheckpoint(n);
   if (useCache) { BC.feats = features; BC.comp = compKey; }
+  for (const cp of stale.values()) { for (const e of cp.live) unhold(e.s); for (const e of cp.surfaces) unhold(e.s); } // what was not reused goes now (the new states hold what was)
+  stale.clear();
+  if (opts.discard) { // a step of a rebuild done in pieces (kernel-worker.js): nothing is shown yet, so no meshes are made
+    for (const o of garbage) if (!held.has(o)) { try { o.delete(); } catch { /* already freed */ } }
+    return { discarded: true };
+  }
 
   const bodies = [...live.values()].map((b) => { const me = meshShape(b.s); return { id: b.id, name: b.name, key: me.key, verts: me.verts, tris: me.tris, faceOf: me.faceOf, faces: me.faces, volume: me.volume, area: me.area, bbox: me.bbox, brep: true }; });
   const surfList = [...surfaces.values()].map((q) => { const me = meshShape(q.s); return { id: q.id, name: q.name, key: me.key, verts: me.verts, tris: me.tris, bbox: me.bbox, surface: true }; });
   const shapes = opts.keepShapes ? new Map([...live.values()].map((b) => [b.id, b.s])) : null;
   const keep = new Set(shapes ? shapes.values() : []);
   for (const o of garbage) if (!keep.has(o) && !held.has(o)) { try { o.delete(); } catch { /* already freed */ } } // whatever no kept state needs
-  const out = { bodies, surfaces: surfList, surfSnaps, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted, stats: { from: start, steps: n - start, total: n }, backend: { kind: 'brep' } };
+  const out = { bodies, surfaces: surfList, surfSnaps, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted, stats: { from: start, steps: n - start - reused, reused, total: n }, backend: { kind: 'brep' } };
   if (shapes) { out.shapes = shapes; out.dispose = () => { for (const s of shapes.values()) { try { s.delete(); } catch { /* already freed */ } } }; } // functions cannot cross to a worker, so only an export gets one
   return out;
 }
@@ -1434,7 +1527,9 @@ function spineFor(path, p, track, planeOfFn) {
   let { pts, closed } = sketchPath3D(path);
   if (p.smooth && !closed) pts = smoothPath(pts, 3);
   if (pts.length < 2) throw new Error('Path needs at least two points');
-  if (!closed && (p.smooth || path.params.smooth) && pts.length > 2) return track(R.assembleWire([track(R.makeBSplineApproximation(pts, { tolerance: 5e-3, degMax: 3 }))]));
+  // 2e-2, not tighter: a closer fit leaves ripples in the spine's curvature that the swept surface inherits, and the mesher then spends
+  // tens of thousands of triangles on a wall whose inner and outer surfaces ripple differently (a hollow pipe was 87,000)
+  if (!closed && (p.smooth || path.params.smooth) && pts.length > 2) return track(R.assembleWire([track(R.makeBSplineApproximation(pts, { tolerance: 2e-2, degMax: 3 }))]));
   const edges = [];
   for (let i = 0; i + 1 < pts.length; i++) edges.push(track(R.makeLine(pts[i], pts[i + 1])));
   if (closed) edges.push(track(R.makeLine(pts.at(-1), pts[0])));

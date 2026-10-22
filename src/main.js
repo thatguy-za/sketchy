@@ -124,6 +124,7 @@ let pending = false;
 // ------------------------------------------------------------------ rebuilding off the main thread
 // A design that takes a while to rebuild is rebuilt in a Web Worker instead (kernel-worker.js), so orbiting, menus and typing stay
 // responsive. Small designs keep rebuilding on the page itself: no round trip, and the result is there straight away.
+let kernelOk = false, kernelReady = null; // the geometry kernel downloads while the page starts
 const HEAVY_MS = 150; // a rebuild slower than this moves the kernel to the worker
 const canWorker = typeof Worker !== 'undefined';
 let kernelHeavy = false, lastRebuildMs = 0, quickRuns = 0;
@@ -147,8 +148,7 @@ function rebuildInWorker(req, done) {
   ensureKernelWorker();
   if (!kw.worker) { kernelHeavy = false; refresh(); return; }
   req.done = done;
-  if (kw.running) { kw.pending = req; return; } // only the newest change waits its turn; the ones in between are skipped
-  sendRebuild(req);
+  sendRebuild(req); // a rebuild still running is abandoned by the worker at its next piece boundary: the newest change wins
 }
 function sendRebuild(req, resend = false) {
   kw.running = { id: ++kw.seq, req, t0: performance.now() };
@@ -158,6 +158,7 @@ function sendRebuild(req, resend = false) {
 function onKernelMessage(e) {
   const m = e.data;
   if (m.type === 'ready') { kw.ready = true; return; }
+  if (m.type === 'superseded') { kw.abandoned = (kw.abandoned || 0) + 1; return; } // an older rebuild given up for a newer one
   const run = kw.running;
   if (!run || m.id !== run.id) return; // an answer for a request that was stopped
   kw.running = null;
@@ -197,6 +198,7 @@ function refresh() { if (!pending) { pending = true; requestAnimationFrame(() =>
 const paramScope = Object.assign((n) => paramState.values[n], { names: () => Object.keys(paramState?.values || {}) });
 function refreshParamsNow() { paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig)); }
 function refreshNow() {
+  if (!kernelOk) { kernelReady?.then(() => refresh(), () => {}); return; } // the kernel is still loading: the design builds as soon as it is there
   if (vp?.compareGroup && !/COMPARE/.test($('#props-wrap .title')?.textContent || '')) vp.setCompare(null); // a compare view never outlives its panel
   const pickF = dialog && defOf(doc.features[dialog.index])?.pickEdges;
   paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
@@ -235,6 +237,7 @@ function refreshNow() {
 }
 /** Everything that follows a rebuild: colours, meshes, selection, panels. */
 function applyResult(evalErr) {
+  if (!performance.getEntriesByName('sketchy-first-result').length) performance.mark('sketchy-first-result');
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   for (const [id, origin] of Object.entries(result.shifted || {})) if (resolvedMap[id]) resolvedMap[id] = { ...resolvedMap[id], origin }; // sketches that followed their face
   vp.bodyColors = doc.appearance || {};
@@ -534,6 +537,7 @@ const CUSTOM = {
 function runCommand(id, ev) {
   const c = CMD[id];
   if (!c) return;
+  if (!kernelOk && (c.feature || ['sketch', 'extrude', 'importstl', 'remove'].includes(id))) return toast('Still loading the geometry kernel. Try again in a moment.');
   if (paintMode && id !== 'appearance') endPaint(); // starting anything else ends the painting
   if (c.sk) { if (sketch && !sketch.picking) setSketchTool(c.sk); return; }
   if (c.skAction === 'delete') return sketchDeleteSelected();
@@ -4031,6 +4035,7 @@ function registerServiceWorker() {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((e) => console.warn('Offline support is off:', e.message));
 }
 async function boot() {
+  performance.mark('sketchy-boot');
   if (location.pathname === '/oauth/authorize') { await refreshAccount(); await ensureSignedIn(); await oauthConsent(); return; } // an assistant is asking to connect: just the approval page
   const caret = uicon('caret', 7, 0).replace('class="ui"', 'class="ui caret"');
   const set = (id, html) => { $('#' + id).innerHTML = html; };
@@ -4040,16 +4045,18 @@ async function boot() {
  
   set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
   set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
-  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" role="status">Loading CAD kernel…</div>');
+  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" role="status">Loading geometry kernel…</div>');
   const loadingEl = $('#loading'), mb = (n) => (n / 1048576).toFixed(1);
-  try { await loadBrep({ locateFile: () => occtUrl, wasmUrl: occtUrl, totalBytes: __WASM_BYTES__, onProgress: (n, total) => { if (loadingEl) loadingEl.textContent = `Loading CAD kernel… ${mb(n)} of ${mb(total || __WASM_BYTES__)} MB`; } }); } // the exact kernel (about 23 MB; the service worker and the browser keep it for the next visit)
-  catch (e) { console.error(e); $('#loading')?.remove(); toast('The CAD kernel could not be loaded: ' + e.message + '. Reload the page to try again.', true); return; }
+  // The kernel (23 MB of WebAssembly) downloads and compiles while the rest of the page starts up: the viewport, the ribbon and the
+  // sign-in no longer wait for it. Only the work that needs it waits (refreshNow and runCommand check kernelOk).
+  kernelReady = loadBrep({ locateFile: () => occtUrl, wasmUrl: occtUrl, totalBytes: __WASM_BYTES__, onProgress: (n, total) => { if (loadingEl) loadingEl.textContent = `Loading geometry kernel… ${mb(n)} of ${mb(total || __WASM_BYTES__)} MB`; } }) // about 23 MB; the service worker and the browser keep it for the next visit
+    .then(() => { kernelOk = true; performance.mark('sketchy-kernel'); $('#loading')?.remove(); });
+  kernelReady.catch((e) => { console.error(e); $('#loading')?.remove(); toast('The geometry kernel could not be loaded: ' + e.message + '. Reload the page to try again.', true); });
   vp = new Viewport($('#gl'), $('#cube'));
   vp.opts.bedSize = printerSize(bedName) || vp.opts.bedSize;
   vp.buildBed();
   vp.home();
   vp.fitted = true; // only opening a design re-frames the view; making the first body must not move the camera
-  $('#loading')?.remove();
   registerServiceWorker();
   SU = createSketchUI({
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
@@ -4107,8 +4114,10 @@ async function boot() {
   startRemotePolling();
   setupAssistant();
   setupAddins();
+  window.__sketchy = { kernelState: () => ({ abandoned: kw.abandoned || 0, heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
+  performance.mark('sketchy-shell');
+  try { await kernelReady; } catch { return; }
   refresh();
-  window.__sketchy = { kernelState: () => ({ heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
   openLastOrCreate().then(checkDrafts); // not awaited: the New design dialog must not hold up the rest of start-up
 }
 // ------------------------------------------------------------------ add-ins (src/addins.js, src/addins-ui.js)

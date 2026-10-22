@@ -815,6 +815,75 @@ scenario('Restored features: Extend Surface, Thicken on curved surfaces and mitr
   const mArc = elbow('mitre', [[0, 0, 0.4], [40, 0]]);
   check('mitred corners on an arc path say lines are needed', /straight/i.test(errs(mArc)), errs(mArc));
 });
+scenario('Swept, piped and lofted bodies tessellate into a few thousand triangles (ceilings so it cannot regress)', () => {
+  const spl = [[0, 0], [0, 20], [15, 40], [40, 50], [60, 50]];
+  const path = skch('w', [{ t: 'path', open: true, pts: spl }], 'XZ');
+  const pipe = (wall, smooth) => [path, { id: 'pp', type: 'pipe', name: 'P', params: { path: 'w', smooth, diameter: 10, wall, op: 'new', target: '' } }];
+  const sweep = (smooth) => [skch('p', [{ t: 'circle', cx: 0, cy: 0, r: 5 }]), path, { id: 'sw', type: 'sweep', name: 'S', params: { profile: 'p', path: 'w', smooth, op: 'new', target: '' } }];
+  const cases = [
+    ['a smoothed sweep', sweep(true), 4000], ['a cornered sweep', sweep(false), 1000], ['a smoothed solid pipe', pipe(0, true), 4500],
+    ['a smoothed hollow pipe, wall 1 (was 87,000)', pipe(1, true), 9000], ['a smoothed hollow pipe, wall 0.5', pipe(0.5, true), 9000],
+    ['a cornered pipe', pipe(0, false), 1000], ['a cornered hollow pipe', pipe(1, false), 1800],
+    ['a loft from a square to a circle', [skch('a', [{ t: 'rect', x: -10, y: -10, w: 20, h: 20 }]), skch('b', [{ t: 'circle', cx: 0, cy: 0, r: 6 }], 'XY', { offset: 20 }), { id: 'lf', type: 'loft', name: 'L', params: { sketches: ['a', 'b'], op: 'new', target: '' } }], 1500],
+    ['a shelled smoothed sweep', [...sweep(true), { id: 'sh', type: 'shell', name: 'Sh', params: { body: 'sw', thickness: 1, open: [], side: 'inside' } }], 8000],
+  ];
+  for (const [name, feats, ceiling] of cases) {
+    const r = evaluate(doc(feats), { backend: 'brep' }), b = r.result.bodies[0], n = b ? b.tris.length / 3 : Infinity;
+    check(`${name}: at most ${ceiling.toLocaleString()} triangles`, !errs(r) && n <= ceiling, errs(r) + ' ' + n);
+  }
+});
+scenario('A rebuild done in pieces (as the worker does) gives the same bodies as one pass, and an abandoned one leaves the cache sound', () => {
+  const feats = [prim('base', 'box', { sx: 100, sy: 60, sz: 20, radius: 0 })];
+  for (let i = 0; i < 10; i++) feats.push({ id: 'h' + i, type: 'hole', name: 'H' + i, params: { target: 'base', pos: [-40 + i * 9, 0, 20], dir: [0, 0, 1], kind: 'simple', diameter: 4, through: true, depth: 8 } });
+  const d = doc(feats), resolved = evaluate(d).resolved;
+  const sig = (r) => r.bodies.map((b) => `${b.id}:${b.volume.toFixed(3)}:${b.faces.length}`).join('|');
+  clearKernelCache(); const whole = rebuild(resolved, resolved.length, {});
+  clearKernelCache();
+  let discarded = 0; for (const k of [3, 6, 9]) { const r = rebuild(resolved, k, { discard: true }); if (r.discarded && !r.bodies) discarded++; }
+  const pieces = rebuild(resolved, resolved.length, {});
+  check('pieces give no bodies until the last one', discarded === 3);
+  check('the last piece equals one pass', sig(pieces) === sig(whole) && Object.keys(pieces.errors).length === 0, sig(pieces) + ' vs ' + sig(whole));
+  // abandoned after two pieces, then an edit of an early feature and a full rebuild
+  clearKernelCache(); rebuild(resolved, 4, { discard: true }); rebuild(resolved, 8, { discard: true });
+  const edited = clone(d); edited.features.find((f) => f.id === 'h2').params.diameter = 6;
+  const re = rebuild(evaluate(edited).resolved, resolved.length, {});
+  clearKernelCache(); const ref = rebuild(evaluate(edited).resolved, resolved.length, {});
+  check('a rebuild after an abandoned one matches a clean rebuild', sig(re) === sig(ref), sig(re) + ' vs ' + sig(ref));
+});
+scenario('An edit rebuilds only what depends on it, and the result equals a clean rebuild', () => {
+  const ex = (id, sk, target, op, d) => ({ id, type: 'extrude', name: id, params: { sketch: sk, profiles: null, extent: 'distance', distance: d, op, target, thin: false, wall: 1, wallSide: 'inside', flip: false, symmetric: false, taper: 0, twist: 0, scaleTop: 1 } });
+  const hole = (id, target, x) => ({ id, type: 'hole', name: id, params: { target, pos: [x, 0, 20], dir: [0, 0, 1], kind: 'simple', diameter: 4, through: true, depth: 8 } });
+  const feats = [
+    prim('a', 'box', { sx: 60, sy: 40, sz: 20, radius: 0 }), prim('b', 'cylinder', { radius: 12, height: 30, pos: [100, 0, 0] }), prim('c', 'sphere', { radius: 15, pos: [200, 0, 0] }),
+    skch('s1', [{ t: 'rect', x: -10, y: -5, w: 20, h: 10 }], 'XY', { offset: 20 }), ex('e1', 's1', 'a', 'join', 8),
+    hole('h1', 'a', -20), hole('h2', 'b', 100),
+    prim('d', 'box', { sx: 10, sy: 10, sz: 10, radius: 0, pos: [300, 0, 0] }),
+    { id: 'm1', type: 'mirror', name: 'M', params: { body: 'b', plane: 'XZ', offset: 40, join: false } },
+    { id: 'p1', type: 'pattern', name: 'P', params: { body: 'd', kind: 'linear', count: 3, spacing: [0, 25, 0], axis: 'Z', angle: 360, extent: 'spacing', symmetric: false, skip: '' } },
+    skch('s2', [{ t: 'circle', cx: 200, cy: 0, r: 4 }], 'XY', { offset: 30 }), ex('e2', 's2', '', 'cut', 10), // cuts from every body it touches
+    hole('h3', 'a', 20),
+  ];
+  const base = doc(feats);
+  const numKeys = { primitive: ['sx', 'radius'], hole: ['diameter'], extrude: ['distance'], mirror: ['offset'], pattern: ['spacing'] };
+  const sig = (r) => JSON.stringify([r.result.bodies.map((b) => [b.id, b.name, +b.volume.toFixed(3), +b.area.toFixed(2), b.faces.length, b.bbox.min.map((v) => +v.toFixed(3)), b.bbox.max.map((v) => +v.toFixed(3))]), r.result.errors, r.result.notes]);
+  const mutate = (d, id) => { const e = clone(d), f = e.features.find((x) => x.id === id), k = (numKeys[f.type] || []).find((q) => f.params[q] !== undefined); if (!k) return null; if (Array.isArray(f.params[k])) f.params[k] = f.params[k].map((v) => v + 1); else f.params[k] += (k === 'diameter' ? 0.5 : 1); return e; };
+  let reusedTotal = 0, checks = 0, bad = '';
+  for (const f of feats) {
+    const e = mutate(base, f.id); if (!e) continue;
+    clearKernelCache(); evaluate(base, { cache: true });
+    const cached = evaluate(e, { cache: true }); reusedTotal += cached.result.stats?.reused || 0;
+    clearKernelCache(); const clean = evaluate(e, { cache: false });
+    checks++; if (sig(cached) !== sig(clean)) bad += ` ${f.id}`;
+    const back = evaluate(base, { cache: true }); clearKernelCache(); const ref = evaluate(base, { cache: false }); // and the edit undone
+    checks++; if (sig(back) !== sig(ref)) bad += ` undo-${f.id}`;
+  }
+  check(`${checks} edits (and their undos) rebuilt with reuse give the bodies of a clean rebuild`, !bad, bad);
+  check('independent features were taken from the previous run, not built again', reusedTotal >= 15, String(reusedTotal));
+  clearKernelCache(); evaluate(base, { cache: true });
+  const first = clone(base); first.features[0].params.sx += 1;
+  const r = evaluate(first, { cache: true });
+  check('editing the first body leaves the other three bodies, their holes, the mirror and the pattern alone', r.result.stats.reused >= 5, JSON.stringify(r.result.stats));
+});
 const swProf = (id, shapes, plane) => skch(id, shapes, plane);
 bothBackends('Both backends: sweep a circle and a rectangle along lines and arcs', doc([
   swProf('p1', [{ t: 'circle', cx: 0, cy: 0, r: 3 }], 'YZ'), skch('w1', [{ t: 'path', open: true, pts: [[0, 0], [30, 0, 0.41421356], [50, 20]] }]),

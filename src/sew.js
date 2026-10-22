@@ -42,32 +42,51 @@ function sewPiece(R, verts, tris, { maxFaces = MAX_FACES, track = (o) => o } = {
     return sewFaces(R, verts, single, track);
   }
 }
+/**
+ * The faces become one shell whose faces share their edges: a vertex is made once per mesh vertex and an edge once per pair of them (used
+ * reversed by the face on its other side), so nothing has to be sewn afterwards. Sewing by search (weldShellsAndFaces) cost as much
+ * as making the faces; this takes about a third of the time of both. A face OpenCascade will not accept as flat is cut into triangles.
+ */
 function sewFaces(R, verts, faces, track) {
-  const P = (i) => [verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2]];
-  const built = [];
-  let skipped = 0;
-  for (const fc of faces) {
-    const [outer, ...holes] = fc.loops;
-    if (outer.length < 3) continue;
-    try {
-      if (!holes.length) {
-        const pts = outer.map(P); // (collinear points stay: the face next to this one has its own vertex there, and the two edges must match to be sewn)
-        try { built.push(track(R.makePolygon(pts))); }
-        catch { for (let k = 1; k + 1 < pts.length; k++) built.push(track(R.makePolygon([pts[0], pts[k], pts[k + 1]]))); } // nearly flat but not flat enough for one face: split it
-      } else {
-        const wire = (lp) => track(R.assembleWire(lp.map((v, k) => track(R.makeLine(P(v), P(lp[(k + 1) % lp.length]))))));
-        built.push(track(R.makeFace(wire(outer), holes.map(wire))));
+  const oc = R.getOC(), nV = verts.length / 3, vs = new Array(nV), edges = new Map(), garbage = [];
+  const own = (o) => { garbage.push(o); return o; };
+  const vtx = (i) => vs[i] || (vs[i] = own(new oc.BRepBuilderAPI_MakeVertex(own(new oc.gp_Pnt(verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2])))).Vertex());
+  const edge = (a, b) => { // the edge between two vertices, in the direction a to b
+    const lo = a < b ? a : b, hi = a < b ? b : a, key = lo * nV + hi;
+    let e = edges.get(key);
+    if (!e) { e = own(new oc.BRepBuilderAPI_MakeEdge(vtx(lo), vtx(hi))).Edge(); edges.set(key, e); }
+    return a < b ? e : oc.TopoDS.Edge(e.Reversed());
+  };
+  const wireOf = (lp) => { const mw = own(new oc.BRepBuilderAPI_MakeWire()); for (let k = 0; k < lp.length; k++) mw.Add(edge(lp[k], lp[(k + 1) % lp.length])); return mw.Wire(); };
+  const builder = own(new oc.TopoDS_Builder()), shell = new oc.TopoDS_Shell();
+  builder.MakeShell(shell);
+  let skipped = 0, made = 0;
+  const add = (face) => { builder.Add(shell, face); made++; };
+  try {
+    for (const fc of faces) {
+      const [outer, ...holes] = fc.loops;
+      if (outer.length < 3) continue;
+      try {
+        const mf = own(new oc.BRepBuilderAPI_MakeFace(wireOf(outer), true));
+        if (!mf.IsDone()) throw new Error('not flat');
+        for (const h of holes) mf.Add(wireOf(h));
+        add(mf.Face());
+      } catch {
+        if (holes.length) { skipped++; continue; }
+        try { for (let k = 1; k + 1 < outer.length; k++) { const mf = own(new oc.BRepBuilderAPI_MakeFace(wireOf([outer[0], outer[k], outer[k + 1]]), true)); if (mf.IsDone()) add(mf.Face()); else skipped++; } }
+        catch { skipped++; } // a degenerate sliver: the neighbours close the gap
       }
-    } catch { skipped++; /* a degenerate sliver: the neighbours close the gap when sewn */ }
-  }
-  if (!built.length) throw new Error('The mesh has no usable triangles.');
-  const shell = track(R.weldShellsAndFaces(built));
-  let solid = track(R.makeSolid([shell]));
-  let v = R.measureVolume(solid);
-  if (v < 0) { // faces pointing inwards: turn the shell inside out
-    solid = track(R.makeSolid([track(shell.flipOrientation?.() ?? shell)]));
-    v = R.measureVolume(solid);
-  }
-  if (!(Math.abs(v) > 1e-9)) throw new Error('The mesh is not a closed solid (it has holes or loose pieces). Use Clean Mesh to weld and fill it before sewing.');
-  return { solid, faces: faces.length, volume: v, skipped };
+    }
+    if (!made) throw new Error('The mesh has no usable triangles.');
+    const welded = track(R.cast(shell));
+    garbage.push(shell);
+    let solid = track(R.makeSolid([welded]));
+    let v = R.measureVolume(solid);
+    if (v < 0) { // faces pointing inwards: turn the shell inside out
+      solid = track(R.makeSolid([track(welded.flipOrientation?.() ?? welded)]));
+      v = R.measureVolume(solid);
+    }
+    if (!(Math.abs(v) > 1e-9)) throw new Error('The mesh is not a closed solid (it has holes or loose pieces). Use Clean Mesh to weld and fill it before sewing.');
+    return { solid, faces: faces.length, volume: v, skipped };
+  } finally { for (const o of garbage) { try { o.delete(); } catch { /* already freed */ } } }
 }
