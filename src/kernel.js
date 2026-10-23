@@ -264,7 +264,7 @@ export function profilesOf(f) { return profilesOfExact(f); }
 export function offsetPolygon(poly, d) { return offsetPolygonExact(poly, d); }
 /** Free everything the incremental cache holds (another design was opened, or the page is done with it). */
 export function clearKernelCache() { clearBrepCache(); }
-export { exportBrepCache, importBrepCache } from './backend-brep.js';
+export { exportBrepCache, importBrepCache, cacheReach } from './backend-brep.js';
 
 /**
  * Replay features[0..count). Returns { bodies, surfaces, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted, stats, backend }.

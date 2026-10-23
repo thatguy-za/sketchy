@@ -357,8 +357,8 @@ export function clearBrepCache() {
 const CACHE_FORMAT = 1, CACHE_STRIDE = 8;
 /** The cache as plain data, or null when there is nothing worth saving. `kernel` names the build (a different one reads nothing). */
 export function exportBrepCache({ kernel = '', maxChars = 200e6 } = {}) {
-  const n = BC.feats.length;
-  if (!n || !BC.cps.has(n)) return null;
+  const n = Math.max(0, ...BC.cps.keys()); // the state furthest on: the whole design, or how far a build got (a build cut short is worth saving too)
+  if (!n || !BC.feats.length) return null;
   const order = [n, n - 1, ...[...BC.cps.keys()].filter((i) => i % CACHE_STRIDE === 0 && i < n - 1).sort((a, b) => b - a)].filter((i, k, all) => BC.cps.has(i) && all.indexOf(i) === k);
   const ids = new Map(), shapes = []; let chars = 0;
   const idOf = (s) => { let k = ids.get(s); if (k === undefined) { const t = s.serialize(); chars += t.length; k = shapes.length; ids.set(s, k); shapes.push(t); } return k; };
@@ -370,6 +370,17 @@ export function exportBrepCache({ kernel = '', maxChars = 200e6 } = {}) {
     catch { /* a shape that cannot be written: this state is left out */ }
   }
   return cps.length ? { format: CACHE_FORMAT, kernel, comp: BC.comp, feats: BC.feats, out: BC.out.slice(0, n), cps, shapes } : null;
+}
+/**
+ * How many leading features of `features` the cache already has a state for: the furthest saved state that every feature before it
+ * still matches. A build that starts there replays nothing before it (see prebuild in headless.js).
+ */
+export function cacheReach(features, bodyComp = null) {
+  if (!BC.feats.length || JSON.stringify(bodyComp || null) !== BC.comp) return 0;
+  let d = 0; const lim = Math.min(BC.feats.length, features.length);
+  while (d < lim && sameValue(BC.feats[d], features[d])) d++;
+  let best = 0; for (const i of BC.cps.keys()) if (i <= d && i > best) best = i;
+  return best;
 }
 /** Replace the cache with a saved one. Returns false (and leaves the cache empty) when it is for another build or cannot be read. */
 export function importBrepCache(d, { kernel = '' } = {}) {

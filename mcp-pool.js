@@ -5,7 +5,7 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 
 const workerFile = fileURLToPath(new URL('./mcp-worker.js', import.meta.url));
-const STORAGE_OPS = new Set(['list', 'read', 'write', 'saveVersion', 'versions', 'readVersion', 'restoreVersion', 'undo', 'requests', 'requestDone', 'live', 'ui']); // all a worker may ask the main thread for
+const STORAGE_OPS = new Set(['list', 'read', 'write', 'saveVersion', 'versions', 'readVersion', 'restoreVersion', 'undo', 'requests', 'requestDone', 'live', 'ui', 'readCache', 'writeCache']); // all a worker may ask the main thread for
 const fail = (kind, message) => Object.assign(new Error(message), { kind });
 
 /**

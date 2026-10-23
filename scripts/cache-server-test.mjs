@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 
 const port = 9300 + Math.floor(Math.random() * 400), base = `http://127.0.0.1:${port}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sketchy-cache-'));
-const env = { ...process.env, PORT: String(port), DATA_DIR: dir, ADMIN_USER: 'boss', ADMIN_PASSWORD: 'correct-horse-battery', TRUST_PROXY: 'false', MAX_CACHE_MB: '1', USER_QUOTA_MB: '3', BIN_DAYS: '30', HIBP_URL: 'http://127.0.0.1:1/' };
+const env = { ...process.env, PORT: String(port), DATA_DIR: dir, ADMIN_USER: 'boss', ADMIN_PASSWORD: 'correct-horse-battery', TRUST_PROXY: 'false', SKETCHY_MCP_SAVE_AFTER_MS: '50', SKETCHY_MCP_SAVE_EVERY_MS: '50', MAX_CACHE_MB: '1', USER_QUOTA_MB: '3', BIN_DAYS: '30', HIBP_URL: 'http://127.0.0.1:1/' };
 const srv = spawn(process.execPath, [process.env.SERVER_FILE || 'server.js'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let out = ''; srv.stdout.on('data', (d) => (out += d)); srv.stderr.on('data', (d) => (out += d));
 for (let i = 0; i < 50 && !out.includes('Sketchy on'); i++) await new Promise((r) => setTimeout(r, 100));
@@ -80,6 +80,23 @@ try {
   check('it took the oldest caches, not the newest', !left.includes('One') && left.includes('Three'), JSON.stringify(left));
   check('and the recycle bin was left alone while caches could go', (await A('GET', '/api/bin')).json.items.some((x) => x.name === 'Binned'));
   check('the designs themselves are untouched', ['One', 'Two', 'Three', 'Big'].every((n) => fs.existsSync(path.join(pdir, n + '.json'))));
+
+  console.log('An assistant\'s request (the MCP worker) saves and reuses the cache');
+  const { bigDesign } = await import('./bench-brep.mjs');
+  const heavy = JSON.stringify({ format: 'sketchy', version: 1, name: 'Heavy', ...bigDesign(), marker: 41, appearance: {}, faceAppearance: [], units: 'mm', components: [], bodyComp: {}, configs: [], activeConfig: null, canvases: [] });
+  check('a heavy design is saved', (await put(A, 'Heavy', heavy)).status === 200);
+  const tok = (await A('POST', '/api/mcp/tokens', { name: 'cache' })).json.token;
+  const rpc = async (name, args) => (await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) })).json();
+  const vol = (r) => { try { return Math.round(JSON.parse(r.result.content[0].text).model.bodies.reduce((a, b) => a + b.volume_mm3, 0)); } catch { return null; } };
+  let first = null; for (let i = 0; i < 4 && !vol(first || {}); i++) first = await rpc('inspect_design', { design: 'Heavy' }); // the first call also starts the kernel
+  check('the assistant reads the design', vol(first) > 1e6, JSON.stringify(first).slice(0, 200));
+  check('the build was saved next to the design', fs.existsSync(path.join(ownerDir(), 'Heavy.cache')) && fs.statSync(path.join(ownerDir(), 'Heavy.cache')).size > 1000);
+  const savedFor = (await A('GET', urlOf('Heavy')));
+  check('the app can read what the assistant saved', savedFor.status === 200 && savedFor.buf[0] === 0x1f && savedFor.buf[1] === 0x8b);
+  const t0 = Date.now(); const second = await rpc('inspect_design', { design: 'Heavy' });
+  check('the next request gives the same answer', vol(second) === vol(first), `${vol(second)} vs ${vol(first)}`);
+  console.log(`      second request: ${Date.now() - t0} ms`);
+  check('and the saved cache did not change the design', JSON.parse((await A('GET', '/api/projects/Heavy')).text).features.length === bigDesign().features.length);
 } catch (e) {
   failed++; console.log('FAIL (error)', e);
 } finally {

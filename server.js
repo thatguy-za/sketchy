@@ -18,6 +18,8 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
+// the version the app was built with: a saved kernel cache is only read by the same one (the assistant workers inherit this)
+try { process.env.SKETCHY_VERSION ||= JSON.parse(await fs.readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8')).version; } catch { /* no package.json: caches are then not shared with the app */ }
 const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const port = +process.env.PORT || 8080;
 const MAX_VERSIONS = Math.max(0, parseInt(process.env.MAX_VERSIONS ?? '20', 10) || 0); // old revisions kept per design
@@ -378,6 +380,20 @@ async function freeName(D, name) {
 // every few hours, remove what has waited long enough, for everyone
 if (BIN_DAYS) setInterval(async () => { for (const u of Object.keys(users)) await readBin(dirs(u)).catch(() => {}); }, 6 * 3600e3).unref();
 
+/** Store a design's saved kernel cache (the REST endpoint and the MCP worker both come here). Throws { code, msg } for what is refused. */
+async function putCache(u, name, body) {
+  const refuse = (code, msg) => Object.assign(new Error(msg), { code, msg });
+  if (!MAX_CACHE_BYTES) throw refuse(403, 'Saving the kernel cache is turned off on this server.');
+  if (!nameOk(name)) throw refuse(400, 'Invalid design name.');
+  const D = dirs(u);
+  if (!(await fs.stat(path.join(D.proj, name + '.json')).catch(() => null))) throw refuse(404, 'Not found');
+  if (body.length > MAX_CACHE_BYTES) throw refuse(413, `A saved cache may be at most ${Math.round(MAX_CACHE_BYTES / 1048576)} MB.`);
+  if (body.length < 20 || body[0] !== 0x1f || body[1] !== 0x8b) throw refuse(400, 'Not a saved cache.');
+  const cf = path.join(D.proj, name + '.cache');
+  await checkQuota(u, body.length, (await fs.stat(cf).catch(() => ({ size: 0 }))).size, name);
+  await fs.mkdir(D.proj, { recursive: true });
+  await fs.writeFile(cf + '.tmp', body); await fs.rename(cf + '.tmp', cf); // whole or not at all: a worker stopped while writing must not leave half a file
+}
 /** The saved kernel caches of an account, oldest first: { name, size, mtime }. */
 async function listCaches(D) {
   const out = [];
@@ -479,6 +495,15 @@ const mcpStorage = {
     const obj = JSON.parse(raw), bad = validateDesign(obj);
     if (bad) throw new Error('This design cannot be opened by an assistant: ' + bad);
     return { obj, rev: (await readMeta(D.proj, name)).seq };
+  },
+  /** The design's saved kernel cache (a gzip file) or null, so that an assistant's request starts from the states the app built. */
+  async readCache(u, name) {
+    if (!nameOk(name)) return null;
+    return fs.readFile(path.join(dirs(u).proj, name + '.cache')).catch(() => null);
+  },
+  /** Progress of a build too big for one request: saved so that the next request starts there. A refused one is simply not kept. */
+  async writeCache(u, name, bytes) {
+    try { await putCache(u, name, Buffer.from(bytes)); return true; } catch (e) { if (e.code) return false; throw e; }
   },
   async write(u, name, obj, device, rev, opts = {}) {
     if (!nameOk(name)) throw new Error('Invalid design name.');
@@ -1087,9 +1112,7 @@ async function api(req, res, url) {
         if (!MAX_CACHE_BYTES) return send(res, 403, { error: 'Saving the kernel cache is turned off on this server.' });
         if (!(await fs.stat(file).catch(() => null))) return send(res, 404, { error: 'Not found' });
         const body = await readBody(req, MAX_CACHE_BYTES);
-        if (body.length < 20 || body[0] !== 0x1f || body[1] !== 0x8b) return send(res, 400, { error: 'Not a saved cache.' });
-        try { await checkQuota(user, body.length, (await fs.stat(cf).catch(() => ({ size: 0 }))).size, name); } catch (e) { if (e.code === 413) return send(res, 413, { error: e.msg }); throw e; }
-        await fs.writeFile(cf, body);
+        try { await putCache(user, name, body); } catch (e) { if (e.code) return send(res, e.code, { error: e.msg }); throw e; }
         return send(res, 200, { size: body.length });
       }
       if (req.method === 'DELETE') { await fs.rm(cf, { force: true }); usageCache.delete(user); return send(res, 200, {}); }

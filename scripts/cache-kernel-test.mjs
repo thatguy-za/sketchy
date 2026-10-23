@@ -1,8 +1,8 @@
 // The saved kernel cache: write it, read it back in a fresh state, and check that opening a design from it gives the same bodies as
 // building it from scratch, faster, and that a cache which does not fit (another build, an edited design, damaged data) never gives a
 // wrong result. Run with `npm run test:cache-kernel`.
-import { initHeadless, evaluate } from '../src/headless.js';
-import { clearKernelCache, exportBrepCache, importBrepCache } from '../src/kernel.js';
+import { initHeadless, evaluate, resolveDoc, prebuild } from '../src/headless.js';
+import { clearKernelCache, exportBrepCache, importBrepCache, cacheReach, rebuild } from '../src/kernel.js';
 import { packCache, unpackCache } from '../src/cachefile.js';
 import { bigDesign } from './bench-brep.mjs';
 
@@ -82,6 +82,28 @@ const other = clone(feats0).slice(0, 15).map((f) => ({ ...f, params: { ...f.para
 other[3].params.diameter = (other[3].params.diameter || 5) + 1;
 const stale = build(design(other)); clearKernelCache(); const fresh = build(design(other));
 check('a cache from a longer or different design is reused only where it fits', same(fresh.r, stale.r) === '', same(fresh.r, stale.r));
+
+console.log('A build that was cut short');
+clearKernelCache();
+const resolved = resolveDoc(design()).feats;
+rebuild(resolved, 24, { cache: true, discard: true }); // a build that got 24 features in before it was stopped
+const partial = exportBrepCache({ kernel: KERNEL });
+check('what a build reached is saved', !!partial && partial.cps[0].i === 24 && partial.out.length === 24, JSON.stringify(partial && partial.cps.map((c) => c.i)));
+clearKernelCache();
+check('and read back', importBrepCache(await unpackCache(await packCache(partial)), { kernel: KERNEL }) === true);
+check('the cache knows how far it reaches into the design', cacheReach(resolved, null) === 24, String(cacheReach(resolved, null)));
+check('but not into one that differs before that point', (() => { const f = clone(resolved); f[10].params = { ...f[10].params, diameter: 99 }; return cacheReach(f, null) <= 10; })());
+const resumed = build(design());
+check('finishing from it gives the same bodies as building from scratch', same(cold.r, resumed.r) === '', same(cold.r, resumed.r));
+console.log(`      ${resumed.ms.toFixed(0)} ms from the partial cache, ${cold.ms.toFixed(0)} ms from scratch`);
+clearKernelCache();
+const pieces = []; await prebuild(design(), { onPiece: (k, total) => pieces.push([k, total]) });
+check('a design is built in pieces, each of which can be saved', pieces.length > 1 && pieces.at(-1)[0] === pieces.at(-1)[1], JSON.stringify(pieces));
+check('and the pieces add up to the same design', same(cold.r, build(design()).r) === '');
+clearKernelCache();
+importBrepCache(await unpackCache(await packCache(partial)), { kernel: KERNEL });
+const fromPartial = []; const info = await prebuild(design(), { onPiece: (k, total) => fromPartial.push(k) });
+check('starting from a partial cache, only the rest is built', info.from === 24 && info.features === feats0.length, JSON.stringify(info));
 
 clearKernelCache();
 console.log(`\n${passed} passed, ${failed} failed`);

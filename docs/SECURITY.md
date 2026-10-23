@@ -40,7 +40,7 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 | `MCP_ALLOWED_ORIGINS` | none | Comma-separated browser origins (or `*`) allowed to call `/mcp` from a web page. By default no web page may; command-line and desktop assistants are unaffected. |
 | `MCP_RATE_PER_MIN` | `60` | Calls per minute for one AI assistant token (one person's tokens together get twice this). |
 | `MCP_WORKERS` | `2` | Worker threads that rebuild designs for assistants. |
-| `MCP_TIMEOUT_SECONDS` | `20` | A rebuild that runs longer is stopped. |
+| `MCP_TIMEOUT_SECONDS` | `20` | A request that runs longer is stopped. A design too heavy to build in one request is not lost work: the build is saved as it goes (see the saved kernel cache in REFERENCE.md), so the next attempt carries on from there. Only a single step longer than the limit (sewing a very large mesh, one huge boolean) needs this raised. |
 | `MCP_WORKER_MEMORY_MB` | `512` | JavaScript memory a worker may use before it is stopped. The modelling kernel's WebAssembly memory is outside this limit; the time limit bounds it. |
 | `ALLOW_MCP` | `true` | Whether AI assistants can connect. Admins can also switch this in Server settings. |
 
