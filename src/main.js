@@ -33,6 +33,9 @@ import { ficon, uicon } from './ficons.js';
 import { createSketchUI } from './sketchui.js';
 import { smoothPath } from './solids.js';
 import { bedFit, overhangs, wallThickness } from './printcheck.js';
+import { orientations, placement, findings, verdict, minWallFor, weightEstimate } from './printprofile.js';
+import { createBeginner, designProfile } from './beginner.js';
+import { templateDoc, templateById } from './templates.js';
 import { withoutSkins } from './skins.js';
 import { createAssistant, toolPast } from './assistant.js';
 import { MATERIALS, TEXTURES, textureById, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
@@ -329,6 +332,7 @@ function applyResult(evalErr) {
   updateEdgeView();
   if (dialog) updateFaceHL(); else if (!sketch && !measure) vp.showFaces(shownFaces(), null);
   renderTree(); renderTimeline(); renderRibbon(); renderStatus();
+  if (pcReopen) { pcReopen = false; setTimeout(() => showPrintCheck(), 0); }
   $('#btn-undo').disabled = !undoStack.length || !!dialog || !!sketch;
   $('#btn-redo').disabled = !redoStack.length || !!dialog || !!sketch;
   if (dialog) renderDialogErrors();
@@ -543,7 +547,10 @@ function showSettings() {
       <label class="set-row"><span>This design</span><select id="st-doc" aria-label="Units of this design">${unitOpts(getUnits())}</select></label>
       <label class="set-row"><span>New designs</span><select id="st-new" aria-label="Units for new designs">${unitOpts(defaultUnits())}</select></label>
       <div class="hint-sm">Lengths are shown and typed in these units. Everything is stored in millimetres, so changing units never changes the geometry. The choice for new designs is kept in this browser.</div>
+      <h3 class="set-h">3D printing</h3>
+      <div class="set-row"><span>Printer, nozzle and fit</span><button class="btn" id="st-print" type="button">Print setup…</button></div>
     </div>`);
+  m.el.querySelector('#st-print').onclick = () => { m.close(); BG.printSetup(); };
   m.el.querySelector('#st-doc').onchange = (e) => setDocUnits(e.target.value);
   m.el.querySelector('#st-new').onchange = (e) => { try { localStorage.setItem('sketchy.units', e.target.value); } catch { /* storage unavailable */ } toast(`New designs will start in ${UNIT_NAMES[e.target.value]}.`); };
 }
@@ -603,6 +610,7 @@ const CUSTOM = {
   asbuilt: () => startAsBuilt(),
   export: () => exportDialog(),
   printer: () => printerMenu($('#ribbon')),
+  printsetup: () => BG.printSetup(), templates: () => BG.templatePicker(), customize: () => BG.customizer(), tour: () => BG.startTour(), connectai: () => connectAssistant(),
   buildvol: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); },
   select: (ev) => selectionMenu(ev?.currentTarget), finishsketch: () => finishSketch(), cancelpick: () => cancelSketch(),
 };
@@ -701,6 +709,7 @@ function renderRibbon() {
     } else lab.style.cursor = 'default';
     host.appendChild(el);
   }
+  BG.update();
 }
 
 // ------------------------------------------------------------------ browser tree
@@ -713,7 +722,7 @@ function renderTree() {
   R(0, doc.name === 'Untitled' ? '(Unsaved)' : doc.name, { key: 'root', kind: 'comp', twist: true, root: true, eye: result.bodies.length ? visBodies > 0 : true,
     onEye: () => { const hide = visBodies > 0; result.bodies.forEach((b) => (hide ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } });
   if (open('root')) {
-    folder(1, 'docset', 'Document Settings', 'gear', {}, () => { R(2, `Units: ${getUnits()}, g`, { kind: 'file', click: (ev) => unitsMenu(ev.currentTarget) }); R(2, 'Part Design', { kind: 'body', dim: true }); });
+    folder(1, 'docset', 'Document Settings', 'gear', {}, () => { R(2, `Units: ${getUnits()}, g`, { kind: 'file', click: (ev) => unitsMenu(ev.currentTarget) }); R(2, 'Part Design', { kind: 'body', dim: true }); if (doc.template) R(2, 'Customize sliders', { kind: 'file', click: () => BG.customizer() }); R(2, 'Print setup…', { kind: 'file', click: () => BG.printSetup() }); });
     folder(1, 'views', 'Named Views', 'folder', {}, () => R(2, 'Home', { kind: 'camera', click: () => vp.home(true) }));
     folder(1, 'origin', 'Origin', 'folder', { eye: originVis, onEye: () => { originVis = !originVis; vp.setOriginVisible(originVis); renderTree(); } }, () => {
       for (const n of ['XY', 'XZ', 'YZ']) R(2, n, { kind: 'plane', dim: true });
@@ -2721,67 +2730,144 @@ function showInfo() {
 // ------------------------------------------------------------------ print check
 const checkGroup = new THREE.Group();
 let pcancel = null;
-const pcOpts = { angle: 45, minWall: 1.2 };
+const pcOpts = { angle: 45, minWall: 1.2, custom: false };
+let pcReopen = false;
 function clearCheck() { pcancel && (pcancel.stop = true); checkGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); }); checkGroup.clear(); }
 function closePrintCheck() { clearCheck(); $('#props-wrap').classList.remove('open'); }
+
+// ---- beginner help: print setup, templates, sliders, the welcome card and the guided first model (src/beginner.js)
+const BG = createBeginner({
+  $, esc, modal, toast, doc: () => doc, snapshot: () => snapshot(), pushUndo: (s) => pushUndo(s), refresh: () => refresh(),
+  designProfile: () => designProfile(doc),
+  printers: () => [...Object.entries(PRINTERS).map(([name, size]) => ({ name, size })), ...customPrinters()],
+  bedName: () => bedName, setPrinter: (name) => { const size = printerSize(name); if (size) setBed(name, size); }, addPrinter: () => customPrinterDialog(),
+  openTemplate: (id) => openTemplate(id), isEmpty: () => !doc.features.length, state: () => ({ sketch: !!sketch, dialog: !!dialog }),
+  tourState: () => {
+    const sks = doc.features.filter((f) => f.type === 'sketch');
+    return { sketch: !!sketch, picking: !!sketch?.picking, shapes: sketch && !sketch.picking ? (curSketch()?.params.shapes || []).length : 0, hasSketch: sks.length > 0, hasShapes: sks.some((f) => (f.params.shapes || []).length > 0), has: (t) => doc.features.some((f) => f.type === t && !result.errors[f.id]), dialog: !!dialog, exported: BG.exported() };
+  },
+  nameNow: () => nameNow(),
+  canConnect: () => !!(acct.server && acct.user && acct.mcp), connectAssistant: () => connectAssistant(),
+  run: (id) => runCommand(id), renderRibbon: () => renderRibbon(), afterSetup: () => { renderRibbon(); if (BG.customizerOpen()) BG.customizer(); },
+});
+/** The AI assistants page of the Account window: the server address, tokens and a step-by-step guide for each assistant. */
+function connectAssistant() {
+  if (!acct.server || !acct.user) return toast('Sign in to a Sketchy server to connect an assistant.', true);
+  if (!acct.mcp) return toast('The administrator has turned assistant access off on this server.', true);
+  showAccount('ai');
+}
+/** A new design from a template: named first when designs are kept on the server, in a new tab unless this one is untouched. */
+async function openTemplate(id) {
+  const t = templateById(id);
+  if (!t || busy()) return;
+  if (!kernelOk) return toast('Still loading the geometry kernel. Try again in a moment.');
+  const td = templateDoc(id, designProfileForNew());
+  const apply = (name) => {
+    doc.name = name; doc.features = td.features; doc.marker = td.marker; doc.nextId = td.nextId; doc.params = td.params; doc.template = td.template; doc.units = 'mm';
+    setUnits('mm'); undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear(); vp.fitted = false;
+    $('#doc-name').textContent = name; markDirty(); refresh(); BG.customizer(); renderDocTabs();
+  };
+  if (acct.server && acct.user) {
+    if (namingNow) return;
+    namingNow = true;
+    try {
+      const pick = await askNewDesign('Name your design', 'Create', t.name);
+      if (!pick || !newTab({ reuseBlank: true })) return;
+      apply(pick.name);
+      await createOnServer(pick);
+    } finally { namingNow = false; }
+  } else if (newTab({ reuseBlank: true })) apply(t.name);
+}
+const designProfileForNew = () => designProfile({ params: [] });
+/** Turn the bodies so they lie the way that needs the least support: one Move feature each. */
+function layFlat(bodies, rot) {
+  pushUndo(snapshot());
+  for (const b of bodies) {
+    const pl = placement(b, rot);
+    doc.features.splice(doc.marker, 0, { id: 'f' + doc.nextId++, type: 'move', name: uniqueName('Lay flat'), params: { body: b.id, t: pl.t, r: pl.r, s: [1, 1, 1], copy: false, mode: 'free', from: [0, 0, 0], to: [0, 0, 0] } });
+    doc.marker++;
+  }
+  pcReopen = true; refresh();
+}
 function showPrintCheck() {
   if (dialog || sketch) return;
   if (kernelBusy()) return toast('Still rebuilding the design. Try again in a moment.', true);
   if (!checkGroup.parent) vp.scene.add(checkGroup);
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id));
   const wrap = $('#props-wrap');
-  const [bx, by, bz] = vp.opts.bedSize, u = getUnits();
+  const [bx, by, bz] = vp.opts.bedSize, u = getUnits(), prof = designProfile(doc), bedShort = bedName.split(' (')[0];
+  if (!pcOpts.custom) pcOpts.minWall = minWallFor(prof);
   const fit = bedFit(bodies, vp.opts.bedSize);
-  const bedLine = !bodies.length ? 'No bodies to check.'
-    : fit.fitsAll ? `<b class="ok">All ${bodies.length} fit on one plate</b> (${Math.round(fit.usage * 100)}% of the bed used)`
-    : fit.tooBig.length ? `<b class="warn">${fit.tooBig.length} too large</b>: ${fit.tooBig.map((t) => `${esc(t.name)} (${t.size.map((v) => dispStr(v, 1)).join(' × ')}, ${t.why})`).join('; ')}`
-    : `<b class="warn">Needs ${fit.plates} plates</b> — each body fits, but not all together`;
-  wrap.innerHTML = `<div class="props"><div class="title">${ficon('properties', 20)}PRINT CHECK</div><div class="body">
-    <div class="stat"><span>Bed</span><b>${esc(bedName.split(' (')[0])} · ${bx} × ${by} × ${bz}</b></div>
-    <div class="pc-line">${bedLine}</div>
+  const vol = bodies.reduce((a, b) => a + b.volume, 0), area = bodies.reduce((a, b) => a + (b.area || 0), 0), wt = weightEstimate(vol, area, prof);
+  const matName = materialNameOf({ material: prof.material });
+  wrap.innerHTML = `<div class="props" id="pc-root"><div class="title">${ficon('properties', 20)}PRINT CHECK</div><div class="body">
+    <div id="pc-verdict" class="pc-verdict"></div>
+    <div id="pc-list"></div>
     <div class="sep"></div>
-    <label class="pc-row"><span>Overhang limit</span><input id="pc-angle" type="number" min="1" max="89" value="${pcOpts.angle}"><span>°</span></label>
-    <div class="pc-line" id="pc-over"></div>
-    <div class="sep"></div>
-    <label class="pc-row"><span>Minimum wall (${u})</span><input id="pc-wall" type="number" min="0.1" step="0.1" value="${dispStr(pcOpts.minWall)}"></label>
-    <div class="pc-line" id="pc-wallres">Not checked yet.</div>
-    <button class="btn" id="pc-run" ${bodies.length ? '' : 'disabled'}>Check wall thickness</button>
-  </div><div class="foot"><button class="btn primary" id="pc-close">Close</button></div></div>`;
+    <div class="stat"><span>Printer</span><b>${esc(bedShort)} · ${bx} × ${by} × ${bz}</b></div>
+    <div class="stat"><span>Nozzle · layer · fit gap</span><b>${prof.nozzle} · ${prof.layer} · ${prof.tol} mm</b></div>
+    ${bodies.length ? `<div class="stat"><span>Rough weight (${esc(matName)})</span><b>${wt.typical.toFixed(0)} g</b></div><div class="hint-sm">About ${wt.filamentM.toFixed(1)} m of filament with a typical 15% infill. Solid it would be ${wt.solid.toFixed(0)} g. A guess, not a slice.</div>` : ''}
+    <button class="btn" id="pc-setup" type="button">Print setup…</button>
+    <details class="pc-more"><summary>Settings for this check</summary>
+      <label class="pc-row"><span>Overhang limit</span><input id="pc-angle" type="number" min="1" max="89" value="${pcOpts.angle}"><span>°</span></label>
+      <div class="hint-sm" id="pc-over"></div>
+      <label class="pc-row"><span>Minimum wall (${u})</span><input id="pc-wall" type="number" min="0.1" step="0.1" value="${dispStr(pcOpts.minWall)}"></label>
+      <div class="hint-sm">Three times the nozzle size by default.</div>
+    </details>
+  </div><div class="foot"><button class="btn" id="pc-run" ${bodies.length ? '' : 'disabled'}>Check again</button><button class="btn primary" id="pc-close">Close</button></div></div>`;
   wrap.classList.add('open');
   $('#pc-close').onclick = closePrintCheck;
+  $('#pc-setup').onclick = () => BG.printSetup();
+  let over = overhangs(bodies, pcOpts.angle), turn = null, wall = null, progress = null;
+  const render = () => {
+    const list = findings({ fit, over, wall, turn, profile: prof, bedName: bedShort, count: bodies.length, fmtLen: (v) => `${dispStr(v, 2)} ${u}` });
+    const v = verdict(list);
+    $('#pc-verdict').className = `pc-verdict ${v}`;
+    $('#pc-verdict').textContent = !bodies.length ? 'Nothing to check yet' : v === 'ok' ? 'Ready to print' : v === 'warn' ? 'Printable, with a few things to know' : 'Needs changes before you print';
+    $('#pc-list').innerHTML = list.map((f, i) => `<div class="pc-item ${f.level}"><div class="pc-dot" aria-hidden="true">${f.level === 'ok' ? '✓' : f.level === 'warn' ? '!' : '×'}</div><div><b>${esc(f.title)}</b><div>${esc(f.detail)}</div>${f.fix ? `<button class="btn" data-fix="${i}" type="button">${esc(f.fix.label)}</button>` : ''}</div></div>`).join('')
+      + (progress !== null ? `<div class="pc-item wait"><div class="pc-dot" aria-hidden="true">…</div><div><b>Checking wall thickness</b><div>${Math.round(progress * 100)}%</div></div></div>` : '');
+    $('#pc-list').querySelectorAll('[data-fix]').forEach((btn) => (btn.onclick = () => {
+      const fix = list[+btn.dataset.fix].fix;
+      if (fix.id === 'lay-flat') layFlat(bodies, turn.best.r);
+      else if (fix.id === 'scale') { closePrintCheck(); runCommand('scale'); }
+    }));
+  };
   const drawOver = () => {
     clearCheck();
     const a = Math.min(89, Math.max(1, +$('#pc-angle').value || 45)); pcOpts.angle = a;
-    const o = overhangs(bodies, a);
-    if (o.soup.length) {
-      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(o.soup, 3));
-      const col = new Float32Array(o.grade.length * 9);
-      o.grade.forEach((k, i) => { for (let v = 0; v < 3; v++) col.set([1, 0.75 - 0.6 * k, 0.1], i * 9 + v * 3); });
+    over = overhangs(bodies, a);
+    turn = over.fraction > 0.15 && bodies.length ? orientations(bodies, a) : null;
+    if (over.soup.length) {
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(over.soup, 3));
+      const col = new Float32Array(over.grade.length * 9);
+      over.grade.forEach((k, i) => { for (let v = 0; v < 3; v++) col.set([1, 0.75 - 0.6 * k, 0.1], i * 9 + v * 3); });
       g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide }));
-      checkGroup.add(m);
+      checkGroup.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide })));
     }
-    $('#pc-over').innerHTML = o.area ? `<b class="${o.fraction > 0.15 ? 'warn' : 'ok'}">${(o.fraction * 100).toFixed(1)}% of the surface overhangs</b> (${fmtArea(o.area)}), steepest ${o.worst.toFixed(0)}°. Shown in orange–red; flat on the plate is ignored.` : '<b class="ok">No overhangs</b> past this angle.';
+    $('#pc-over').textContent = over.area ? `${(over.fraction * 100).toFixed(1)}% of the surface overhangs (${fmtArea(over.area)}), steepest ${over.worst.toFixed(0)}°. Shown in orange and red; flat on the plate is ignored.` : 'No overhangs past this angle.';
+    render();
   };
   drawOver();
   $('#pc-angle').onchange = drawOver;
+  $('#pc-wall').onchange = () => { pcOpts.custom = true; };
   $('#pc-run').onclick = async () => {
-    pcOpts.minWall = Math.max(0.05, (+$('#pc-wall').value || 0) * lenF() || 1.2);
+    const typed = +$('#pc-wall').value;
+    if (pcOpts.custom && typed > 0) pcOpts.minWall = Math.max(0.05, typed * lenF());
     drawOver();
-    const btn = $('#pc-run'), out = $('#pc-wallres'); btn.disabled = true;
-    pcancel = { stop: false };
-    const r = await wallThickness(bodies, { minWall: pcOpts.minWall, cancel: pcancel, onProgress: (p) => { out.textContent = `Checking… ${Math.round(p * 100)}%`; } });
-    btn.disabled = false;
+    const btn = $('#pc-run'); btn.disabled = true;
+    pcancel = { stop: false }; progress = 0; render();
+    const r = await wallThickness(bodies, { minWall: pcOpts.minWall, cancel: pcancel, onProgress: (p) => { progress = p; if ($('#pc-list')) render(); } });
+    progress = null; if ($('#pc-run')) $('#pc-run').disabled = false;
     if (!r) return;
+    wall = r;
     if (r.thin.length) {
-      const pos = new Float32Array(r.thin.length * 3); r.thin.forEach((s, i) => pos.set(s.p, i * 3));
+      const pos = new Float32Array(r.thin.length * 3); r.thin.forEach((s2, i) => pos.set(s2.p, i * 3));
       const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       checkGroup.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xe0453a, size: 7, sizeAttenuation: false, depthTest: false })));
     }
-    out.innerHTML = r.min === Infinity ? 'No walls found.' : r.thin.length
-      ? `<b class="warn">${r.thin.length} of ${r.samples.length} sample points are thinner than ${dispStr(pcOpts.minWall)} ${u}</b> (thinnest ${dispStr(r.min, 2)} ${u}). Marked in red.`
-      : `<b class="ok">No thin walls found</b> (thinnest ${dispStr(r.min, 2)} ${u}, ${r.samples.length} samples).`;
+    if ($('#pc-list')) render();
   };
+  if (bodies.length) $('#pc-run').click(); // the wall check runs on its own: a beginner should not have to know to ask for it
 }
 
 // ------------------------------------------------------------------ files
@@ -2866,6 +2952,7 @@ function isWatertight(b) {
 }
 function exportDialog() {
   if (dialog || sketch) return;
+  BG.noteExport();
   if (kernelBusy()) return toast('Still rebuilding the design. Try again in a moment.', true);
   let last = '3mf'; try { last = localStorage.getItem('sketchy.exportFormat') || '3mf'; } catch { /* storage unavailable */ }
   if (!exportFormats().some((f) => f[0] === last)) last = '3mf';
@@ -3107,7 +3194,7 @@ function loadProject(txt, rev = 0, seq = rev) {
   if (sec) { sec = null; secPick = null; applySection(); } // a section belongs to what is on screen, not to the next design
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], rev, seq };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], template: d.template && typeof d.template === 'object' && Array.isArray(d.template.sliders) ? d.template : undefined, rev, seq };
   setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
@@ -3329,9 +3416,9 @@ const lastKey = () => 'sketchy.last.' + (acct.user || '');  // per person, so si
 const rememberLast = (name) => { try { localStorage.setItem(lastKey(), name); } catch { /* storage unavailable */ } };
 let namingNow = false;
 /** Ask for a name and folder, make sure the name is free, and return { name, folder } (or null if cancelled). */
-async function askNewDesign(title, okLabel) {
+async function askNewDesign(title, okLabel, suggest = '') {
   let last = ''; try { last = localStorage.getItem('sketchy.lastFolder') || ''; } catch { /* storage unavailable */ }
-  let name = '';
+  let name = suggest;
   for (;;) {
     const pick = await saveDialog({ name, folder: doc.folder || last, title, okLabel });
     if (!pick) return null;
@@ -3361,6 +3448,16 @@ async function newDoc(inPlace = false) {
     if (!pick) return;
     if (!inPlace && !newTab()) return;
     await createOnServer(pick);
+  } finally { namingNow = false; }
+}
+/** Ask for the design's name now (the New design window) unless it already has one. Resolves true when the design is named and stored. */
+async function nameNow() {
+  if (!acct.server || !acct.user || doc.rev) return true;
+  if (busy() || namingNow) return false;
+  namingNow = true;
+  try {
+    const pick = await askNewDesign('New design', 'Create');
+    return pick ? await createOnServer(pick) : false;
   } finally { namingNow = false; }
 }
 /** A design that was started without a name (the dialog was dismissed): ask once it has something in it. */
@@ -3443,6 +3540,29 @@ function scheduleAutosave() {
 }
 
 // ------------------------------------------------------------------ undo / redo
+/** What one change did, in words, from the design before and after it. */
+function stepLabel(before, after) {
+  const bf = new Map(before.features.map((f) => [f.id, f])), af = new Map(after.features.map((f) => [f.id, f]));
+  const added = after.features.filter((f) => !bf.has(f.id)), gone = before.features.filter((f) => !af.has(f.id));
+  const edited = after.features.filter((f) => bf.has(f.id) && bf.get(f.id) !== f && JSON.stringify(bf.get(f.id)) !== JSON.stringify(f));
+  const nm = (f) => f.name || defOf(f)?.label || f.type;
+  if (added.length === 1 && !gone.length) return `Added ${nm(added[0])}`;
+  if (gone.length === 1 && !added.length) return `Deleted ${nm(gone[0])}`;
+  if (edited.length === 1 && !added.length && !gone.length) return `Changed ${nm(edited[0])}`;
+  if (added.length || gone.length || edited.length) return `${added.length + gone.length + edited.length} features changed`;
+  if (JSON.stringify(before.params) !== JSON.stringify(after.params)) return 'Changed parameters';
+  if (before.marker !== after.marker) return 'Moved the rollback marker';
+  return 'Changed the appearance';
+}
+/** Every step you can go back to, newest first, so one click returns to how the design was before something went wrong. */
+function historyMenu(anchor) {
+  if (dialog || sketch || !undoStack.length) return;
+  const states = [...undoStack, snapshot()], n = undoStack.length, items = [{ head: 'GO BACK TO BEFORE…' }];
+  for (let i = n - 1; i >= 0 && items.length <= 20; i--) items.push({ label: `${stepLabel(states[i], states[i + 1])}${i === n - 1 ? ' (last change)' : ''}`, run: () => undoTo(n - i) });
+  const r = anchor.getBoundingClientRect();
+  showMenu(r.left, r.bottom + 2, items);
+}
+function undoTo(count) { if (dialog || sketch) return; for (let i = 0; i < count && undoStack.length; i++) { redoStack.push(snapshot()); restore(undoStack.pop()); } markDirty(); refresh(); toast(count === 1 ? 'Undone.' : `Went back ${count} steps. Redo brings them back.`); }
 function undo() { if (dialog || sketch || !undoStack.length) return; redoStack.push(snapshot()); restore(undoStack.pop()); markDirty(); refresh(); }
 function redo() { if (dialog || sketch || !redoStack.length) return; undoStack.push(snapshot()); restore(redoStack.pop()); markDirty(); refresh(); }
 
@@ -4307,7 +4427,10 @@ async function boot() {
   if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('touch');
   buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip(); bindSectionDrag(); bindAppearanceDrop();
   bindTooltips();
-  $('#btn-undo').onclick = undo; $('#btn-redo').onclick = redo;
+  $('#btn-undo').onclick = (ev) => { const r = ev.currentTarget.getBoundingClientRect(); if (ev.clientX > r.right - 14) historyMenu(ev.currentTarget); else undo(); };
+  $('#btn-undo').oncontextmenu = (ev) => { ev.preventDefault(); historyMenu(ev.currentTarget); };
+  $('#btn-undo').title = 'Undo (Ctrl+Z). Click the arrow beside it to go back several steps.';
+  $('#btn-redo').onclick = redo;
   $('#btn-data').onclick = () => toggleDataPanel();
   $('#btn-save').onclick = saveVersion;
   $('#btn-newtab').onclick = () => newDoc();
@@ -4516,6 +4639,6 @@ async function openLastOrCreate() {
     }
   }
   try { const a = localStorage.getItem('sketchy.autosave'); if (a) { const d = JSON.parse(a); if (d.features?.length && (d.name === 'Untitled' || !d.name)) { loadProject(a); toast('Restored your unsaved design'); await nameUntitled(); return; } } } catch { /* ignore */ }
-  await newDoc(true);
+  if (!BG.welcomeWanted()) await newDoc(true); // a first visit starts at the welcome card; the design is named once a choice is made there
 }
 boot();

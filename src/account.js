@@ -351,9 +351,11 @@ export async function showAccount(startTab = 'profile') {
     const json = (o) => JSON.stringify(o, null, 2);
     const hdr = { Authorization: `Bearer ${t}` };
     const note = tok ? '' : '<p class="hint">Create a token above first and these steps fill in your token. Until then <b>YOUR_TOKEN</b> stands in for it.</p>';
-    const needHttps = secure ? '' : `<p class="ac-warn">You are on <b>${esc(location.origin)}</b>, which isn't a public https address. Claude's website, ChatGPT and other web assistants call Sketchy from their own servers, so they can't reach it. Either <a href="https://github.com/thatguy-za/sketchy/blob/main/docs/HTTPS.md" target="_blank" rel="noopener">put Sketchy behind https</a> or use the local option below.</p>`;
+    const httpsDoc = '<a href="https://github.com/thatguy-za/sketchy/blob/main/docs/HTTPS.md" target="_blank" rel="noopener">put Sketchy behind https</a>';
+    // each assistant says what it needs in its own words: the ones that call Sketchy from their own servers cannot reach a local address
+    const needHttps = (who, local) => (secure ? '' : `<p class="ac-warn">You are on <b>${esc(location.origin)}</b>, which isn't a public https address. ${who} calls Sketchy from its own servers, so it can't reach it. ${local ? `Either ${httpsDoc} or use the local option below.` : `First ${httpsDoc}, then come back to these steps.`}</p>`);
     const sections = [
-      ['Claude', `<p>Works in Claude on the web and in the Claude desktop app. You don't need a token: Claude signs in to Sketchy itself.</p>${needHttps}
+      ['Claude (web and desktop app)', `<p>Claude connects to Sketchy as a custom connector and signs in to your Sketchy account itself, so you don't need a token.</p>${needHttps('Claude on the web', true)}
         <ol>
           <li>In Claude open <b>Settings</b>, then <b>Connectors</b>.</li>
           <li>Choose <b>Add custom connector</b>.</li>
@@ -362,14 +364,21 @@ export async function showAccount(startTab = 'profile') {
           <li>Start a new chat, open the connectors menu (the <b>+</b> button by the message box) and switch <b>Sketchy</b> on.</li>
           <li>Ask for something: <em>“Make a 60×30×8 mm bracket with two 10 mm holes and call it Bracket.”</em> Then open <b>Bracket</b> in your library.</li>
         </ol>
-        <details class="mcp-sub"><summary>Sketchy only on this computer (no https address)? Use the desktop app with a token</summary>
+        <details class="mcp-sub"><summary>Sketchy only on this computer (no https address)? Use the Claude desktop app with a token</summary>
           <ol>
             <li>Install <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a>, then create a token above (name it <em>Claude</em>).</li>
             <li>In the Claude desktop app open <b>Settings</b>, then <b>Developer</b>, then <b>Edit Config</b>, and merge this in:${code(json({ mcpServers: { sketchy: { command: 'npx', args: ['-y', 'mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${t}`] } } }))}</li>
             <li>Quit Claude completely and open it again.</li>
           </ol>${note}
         </details>`],
-      ['ChatGPT', `<p>Needs a public https address and a ChatGPT plan that offers custom connectors. Menu names change between releases, so look for the closest match. No token needed.</p>${needHttps}
+      ['Claude Code', `<p>Claude Code runs in your terminal and connects with a token, so Sketchy can stay on this computer.</p>
+        <ol>
+          <li>Create a token above (name it <em>Claude Code</em>).</li>
+          <li>In a terminal, run:${code(`claude mcp add --transport http sketchy ${mcpUrl} --header "Authorization: Bearer ${t}"`)}</li>
+          <li>Start <code>claude</code> and type <code>/mcp</code> to check that <b>sketchy</b> is connected.</li>
+          <li>Ask for something: <em>“Make a 60×30×8 mm bracket with two 10 mm holes and call it Bracket.”</em></li>
+        </ol>${note}`],
+      ['ChatGPT', `<p>ChatGPT connects as a custom connector and signs in to your Sketchy account itself, so you don't need a token. It needs a ChatGPT plan that offers custom connectors in Developer mode. Menu names change between releases, so look for the closest match.</p>${needHttps('ChatGPT', false)}
         <ol>
           <li>In ChatGPT open <b>Settings</b>, then <b>Connectors</b> (or <b>Apps</b>), then <b>Advanced settings</b>, and turn on <b>Developer mode</b>.</li>
           <li>Back in Connectors choose <b>Create</b>.</li>
