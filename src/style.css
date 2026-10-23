@@ -1219,6 +1219,10 @@ body.touch .row { margin: 10px 0; }
 .wbtn.primary { border-color: var(--accent); }
 @media (max-width: 620px) { .welcome-btns { grid-template-columns: 1fr; } }
 
+.welcome-kernel { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--muted); font-size: var(--fs-sm); }
+.welcome-kernel[hidden] { display: none; }
+.welcome-kernel progress { flex: 0 0 140px; height: 6px; accent-color: var(--accent); }
+body.kernel-inline #loading { display: none; }
 #tour { position: absolute; left: 244px; right: 130px; max-width: 520px; top: 10px; padding: 12px 14px; background: var(--c-ffffff); border: 2px solid var(--accent); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.22); z-index: 7; user-select: text; }
 #tour .tour-n { color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .04em; }
 #tour .tour-t { font-size: var(--fs-xl); font-weight: 700; margin: 2px 0; } #tour .tour-x { line-height: 1.45; font-size: var(--fs-md); }

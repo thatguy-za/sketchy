@@ -132,6 +132,8 @@ let pending = false;
 // responsive. Small designs keep rebuilding on the page itself: no round trip, and the result is there straight away.
 let appliedParams = new Map();
 let kernelOk = false, kernelReady = null; // the geometry kernel downloads while the page starts
+let kernelBytes = { n: 0, total: 0 };
+const kernelEvent = () => window.dispatchEvent(new Event('sketchy-kernel')); // the welcome card and the guided tour show how far the download is
 const HEAVY_MS = 150; // a rebuild slower than this moves the kernel to the worker
 const canWorker = typeof Worker !== 'undefined';
 let kernelHeavy = false, lastRebuildMs = 0, quickRuns = 0;
@@ -2746,7 +2748,7 @@ const BG = createBeginner({
     const sks = doc.features.filter((f) => f.type === 'sketch');
     return { sketch: !!sketch, picking: !!sketch?.picking, shapes: sketch && !sketch.picking ? (curSketch()?.params.shapes || []).length : 0, hasSketch: sks.length > 0, hasShapes: sks.some((f) => (f.params.shapes || []).length > 0), has: (t) => doc.features.some((f) => f.type === t && !result.errors[f.id]), dialog: !!dialog, exported: BG.exported() };
   },
-  nameNow: () => nameNow(),
+  nameNow: () => nameNow(), kernel: () => ({ ok: kernelOk, n: kernelBytes.n, total: kernelBytes.total || __WASM_BYTES__ }),
   canConnect: () => !!(acct.server && acct.user && acct.mcp), connectAssistant: () => connectAssistant(),
   run: (id) => runCommand(id), renderRibbon: () => renderRibbon(), afterSetup: () => { renderRibbon(); if (BG.customizerOpen()) BG.customizer(); },
 });
@@ -4409,8 +4411,8 @@ async function boot() {
   const loadingEl = $('#loading'), mb = (n) => (n / 1048576).toFixed(1);
   // The kernel (23 MB of WebAssembly) downloads and compiles while the rest of the page starts up: the viewport, the ribbon and the
   // sign-in no longer wait for it. Only the work that needs it waits (refreshNow and runCommand check kernelOk).
-  kernelReady = loadBrep({ locateFile: () => occtUrl, wasmUrl: occtUrl, totalBytes: __WASM_BYTES__, onProgress: (n, total) => { if (loadingEl) loadingEl.textContent = `Loading geometry kernel… ${mb(n)} of ${mb(total || __WASM_BYTES__)} MB`; } }) // about 23 MB; the service worker and the browser keep it for the next visit
-    .then(() => { kernelOk = true; performance.mark('sketchy-kernel'); $('#loading')?.remove(); });
+  kernelReady = loadBrep({ locateFile: () => occtUrl, wasmUrl: occtUrl, totalBytes: __WASM_BYTES__, onProgress: (n, total) => { kernelBytes = { n, total: total || __WASM_BYTES__ }; if (loadingEl) loadingEl.textContent = `Loading geometry kernel… ${mb(n)} of ${mb(total || __WASM_BYTES__)} MB`; kernelEvent(); } }) // about 23 MB; the service worker and the browser keep it for the next visit
+    .then(() => { kernelOk = true; performance.mark('sketchy-kernel'); $('#loading')?.remove(); kernelEvent(); });
   kernelReady.catch((e) => { console.error(e); $('#loading')?.remove(); toast('The geometry kernel could not be loaded: ' + e.message + '. Reload the page to try again.', true); });
   vp = new Viewport($('#gl'), $('#cube'));
   vp.opts.bedSize = printerSize(bedName) || vp.opts.bedSize;
