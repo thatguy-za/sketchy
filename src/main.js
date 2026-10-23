@@ -3116,41 +3116,31 @@ function importProgress(name) {
   ctl.set(`Reading ${name}…`);
   return ctl;
 }
-/** A very dense model: import as it is, or import and add a Reduce step that brings it near IMPORT_TARGET triangles. */
-function askLargeImport(name, tris) {
-  return new Promise((resolve) => {
-    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const keep = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / tris) * 100)));
-    const m = modal(`<div class="modal-title">Large model</div>
-      <div class="modal-body"><p class="p0"><b>${esc(name)}</b> has ${tris.toLocaleString()} triangles. A mesh becomes a solid made of flat faces, and sewing and editing that gets slower the denser it is; more than about 32,000 faces is refused. Most designs do not need more than about ${IMPORT_TARGET.toLocaleString()} triangles.</p>
-      <p class="p0">Importing with a <b>Reduce</b> keeps about ${keep}% of the triangles (the import step remembers the amount, so you can change it later).</p>
-      <div class="modal-foot flush"><button type="button" class="btn primary" id="li-reduce">Import and reduce to ~${keep}%</button><button type="button" class="btn" id="li-asis">Import as it is</button><button type="button" class="btn" id="li-cancel">Cancel</button></div></div>`);
-    m.el.querySelector('#li-reduce').onclick = () => { m.close(); finish({ keep }); };
-    m.el.querySelector('#li-asis').onclick = () => { m.close(); finish({ keep: 0 }); };
-    m.el.querySelector('#li-cancel').onclick = () => { m.close(); finish(null); };
-    m.el.querySelector('.modal-x')?.addEventListener('click', () => finish(null));
-  });
-}
 async function importModel(file, { always = false } = {}) {
   const prog = importProgress(file.name);
   try {
     await tick();
     const parts = await readImport(file);
     if (prog.cancelled) return toast('Import cancelled.');
-    const big = parts.reduce((a, p) => a + p.soup.length / 9, 0);
-    let keep = 0;
-    if (big > IMPORT_WARN) {
-      prog.set('Waiting for your choice…');
-      const choice = await askLargeImport(parts.length > 1 ? `${file.name} (${parts.length} parts)` : parts[0].name, big);
-      if (!choice) return toast('Import cancelled.');
-      keep = choice.keep;
-    }
     let tris = 0, made = 0; const notes = new Set(), errs = [];
-    if (keep) for (const part of parts) { const n = part.soup.length / 9; if (n > IMPORT_TARGET) part.reduce = { keep: Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / n) * 100))), tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) }; } // the import reduces the triangles before it sews them
+    // A mesh is always imported. One that is too dense to sew quickly (over IMPORT_WARN triangles, and past the 32,000 faces the kernel will sew into a solid)
+    // is simplified by default: the import reduces its triangles to about IMPORT_TARGET before it sews them, and the amount stays editable in the import step.
+    for (const part of parts) {
+      const n = part.soup.length / 9; part.origTris = n;
+      if (n > IMPORT_WARN) part.reduce = { keep: Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / n) * 100))), tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) };
+    }
     for (const part of parts) {
       if (prog.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       prog.set(`Checking ${part.name} (${(part.soup.length / 9).toLocaleString()} triangles)…`); await tick();
-      let r = always ? { err: '' } : await importPart(part, prog);
+      let r = always ? { err: '' } : await importPart(part, prog); // 'always' (Repair Mesh…) goes straight to the repair window
+      if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
+      for (let more = 0; r.limit && more < 5; more++) { // still too many faces (the reduction stops at its deviation limit): simplify harder and try again
+        const was = part.reduce || { keep: 100, tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) };
+        part.reduce = { keep: Math.max(1, Math.floor(was.keep / 2)), tolerance: +(was.tolerance * 2.5).toFixed(3) };
+        prog.set(`Simplifying ${part.name} further…`); await tick();
+        r = await importPart(part, prog);
+        if (r.cancelled) break;
+      }
       if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       if (r.limit) { errs.push(`${part.name}: ${r.err}`); continue; }
       if (r.err !== undefined && (always || r.err)) { // won't make a solid by itself: let the user steer the repair
@@ -3161,7 +3151,8 @@ async function importModel(file, { always = false } = {}) {
         if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       }
       if (r.err) errs.push(`${part.name}: ${r.err}`); else {
-        made++; tris += r.tris; if (r.note) notes.add(r.exact ? r.note : `repaired: ${r.note}`);
+        made++; tris += part.reduce ? (result.bodies.find((b) => b.id === r.id)?.tris.length / 3 || r.tris) : r.tris; if (r.note) notes.add(r.exact ? r.note : `repaired: ${r.note}`);
+        if (part.reduce) notes.add(`simplified from ${part.origTris.toLocaleString()} triangles (change the amount in the Reduce setting of the import step)`);
       }
       part.notes?.forEach((n) => notes.add(n));
     }
@@ -4165,17 +4156,70 @@ async function openSavedDesign(pr) {
   }
   openDesign(pr.name);
 }
+/** The recycle bin: deleted designs wait here (30 days by default), with their versions, until they are restored or deleted for good. */
+async function renderBin() {
+  const host = $('#data-panel');
+  host.innerHTML = `<div class="dp-top"><button id="bin-back" title="Back to designs" aria-label="Back to designs">${uicon('prev', 14)}</button><span class="count">Recycle bin</span><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
+    <div class="dp-grid" id="bin-list"><div class="dp-empty">Loading…</div></div>
+    <div class="dp-actions"><button class="btn" id="bin-empty" disabled>Empty the bin</button></div>
+    <div class="dp-version" id="bin-note"></div>`;
+  $('#bin-back').onclick = () => renderDataPanel();
+  $('#dp-close').onclick = () => toggleDataPanel(false);
+  const r = await call('GET', '/bin');
+  const list = $('#bin-list');
+  if (!list) return; // the panel was closed meanwhile
+  if (!r.ok) { list.innerHTML = '<div class="dp-empty">Could not load the recycle bin.</div>'; return; }
+  const { items, days } = r.data;
+  $('#bin-note').textContent = days ? `Deleted designs are kept for ${days} days, then removed for good. They count toward your storage, and make room first when it runs out.` : 'The recycle bin is off on this server: deleting a design is permanent.';
+  if (!items.length) { list.innerHTML = '<div class="dp-empty">The recycle bin is empty.<br>Designs you delete wait here.</div>'; return; }
+  list.innerHTML = '';
+  const left = (t) => { const d = Math.ceil((t - Date.now()) / 864e5); return d <= 1 ? 'removed within a day' : `removed in ${d} days`; };
+  for (const it of items) {
+    const row = document.createElement('div'); row.className = 'bin-row';
+    row.innerHTML = `<div class="bin-thumb">${it.thumb ? `<img alt="" src="/api/bin/${it.id}/thumb">` : ficon('box', 24)}</div>
+      <div class="bin-info"><b></b><span>Deleted ${esc(ago(it.deletedAt))}${it.expiresAt ? ` · ${esc(left(it.expiresAt))}` : ''}${it.folder ? ` · from ${esc(it.folder)}` : ''}</span></div>
+      <div class="bin-btns"><button class="btn primary" data-a="restore" type="button">Restore</button><button class="btn" data-a="purge" type="button" title="Delete for good" aria-label="Delete ${esc(it.name)} for good">${uicon('trash', 15)}</button></div>`;
+    row.querySelector('b').textContent = it.name;
+    row.querySelector('[data-a=restore]').onclick = async () => {
+      let rr = await call('POST', `/bin/${it.id}/restore`, {});
+      if (rr.status === 409 && rr.data?.suggestion) {
+        if (!(await confirmBox({ title: 'Name already used', message: `You already have a design called "${it.name}". Restore this one as "${rr.data.suggestion}"?`, ok: 'Restore as a copy' }))) return;
+        rr = await call('POST', `/bin/${it.id}/restore`, { to: rr.data.suggestion });
+      }
+      if (!rr.ok) return toast(rr.data?.error || 'Could not restore the design.', true);
+      toast(`"${rr.data.name}" is back in your designs.`);
+      renderBin();
+    };
+    row.querySelector('[data-a=purge]').onclick = async () => {
+      if (!(await confirmBox({ title: 'Delete for good', message: `Delete "${it.name}" for good? This cannot be undone.`, ok: 'Delete for good', danger: true }))) return;
+      const rr = await call('DELETE', '/bin/' + it.id);
+      if (!rr.ok) return toast(rr.data?.error || 'Could not delete it.', true);
+      renderBin();
+    };
+    list.appendChild(row);
+  }
+  const empty = $('#bin-empty'); empty.disabled = false;
+  empty.onclick = async () => {
+    if (!(await confirmBox({ title: 'Empty the recycle bin', message: `Delete ${items.length} design${items.length === 1 ? '' : 's'} for good? This cannot be undone.`, ok: 'Empty the bin', danger: true }))) return;
+    const rr = await call('DELETE', '/bin');
+    if (!rr.ok) return toast(rr.data?.error || 'Could not empty the bin.', true);
+    renderBin();
+  };
+}
 async function renderDataPanel() {
   const host = $('#data-panel');
   host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-openfile" title="Open a project file from your computer" aria-label="Open a project file from your computer">${uicon('upload', 16)}</button><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
     <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16, 1.8)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
     <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
     <div class="dp-actions"><button class="btn primary" id="dp-new">New design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New folder</button></div>
+    <button class="dp-binlink" id="dp-bin" type="button" title="Deleted designs wait here and can be restored">${uicon('trash', 15)}<span>Recycle bin</span><em id="dp-bincount"></em></button>
     <div class="dp-version">Sketchy v${typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''}</div>`;
   $('#dp-close').onclick = () => toggleDataPanel(false);
   $('#dp-refresh').onclick = renderDataPanel;
   $('#dp-openfile').onclick = () => $('#file-proj').click();
   $('#dp-new').onclick = () => { newDoc(); };
+  $('#dp-bin').onclick = () => renderBin();
+  call('GET', '/bin').then((b) => { const n = b.ok ? b.data.items.length : 0; const c = $('#dp-bincount'); if (c) c.textContent = n ? String(n) : ''; }); // how many are waiting
   const grid = $('#dp-grid');
   const card = (name, o = {}) => {
     const el = document.createElement('div');
@@ -4235,8 +4279,9 @@ async function renderDataPanel() {
         const menu = (x, y) => showMenu(x, y, [
           { label: 'Move to folder…', uicon: 'folder', run: async () => { const f = await chooseFolder({ title: `Move "${pr.name}" to`, current: pr.folder || '' }); if (f !== null) moveDesign(pr.name, f); } },
           { label: 'Delete', uicon: 'trash', run: async () => {
-            if (!(await confirmBox({ title: 'Delete design', message: `Delete "${pr.name}" permanently? Its version history goes with it.`, ok: 'Delete', danger: true }))) return;
-            await call('DELETE', '/projects/' + encodeURIComponent(pr.name));
+            if (!(await confirmBox({ title: 'Delete design', message: `Move "${pr.name}" to the recycle bin? Its version history goes with it, and you can restore it from the bin for 30 days.`, ok: 'Move to bin', danger: true }))) return;
+            const dr = await call('DELETE', '/projects/' + encodeURIComponent(pr.name));
+            if (dr.ok) toast(dr.data?.binned ? `"${pr.name}" is in the recycle bin for ${dr.data.days} days.` : `"${pr.name}" was deleted.`);
             renderDataPanel();
           } },
         ]);

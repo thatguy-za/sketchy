@@ -1233,3 +1233,26 @@ body.kernel-inline #loading { display: none; }
 @media (prefers-reduced-motion: reduce) { .tour-glow { animation: none; box-shadow: 0 0 0 3px var(--accent); } }
 .set-note { color: var(--muted); font-style: normal; font-size: var(--fs-xs); }
 .bg-body { max-height: calc(86vh - 110px); }
+
+/* recycle bin */
+.bin-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); }
+.bin-thumb { width: 56px; height: 42px; border-radius: 4px; background: var(--chip); display: grid; place-items: center; overflow: hidden; color: var(--muted); }
+.bin-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.bin-info { min-width: 0; display: grid; gap: 2px; }
+.bin-info b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bin-info span { color: var(--muted); font-size: var(--fs-xs); }
+.bin-btns { display: flex; gap: 6px; }
+.bin-btns .btn { height: 26px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; }
+#bin-list { display: block; overflow: auto; }
+#bin-note { padding: 6px 12px 10px; white-space: normal; line-height: 1.4; }
+
+/* buttons in a window's footer keep their label on one line and grow to fit it; a footer that cannot fit them in one row wraps */
+.modal-foot { flex-wrap: wrap; }
+.modal-foot .btn { height: auto; min-height: 28px; padding-top: 4px; padding-bottom: 4px; white-space: nowrap; flex: 0 0 auto; }
+.modal-foot.stack .btn { flex: 1 1 0; }
+.modal-foot.stack .btn.primary { flex: 1 1 100%; }
+
+.dp-binlink { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 14px; border: 0; border-top: 1px solid var(--line-soft); background: none; color: var(--muted); text-align: left; font-size: var(--fs-md); flex: none; }
+.dp-binlink:hover { background: var(--ov-08); color: var(--text); }
+.dp-binlink em { margin-left: auto; font-style: normal; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--chip); text-align: center; font-size: var(--fs-xs); }
+.dp-binlink em:empty { display: none; }

@@ -21,6 +21,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
 const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const port = +process.env.PORT || 8080;
 const MAX_VERSIONS = Math.max(0, parseInt(process.env.MAX_VERSIONS ?? '20', 10) || 0); // old revisions kept per design
+const BIN_DAYS = process.env.BIN_DAYS === undefined ? 30 : Math.max(0, +process.env.BIN_DAYS || 0); // how long a deleted design waits in the recycle bin; 0 = deleting is permanent
 const DAY = 24 * 3600e3;
 const SESSION_MS = Math.max(1, +process.env.SESSION_DAYS || 30) * DAY;                       // sliding: renewed whenever the app is opened, so active people stay signed in
 const SESSION_MAX_MS = Math.max(SESSION_MS, (+process.env.SESSION_MAX_DAYS || 90) * DAY);   // but no sign-in lasts longer than this, however often it is used
@@ -337,6 +338,45 @@ async function snapshotVersion(D, name, cur) { // keep the file about to be over
   for (const r of revs.slice(MAX_VERSIONS)) for (const e of ['.json', '.meta']) await fs.rm(path.join(dir, r + e), { force: true });
 }
 
+// ---------------------------------------------------------------- recycle bin
+// A deleted design is moved, with its versions, thumbnail and any unsaved draft, to <projects>/.bin/<id>/ and kept for BIN_DAYS. It
+// stays inside the account's design folder, so it counts toward the storage limit (and is removed with the account); when a save would
+// go over the limit the oldest bin items are removed first, so deleting never leaves someone unable to save.
+const binDir = (D) => path.join(D.proj, '.bin');
+const binOk = (id) => typeof id === 'string' && /^[a-f0-9]{16}$/.test(id);
+async function moveToBin(D, name, folder) {
+  const id = crypto.randomBytes(8).toString('hex'), dir = path.join(binDir(D), id);
+  await fs.mkdir(dir, { recursive: true });
+  for (const ext of ['.json', '.jpg', '.meta', '.ver']) await fs.rename(path.join(D.proj, name + ext), path.join(dir, 'design' + ext)).catch(() => {});
+  await fs.rename(verDir(D, name), path.join(dir, 'versions')).catch(() => {});
+  for (const ext of ['.json', '.meta']) await fs.rename(path.join(D.draft, name + ext), path.join(dir, 'draft' + ext)).catch(() => {});
+  await writeJSON(path.join(dir, 'item.json'), { id, name, folder: folder || '', deletedAt: Date.now(), size: await dirBytes(dir) });
+  return id;
+}
+/** The bin's items, newest deletion first. Anything past its time is removed on the way. */
+async function readBin(D) {
+  const out = [], now = Date.now();
+  for (const e of await fs.readdir(binDir(D), { withFileTypes: true }).catch(() => [])) {
+    if (!e.isDirectory() || !binOk(e.name)) continue;
+    const it = await readJSON(path.join(binDir(D), e.name, 'item.json'), null);
+    if (!it || it.id !== e.name) { await fs.rm(path.join(binDir(D), e.name), { recursive: true, force: true }); continue; } // a half-written item
+    if (BIN_DAYS && now - it.deletedAt > BIN_DAYS * DAY) { await fs.rm(path.join(binDir(D), e.name), { recursive: true, force: true }); continue; }
+    out.push({ ...it, expiresAt: BIN_DAYS ? it.deletedAt + BIN_DAYS * DAY : null, thumb: !!(await fs.stat(path.join(binDir(D), e.name, 'design.jpg')).catch(() => null)) });
+  }
+  return out.sort((a, b) => b.deletedAt - a.deletedAt);
+}
+const binRemove = (D, id) => fs.rm(path.join(binDir(D), id), { recursive: true, force: true });
+/** A free name for a restored design: "Name", else "Name (restored)", "Name (restored 2)"... */
+async function freeName(D, name) {
+  for (let i = 1; i < 1000; i++) {
+    const n = i === 1 ? `${name} (restored)`.slice(0, 80) : `${name.slice(0, 70)} (restored ${i})`;
+    if (!(await fs.stat(path.join(D.proj, n + '.json')).catch(() => null))) return n;
+  }
+  return `${name.slice(0, 60)} (${crypto.randomBytes(3).toString('hex')})`;
+}
+// every few hours, remove what has waited long enough, for everyone
+if (BIN_DAYS) setInterval(async () => { for (const u of Object.keys(users)) await readBin(dirs(u)).catch(() => {}); }, 6 * 3600e3).unref();
+
 // ---------------------------------------------------------------- storage limits
 const usageCache = new Map(); // username -> { bytes, at }
 /** An account's storage limit in bytes (0 = unlimited): the admin's per-person value, else the server default. */
@@ -356,7 +396,11 @@ async function checkQuota(username, incoming, replacing = 0) {
   if (!quota) return;
   let c = usageCache.get(username);
   if (!c || Date.now() - c.at > 30e3) { const D = dirs(username); c = { bytes: (await dirBytes(D.proj)) + (await dirBytes(D.draft)), at: Date.now() }; usageCache.set(username, c); }
-  if (c.bytes - replacing + incoming > quota) throw Object.assign(new Error('over quota'), { code: 413, msg: `Your account is over its ${Math.round(quota / 1048576)} MB storage limit. Delete old designs or ask the admin.` });
+  if (c.bytes - replacing + incoming > quota) { // the recycle bin gives way first, oldest item first
+    const D = dirs(username), items = (await readBin(D)).reverse();
+    for (const it of items) { if (c.bytes - replacing + incoming <= quota) break; await binRemove(D, it.id); c.bytes -= it.size || 0; }
+  }
+  if (c.bytes - replacing + incoming > quota) throw Object.assign(new Error('over quota'), { code: 413, msg: `Your account is over its ${Math.round(quota / 1048576)} MB storage limit. Delete old designs (and empty the recycle bin) or ask the admin.` });
   c.bytes += Math.max(0, incoming - replacing);
 }
 
@@ -1038,11 +1082,18 @@ async function api(req, res, url) {
       return res.end(d);
     }
     if (req.method === 'DELETE') {
-      for (const ext of ['.json', '.jpg', '.ver', '.meta']) await fs.rm(path.join(D.proj, name + ext), { force: true });
-      await fs.rm(verDir(D, name), { recursive: true, force: true });
-      await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
-      const F = await readFolders(D); if (F.map[name] !== undefined) { delete F.map[name]; await writeFolders(D, F); }
-      return send(res, 200, {});
+      const F = await readFolders(D), existed = await fs.stat(file).catch(() => null);
+      let binned = null;
+      if (BIN_DAYS && existed) binned = await moveToBin(D, name, F.map[name] || '');
+      else {
+        for (const ext of ['.json', '.jpg', '.ver', '.meta']) await fs.rm(path.join(D.proj, name + ext), { force: true });
+        await fs.rm(verDir(D, name), { recursive: true, force: true });
+        await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
+      }
+      if (F.map[name] !== undefined) { delete F.map[name]; await writeFolders(D, F); }
+      usageCache.delete(user);
+      if (binned) log('design_binned', ip, `user=${user}`);
+      return send(res, 200, binned ? { binned, days: BIN_DAYS } : {});
     }
     if (req.method === 'PUT') {
       const body = await readBody(req, MAX_DESIGN_BYTES || 200e6);
@@ -1059,6 +1110,43 @@ async function api(req, res, url) {
       if (folderHdr !== null) { const F = await readFolders(D); if (folderHdr) { addFolder(F, folderHdr); F.map[name] = folderHdr; } else delete F.map[name]; await writeFolders(D, F); }
       return send(res, 200, res2);
     }
+    return send(res, 405, {});
+  }
+
+  // ---- recycle bin
+  if (p === '/api/bin' || p.startsWith('/api/bin/')) {
+    const parts = p.split('/').slice(3); // after /api/bin
+    if (!parts.length) {
+      if (req.method === 'GET') return send(res, 200, { days: BIN_DAYS, items: await readBin(D) });
+      if (req.method === 'DELETE') { // empty the bin
+        await fs.rm(binDir(D), { recursive: true, force: true }); usageCache.delete(user);
+        log('bin_emptied', ip, `user=${user}`);
+        return send(res, 200, {});
+      }
+      return send(res, 405, {});
+    }
+    const id = parts[0], dir = binOk(id) ? path.join(binDir(D), id) : null;
+    const item = dir && (await readJSON(path.join(dir, 'item.json'), null));
+    if (!item || item.id !== id) return send(res, 404, { error: 'That design is no longer in the recycle bin.' });
+    if (parts[1] === 'thumb' && req.method === 'GET') {
+      const img = await fs.readFile(path.join(dir, 'design.jpg')).catch(() => null);
+      if (!img) return send(res, 404, { error: 'No thumbnail' });
+      res.setHeader('content-type', 'image/jpeg'); res.setHeader('cache-control', 'private, max-age=60');
+      return res.end(img);
+    }
+    if (parts[1] === 'restore' && req.method === 'POST') {
+      const b = (await readJSONBody(req)) || {}, to = b.to === undefined ? item.name : b.to;
+      if (!nameOk(to)) return send(res, 400, { error: 'Invalid design name.' });
+      if (await fs.stat(path.join(D.proj, to + '.json')).catch(() => null)) return send(res, 409, { error: 'A design with that name already exists.', suggestion: await freeName(D, to) });
+      await fs.mkdir(D.proj, { recursive: true }); await fs.mkdir(D.draft, { recursive: true });
+      for (const ext of ['.json', '.jpg', '.meta', '.ver']) await fs.rename(path.join(dir, 'design' + ext), path.join(D.proj, to + ext)).catch(() => {});
+      await fs.rename(path.join(dir, 'versions'), verDir(D, to)).catch(() => {});
+      for (const ext of ['.json', '.meta']) await fs.rename(path.join(dir, 'draft' + ext), path.join(D.draft, to + ext)).catch(() => {});
+      if (item.folder && folderOk(item.folder)) { const F = await readFolders(D); addFolder(F, item.folder); F.map[to] = item.folder; await writeFolders(D, F); }
+      await binRemove(D, id); usageCache.delete(user);
+      return send(res, 200, { name: to, folder: item.folder || '' });
+    }
+    if (!parts[1] && req.method === 'DELETE') { await binRemove(D, id); usageCache.delete(user); return send(res, 200, {}); }
     return send(res, 405, {});
   }
 

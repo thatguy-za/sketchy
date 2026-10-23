@@ -24,6 +24,7 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 | Variable | Default | What it does |
 |---|---|---|
 | `TRUST_PROXY` | trust private addresses | Set `false` if the container port is reachable directly. Forwarded addresses are then ignored, so a client can't pretend to be someone else to dodge limits. Leave it unset behind a proxy, or every visitor looks like the proxy. |
+| `BIN_DAYS` | `30` | How many days a deleted design waits in the recycle bin before it is removed for good. `0` turns the bin off (deleting is permanent). The bin counts toward the account's storage limit and is emptied first when a save would go over it. |
 | `MAX_DESIGN_MB` | `64` | Largest single design (or draft) the server accepts. `0` turns the limit off. |
 | `USER_QUOTA_MB` | `2048` | Starting value for the default storage per account (`0` = no limit). Admins change the default, and each person's own limit, under Server settings → Users. |
 | `SESSION_DAYS` | `30` | How long a sign-in lasts without use (it renews whenever you open the app). |
