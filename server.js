@@ -21,6 +21,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
 const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const port = +process.env.PORT || 8080;
 const MAX_VERSIONS = Math.max(0, parseInt(process.env.MAX_VERSIONS ?? '20', 10) || 0); // old revisions kept per design
+const MAX_CACHE_BYTES = (process.env.MAX_CACHE_MB === undefined ? 128 : Math.max(0, +process.env.MAX_CACHE_MB || 0)) * 1048576; // one design's saved kernel cache (a convenience: it can always be rebuilt); 0 = none are kept
 const BIN_DAYS = process.env.BIN_DAYS === undefined ? 30 : Math.max(0, +process.env.BIN_DAYS || 0); // how long a deleted design waits in the recycle bin; 0 = deleting is permanent
 const DAY = 24 * 3600e3;
 const SESSION_MS = Math.max(1, +process.env.SESSION_DAYS || 30) * DAY;                       // sliding: renewed whenever the app is opened, so active people stay signed in
@@ -377,6 +378,17 @@ async function freeName(D, name) {
 // every few hours, remove what has waited long enough, for everyone
 if (BIN_DAYS) setInterval(async () => { for (const u of Object.keys(users)) await readBin(dirs(u)).catch(() => {}); }, 6 * 3600e3).unref();
 
+/** The saved kernel caches of an account, oldest first: { name, size, mtime }. */
+async function listCaches(D) {
+  const out = [];
+  for (const f of await fs.readdir(D.proj).catch(() => [])) {
+    if (!f.endsWith('.cache')) continue;
+    const st = await fs.stat(path.join(D.proj, f)).catch(() => null);
+    if (st) out.push({ name: f.slice(0, -6), size: st.size, mtime: st.mtimeMs });
+  }
+  return out.sort((a, b) => a.mtime - b.mtime);
+}
+
 // ---------------------------------------------------------------- storage limits
 const usageCache = new Map(); // username -> { bytes, at }
 /** An account's storage limit in bytes (0 = unlimited): the admin's per-person value, else the server default. */
@@ -390,15 +402,16 @@ async function dirBytes(dir) {
   return n;
 }
 /** Throws a 413 when saving `incoming` more bytes would put the account over its quota (a design being replaced counts as `replacing`). */
-async function checkQuota(username, incoming, replacing = 0) {
+async function checkQuota(username, incoming, replacing = 0, skip = '') {
   if (MAX_DESIGN_BYTES && incoming > MAX_DESIGN_BYTES) throw Object.assign(new Error('design too large'), { code: 413, msg: `This design is larger than the ${Math.round(MAX_DESIGN_BYTES / 1048576)} MB limit.` });
   const quota = quotaOf(username);
   if (!quota) return;
   let c = usageCache.get(username);
   if (!c || Date.now() - c.at > 30e3) { const D = dirs(username); c = { bytes: (await dirBytes(D.proj)) + (await dirBytes(D.draft)), at: Date.now() }; usageCache.set(username, c); }
-  if (c.bytes - replacing + incoming > quota) { // the recycle bin gives way first, oldest item first
-    const D = dirs(username), items = (await readBin(D)).reverse();
-    for (const it of items) { if (c.bytes - replacing + incoming <= quota) break; await binRemove(D, it.id); c.bytes -= it.size || 0; }
+  if (c.bytes - replacing + incoming > quota) { // what can be rebuilt or restored gives way first: saved kernel caches, then the recycle bin, oldest first
+    const D = dirs(username);
+    for (const it of await listCaches(D)) { if (c.bytes - replacing + incoming <= quota) break; if (it.name === skip) continue; await fs.rm(path.join(D.proj, it.name + '.cache'), { force: true }); c.bytes -= it.size; }
+    for (const it of (await readBin(D)).reverse()) { if (c.bytes - replacing + incoming <= quota) break; await binRemove(D, it.id); c.bytes -= it.size || 0; }
   }
   if (c.bytes - replacing + incoming > quota) throw Object.assign(new Error('over quota'), { code: 413, msg: `Your account is over its ${Math.round(quota / 1048576)} MB storage limit. Delete old designs (and empty the recycle bin) or ask the admin.` });
   c.bytes += Math.max(0, incoming - replacing);
@@ -1025,7 +1038,7 @@ async function api(req, res, url) {
       res.setHeader('content-type', 'application/json'); res.setHeader('x-rev', vm[2]);
       return res.end(d);
     }
-    const suffix = ['/thumb', '/meta', '/move', '/rename'].find((x) => name.endsWith(x));
+    const suffix = ['/thumb', '/meta', '/move', '/rename', '/cache'].find((x) => name.endsWith(x));
     if (suffix) name = name.slice(0, -suffix.length);
     if (!name) {
       const fmap = (await readFolders(D)).map;
@@ -1056,11 +1069,31 @@ async function api(req, res, url) {
       if (!nameOk(to)) return send(res, 400, { error: 'Invalid design name.' });
       if (to === name) return send(res, 200, { name });
       if (await fs.stat(path.join(D.proj, to + '.json')).catch(() => null)) return send(res, 409, { error: 'A design with that name already exists.' });
-      for (const ext of ['.json', '.jpg', '.meta', '.ver']) await fs.rename(path.join(D.proj, name + ext), path.join(D.proj, to + ext)).catch(() => {});
+      for (const ext of ['.json', '.jpg', '.meta', '.ver', '.cache']) await fs.rename(path.join(D.proj, name + ext), path.join(D.proj, to + ext)).catch(() => {});
       await fs.rename(verDir(D, name), verDir(D, to)).catch(() => {});
       for (const ext of ['.json', '.meta']) await fs.rename(path.join(D.draft, name + ext), path.join(D.draft, to + ext)).catch(() => {});
       if (F.map[name] !== undefined) { F.map[to] = F.map[name]; delete F.map[name]; await writeFolders(D, F); }
       return send(res, 200, { name: to });
+    }
+    if (suffix === '/cache') { // the saved kernel cache of this design: opening it reads shapes instead of rebuilding them
+      const cf = path.join(D.proj, name + '.cache');
+      if (req.method === 'GET') {
+        const d = await fs.readFile(cf).catch(() => null);
+        if (!d) return send(res, 404, { error: 'No saved cache' });
+        res.setHeader('content-type', 'application/octet-stream'); res.setHeader('cache-control', 'private, no-store'); res.setHeader('content-length', d.length);
+        return res.end(d);
+      }
+      if (req.method === 'PUT') {
+        if (!MAX_CACHE_BYTES) return send(res, 403, { error: 'Saving the kernel cache is turned off on this server.' });
+        if (!(await fs.stat(file).catch(() => null))) return send(res, 404, { error: 'Not found' });
+        const body = await readBody(req, MAX_CACHE_BYTES);
+        if (body.length < 20 || body[0] !== 0x1f || body[1] !== 0x8b) return send(res, 400, { error: 'Not a saved cache.' });
+        try { await checkQuota(user, body.length, (await fs.stat(cf).catch(() => ({ size: 0 }))).size, name); } catch (e) { if (e.code === 413) return send(res, 413, { error: e.msg }); throw e; }
+        await fs.writeFile(cf, body);
+        return send(res, 200, { size: body.length });
+      }
+      if (req.method === 'DELETE') { await fs.rm(cf, { force: true }); usageCache.delete(user); return send(res, 200, {}); }
+      return send(res, 405, {});
     }
     if (suffix === '/thumb') {
       const img = await fs.readFile(path.join(D.proj, name + '.jpg')).catch(() => null);
@@ -1090,6 +1123,7 @@ async function api(req, res, url) {
         await fs.rm(verDir(D, name), { recursive: true, force: true });
         await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
       }
+      await fs.rm(path.join(D.proj, name + '.cache'), { force: true }); // a saved cache goes with the design (a restored one is rebuilt)
       if (F.map[name] !== undefined) { delete F.map[name]; await writeFolders(D, F); }
       usageCache.delete(user);
       if (binned) log('design_binned', ip, `user=${user}`);

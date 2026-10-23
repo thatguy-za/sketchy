@@ -150,12 +150,55 @@ function noteHeavy(ms) {
     localStorage.setItem(HEAVY_KEY, JSON.stringify(Object.fromEntries(keep)));
   } catch { /* storage unavailable */ }
 }
+// A slow design is not rebuilt from nothing each time it is opened: the worker's states are saved next to the design on the server (a gzip file
+// of the kernel's cache, see exportBrepCache) and read back before the first rebuild. A saved cache is only a head start: the rebuild compares
+// it with the design and keeps what still fits, so an out-of-date one costs time, never correctness.
+const APP_KERNEL = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev';
+const cacheUrl = (name) => '/api/projects/' + encodeURIComponent(name) + '/cache';
+let cacheTimer = 0;
+function startCacheRestore() {
+  if (!kernelHeavy || !canWorker || !acct.server || !acct.user || !doc.rev) return;
+  const name = doc.name;
+  if (kw.cacheOf === name) return; // the worker already holds this design's states
+  ensureKernelWorker();
+  if (!kw.worker) return;
+  const worker = kw.worker; kw.cacheOf = name;
+  clearTimeout(kw.busyTimer); kw.busyTimer = setTimeout(() => showBusy(true), 400);
+  const limit = new Promise((resolve) => setTimeout(resolve, 30000)); // never wait for it for long
+  kw.restoring = Promise.race([(async () => {
+    try {
+      const r = await fetch(cacheUrl(name), { headers: { 'x-sketchy': '1' } });
+      if (!r.ok || kw.worker !== worker) return;
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      if (kw.worker !== worker) return;
+      await new Promise((resolve) => { kw.onCacheImported = resolve; worker.postMessage({ type: 'cache-import', bytes, kernel: APP_KERNEL }, [bytes.buffer]); });
+    } catch { /* no saved cache (or none that can be read): the design is built as usual */ }
+  })(), limit]).then(() => {
+    kw.restoring = null;
+    const q = kw.deferred; kw.deferred = null;
+    if (q && kw.worker === worker) sendRebuild(q); else if (!kernelBusy()) { showBusy(false); for (const f of kw.idle.splice(0)) f(); }
+  });
+}
+function scheduleCacheSave() {
+  clearTimeout(cacheTimer);
+  if (!kernelHeavy || !kw.worker || !acct.server || !acct.user || !doc.rev) return;
+  cacheTimer = setTimeout(() => {
+    if (kernelBusy() || dialog || sketch) return scheduleCacheSave(); // not while something is being built or edited
+    kw.cacheFor = doc.name; kw.cacheOf = doc.name;
+    kw.worker?.postMessage({ type: 'cache-export', kernel: APP_KERNEL });
+  }, 6000);
+}
+async function uploadCache(bytes) {
+  const name = kw.cacheFor; kw.cacheFor = null;
+  if (!bytes || !name || name !== doc.name || !acct.server) return;
+  try { await fetch(cacheUrl(name), { method: 'PUT', headers: { 'x-sketchy': '1', 'content-type': 'application/octet-stream' }, body: bytes }); } catch { /* it is only a convenience */ }
+}
 /** Choose where the design just opened is built: the worker when it is known to be slow (or is big), the page otherwise. */
 function applyHeavyHint() {
   if (!canWorker || !doc) return;
   const h = heavyHints()[doc.name], n = doc.features.length;
   kernelHeavy = h ? n >= h.n * 0.5 : n >= HEAVY_FEATURES; // a design that has become much simpler than it was is light again
-  if (kernelHeavy) ensureKernelWorker();
+  if (kernelHeavy) { ensureKernelWorker(); startCacheRestore(); }
 }
 const kw = { worker: null, ready: false, seq: 0, running: null, pending: null, meshes: new Map(), idle: [], busyTimer: 0 };
 function ensureKernelWorker() {
@@ -169,15 +212,16 @@ function ensureKernelWorker() {
 }
 function stopKernelWorker() {
   kw.stops = (kw.stops || 0) + 1; kw.progress = null;
-  kw.worker?.terminate(); kw.worker = null; kw.running = null; kw.pending = null; kw.meshes = new Map();
+  kw.worker?.terminate(); kw.worker = null; kw.running = null; kw.pending = null; kw.meshes = new Map(); kw.restoring = null; kw.deferred = null; kw.cacheOf = null; kw.onCacheImported?.(); kw.onCacheImported = null;
   showBusy(false); for (const f of kw.idle.splice(0)) f();
 }
-const kernelBusy = () => !!(kw.running || kw.pending);
+const kernelBusy = () => !!(kw.running || kw.pending || kw.restoring || kw.deferred);
 const kernelIdle = () => new Promise((res) => (kernelBusy() ? kw.idle.push(res) : res()));
 function rebuildInWorker(req, done) {
   ensureKernelWorker();
   if (!kw.worker) { kernelHeavy = false; refresh(); return; }
   req.done = done;
+  if (kw.restoring) { kw.deferred = req; return; } // the saved cache of this design is being read into the worker: the rebuild starts from it, the newest request only
   sendRebuild(req); // a rebuild still running is abandoned by the worker at its next piece boundary: the newest change wins
 }
 function sendRebuild(req, resend = false) {
@@ -189,6 +233,8 @@ function onKernelMessage(e) {
   const m = e.data;
   if (m.type === 'ready') { kw.ready = true; return; }
   if (m.type === 'progress') { if (kw.running && m.id === kw.running.id) { kw.progress = m; kw.onProgress?.(m); const t = $('#busy-text'); if (t) t.textContent = progressText(m); } return; }
+  if (m.type === 'cache-imported') { const f = kw.onCacheImported; kw.onCacheImported = null; f?.(m); return; }
+  if (m.type === 'cache') { uploadCache(m.bytes); return; }
   if (m.type === 'superseded') { kw.abandoned = (kw.abandoned || 0) + 1; return; } // an older rebuild given up for a newer one
   const run = kw.running;
   if (!run || m.id !== run.id) return; // an answer for a request that was stopped
@@ -203,6 +249,7 @@ function onKernelMessage(e) {
     const keep = new Set(res.bodies.map((b) => b.key)); for (const k of [...kw.meshes.keys()]) if (!keep.has(k)) kw.meshes.delete(k);
     lastRebuildMs = m.ms;
     noteHeavy(m.ms);
+    scheduleCacheSave(); // the worker now holds this design's states: save them a moment after the changes stop
     run.req.done(res);
   }
   if (kw.pending) { const next = kw.pending; kw.pending = null; sendRebuild(next); }
@@ -336,6 +383,7 @@ function stretchExtrudePreview(f, prev, same) {
 function applyResult(evalErr) {
   appliedParams = new Map(resolvedFeats.map((f) => [f.id, f.params])); // what the shapes on screen were built from (cheapPreview compares against it)
   if (!performance.getEntriesByName('sketchy-first-result').length) performance.mark('sketchy-first-result');
+  if (result.bodies.length && !performance.getEntriesByName('sketchy-first-bodies').length) performance.mark('sketchy-first-bodies'); // the first time there is something to see
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   for (const [id, origin] of Object.entries(result.shifted || {})) if (resolvedMap[id]) resolvedMap[id] = { ...resolvedMap[id], origin }; // sketches that followed their face
   vp.bodyColors = doc.appearance || {};

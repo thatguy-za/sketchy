@@ -1,6 +1,6 @@
 {
   "name": "sketchy",
-  "version": "0.0.33",
+  "version": "0.0.34",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -9,6 +9,8 @@
     "test:robustness": "node scripts/robustness.mjs",
     "test:templates": "node scripts/templates-test.mjs",
     "test:bin": "node scripts/bin-test.mjs",
+    "test:cache-kernel": "node scripts/cache-kernel-test.mjs",
+    "test:cache-server": "node scripts/cache-server-test.mjs",
     "test:security": "node scripts/security-test.mjs",
     "test:mcp-limits": "node scripts/mcp-limits-test.mjs",
     "test:mcp-tools": "node scripts/mcp-tools-test.mjs",

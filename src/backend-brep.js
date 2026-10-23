@@ -349,6 +349,46 @@ export function clearBrepCache() {
   BC.feats = []; BC.out = [];
 }
 
+// ---------- saving the cache ----------
+// What a rebuild keeps (a state after every feature) can be written out and read back by the next session, so that opening a design reads
+// shapes instead of recomputing them. The shapes are OpenCascade BRep text; one that several states share is written once. Only some
+// states are kept: the last two and every eighth, which bounds both the size and how far an edit has to replay. A cache that does not
+// fit the design (it was edited meanwhile) is still safe: the diff in rebuild() reuses the states that are still valid and builds the rest.
+const CACHE_FORMAT = 1, CACHE_STRIDE = 8;
+/** The cache as plain data, or null when there is nothing worth saving. `kernel` names the build (a different one reads nothing). */
+export function exportBrepCache({ kernel = '', maxChars = 200e6 } = {}) {
+  const n = BC.feats.length;
+  if (!n || !BC.cps.has(n)) return null;
+  const order = [n, n - 1, ...[...BC.cps.keys()].filter((i) => i % CACHE_STRIDE === 0 && i < n - 1).sort((a, b) => b - a)].filter((i, k, all) => BC.cps.has(i) && all.indexOf(i) === k);
+  const ids = new Map(), shapes = []; let chars = 0;
+  const idOf = (s) => { let k = ids.get(s); if (k === undefined) { const t = s.serialize(); chars += t.length; k = shapes.length; ids.set(s, k); shapes.push(t); } return k; };
+  const cps = [];
+  for (const i of order) {
+    if (cps.length && chars > maxChars) break; // the last state is always kept, the others while there is room
+    const cp = BC.cps.get(i);
+    try { cps.push({ i, live: cp.live.map((e) => ({ id: e.id, name: e.name, sh: idOf(e.s) })), surfaces: cp.surfaces.map((e) => ({ id: e.id, name: e.name, sh: idOf(e.s) })), surfCount: cp.surfCount, sketches: cp.sketches, counter: cp.counter, used: cp.used }); }
+    catch { /* a shape that cannot be written: this state is left out */ }
+  }
+  return cps.length ? { format: CACHE_FORMAT, kernel, comp: BC.comp, feats: BC.feats, out: BC.out.slice(0, n), cps, shapes } : null;
+}
+/** Replace the cache with a saved one. Returns false (and leaves the cache empty) when it is for another build or cannot be read. */
+export function importBrepCache(d, { kernel = '' } = {}) {
+  if (!d || d.format !== CACHE_FORMAT || d.kernel !== kernel || ![d.feats, d.out, d.cps, d.shapes].every(Array.isArray) || !R) return false;
+  clearBrepCache();
+  const made = new Array(d.shapes.length);
+  const get = (k) => { if (!(k in d.shapes)) throw new Error('bad shape index'); return (made[k] ??= R.deserializeShape(d.shapes[k])); };
+  try {
+    for (const c of d.cps) {
+      const cp = { i: c.i, live: c.live.map((e) => ({ id: e.id, name: e.name, s: get(e.sh) })), surfaces: c.surfaces.map((e) => ({ id: e.id, name: e.name, s: get(e.sh) })), surfCount: c.surfCount, sketches: c.sketches || {}, counter: c.counter, used: c.used || [] };
+      for (const e of cp.live) hold(e.s);
+      for (const e of cp.surfaces) hold(e.s);
+      BC.cps.set(c.i, cp);
+    }
+  } catch (e) { console.warn('saved cache not used:', e?.message || e); clearBrepCache(); for (const s of made) { try { s?.delete(); } catch { /* already freed */ } } return false; }
+  BC.feats = d.feats; BC.comp = d.comp ?? ''; BC.out = d.out;
+  return true;
+}
+
 const NO_REFS_OK = new Set(['primitive', 'import', 'importstep']); // these make a body without reading another
 const READS_ALL = new Set(['joint']); // these look at bodies they do not name
 /**

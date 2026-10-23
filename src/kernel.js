@@ -252,8 +252,8 @@ export function sameValue(a, b) {
   if (a === b) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
-  const ka = Object.keys(a);
-  if (ka.length !== Object.keys(b).length) return false;
+  const ka = Object.keys(a).filter((k) => a[k] !== undefined), kb = Object.keys(b).filter((k) => b[k] !== undefined); // a key holding undefined is no key: saving to JSON drops it
+  if (ka.length !== kb.length) return false;
   for (const k of ka) if (!(k in b) || !sameValue(a[k], b[k])) return false;
   return true;
 }
@@ -264,6 +264,7 @@ export function profilesOf(f) { return profilesOfExact(f); }
 export function offsetPolygon(poly, d) { return offsetPolygonExact(poly, d); }
 /** Free everything the incremental cache holds (another design was opened, or the page is done with it). */
 export function clearKernelCache() { clearBrepCache(); }
+export { exportBrepCache, importBrepCache } from './backend-brep.js';
 
 /**
  * Replay features[0..count). Returns { bodies, surfaces, errors, warnings, notes, lost, snaps, sketchUsed, captured, preview, shifted, stats, backend }.

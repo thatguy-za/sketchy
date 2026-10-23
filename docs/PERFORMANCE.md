@@ -118,6 +118,10 @@ and spatial hashing of the welding (the weld is 10 % of the total).
 
 ## Round two: imports at size, preview, a second look at booleans
 
+### Opening a slow design: the saved kernel cache (`node scripts/cache-kernel-test.mjs`, and the app)
+The 41-feature benchmark, saved as 7 states (the last two and every eighth) and 7 shapes: **0.44 MB gzipped**. Reading it back and opening took 0.9 s plus 0.5 s in Node, against 1.4 to 3.9 s from scratch; editing the last feature 0.4 s against 1.4 s, a feature in the middle 1.2 s against 2.6 s, the first feature the same as from scratch. In the app (the worker, a real server): time from page load to the first bodies **0.9 s with the cache, 1.9 s without**; the worker's rebuild 0.2 s against 1.4 s. The rest of the 0.9 s is the worker starting, the download, reading and drawing. A rebuild is normally done in six pieces so that it can be abandoned; a worker holding a saved cache builds in one piece instead, because pieces replay from the nearest saved state and would redo the same features.
+Imported meshes sewn into solids are the large case (measured with a rough sphere, the worst case for merging faces): 17,000 triangles = 19.5 MB of shapes (6.1 MB gzipped), 5.2 s to rebuild, 0.4 s to read; 29,700 triangles = 33 MB (10.4 MB gzipped), 12.9 s to rebuild, 0.85 s to read.
+
 ### Imports at 14,400, 30,000 and 60,000 triangles (Node, whole import: weld, flat-face merge, sewing, tessellation; resident memory of the process, which starts near 450 MB)
 
 | mesh | triangles | merged faces | time | memory |
