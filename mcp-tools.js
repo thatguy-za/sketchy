@@ -2,7 +2,6 @@
 // for what each tool is called and takes. Heavy tools get H (the headless kernel, src/headless.js) as their third argument.
 import { checkShapes, checkCons, describeSketchText, SHAPES, LINE_TYPES, CONSTRAINTS, POINT_KEYS, DIMENSIONS } from './src/sketch-schema.js';
 import { hintFor } from './src/hints.js';
-import { cutsFromSpec } from './src/section.js';
 import { definedState } from './src/sketchcons.js';
 
 const locks = new Map();
@@ -96,10 +95,8 @@ export function createTools(d) {
       return text({ open: true, seconds_ago: ageSeconds, ...s, open_requests: open, hint: s.selection.face ? 'The selected face is a ref you can pass to set_appearance, measure, render_view (highlight_faces) or a feature that takes a face.' : undefined });
     },
     async show_in_app(user, a) {
-      const secSpec = [a.section, ...(a.sections || []), a.section_box && { box: a.section_box }].filter(Boolean);
-      if (secSpec.length) { try { cutsFromSpec(secSpec.map((x) => (x.box ? { box: x.box } : x))); } catch (e) { return fail(e.message); } }
-      const cmd = { design: a.design || '', ...(secSpec.length ? { section: secSpec } : {}), ...(a.clear_section ? { clear_section: true } : {}), ...(a.view ? { view: a.view } : {}), ...(a.select_bodies?.length ? { bodies: a.select_bodies.slice(0, 40) } : {}), ...(a.select_face ? { face: a.select_face } : {}), ...(a.message ? { message: String(a.message).slice(0, 200) } : {}) };
-      if (!cmd.view && !cmd.bodies && !cmd.face && !cmd.message && !cmd.section && !cmd.clear_section) return fail('Say what to show: view, select_bodies, select_face, section, clear_section or message.');
+      const cmd = { design: a.design || '', ...(a.view ? { view: a.view } : {}), ...(a.select_bodies?.length ? { bodies: a.select_bodies.slice(0, 40) } : {}), ...(a.select_face ? { face: a.select_face } : {}), ...(a.message ? { message: String(a.message).slice(0, 200) } : {}) };
+      if (!cmd.view && !cmd.bodies && !cmd.face && !cmd.message) return fail('Say what to show: view, select_bodies, select_face or message.');
       const n = await d.storage.ui(user, cmd);
       return n ? text({ shown: true, windows: n }) : text({ shown: false, note: 'Sketchy is not open, so there was nobody to show it to.' });
     },
@@ -296,11 +293,8 @@ export function createTools(d) {
       const tris = {};
       for (const f of a.highlight_faces || []) { const b = bodies.find((x) => x.id === f.body); if (!b) continue; const t = H.faceTrisOf(b, f); if (t) tris[b.id] = [...(tris[b.id] || []), ...t]; }
       const view = a.azimuth !== undefined || a.elevation !== undefined ? { azimuth: a.azimuth, elevation: a.elevation } : a.view;
-      const secSpec = [a.section, ...(a.sections || []), a.section_box && { box: a.section_box }].filter(Boolean);
-      let r;
-      try { r = H.renderPNG(bodies, { view, width: a.width, height: a.height, perspective: a.perspective, zoom: a.zoom, section: secSpec.length ? secSpec : undefined, edges: a.edges, highlight: { bodies: a.highlight_bodies || [], tris } }); }
-      catch (e) { return fail(e.message); }
-      return { content: [{ type: 'image', data: r.png.toString('base64'), mimeType: 'image/png' }, { type: 'text', text: JSON.stringify({ design: doc.name, size: [r.width, r.height], bodies: bodies.map((b) => b.id), ...(secSpec.length ? { section: secSpec } : {}), camera: r.camera, axes: 'The small triad in the corner: red X, green Y, blue Z.' }) }] };
+      const r = H.renderPNG(bodies, { view, width: a.width, height: a.height, perspective: a.perspective, zoom: a.zoom, section: a.section, edges: a.edges, highlight: { bodies: a.highlight_bodies || [], tris } });
+      return { content: [{ type: 'image', data: r.png.toString('base64'), mimeType: 'image/png' }, { type: 'text', text: JSON.stringify({ design: doc.name, size: [r.width, r.height], bodies: bodies.map((b) => b.id), ...(a.section ? { section: a.section } : {}), camera: r.camera, axes: 'The small triad in the corner: red X, green Y, blue Z.' }) }] };
     },
     async find_faces(user, a, H) {
       const { doc } = await load(user, a.design);

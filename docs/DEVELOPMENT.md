@@ -37,6 +37,6 @@ Publishing a GitHub release runs `.github/workflows/docker.yml`, which builds a 
 
 ## Layout
 
-* `server.js` accounts, storage, version history and the static files; `mcp.js` the MCP endpoint and `mcp-defs.js` its tools, prompts and instructions (generated from `src/features.js` and `src/sketch-schema.js`); `mcp-tools.js` the tool implementations; `src/queries.js` face and edge queries; `src/render-sw.js` the software renderer behind `render_view`; `src/assistant.js` the in-app side (live stream, Stop chip, request box)
-* `src/kernel.js` the shared geometry helpers and the `rebuild` entry point (also runs in Node for MCP); `src/backend-brep.js` the kernel itself (OpenCascade via replicad), `src/featurespec.js` feature rules, `src/sketch-brep.js` sketch regions, `src/sew.js` and `src/meshtools.js` imported meshes; `src/headless.js` replays a design without the UI
+* `server.js` accounts, storage, version history and the static files; `mcp.js` the MCP endpoint
+* `src/kernel.js` the modelling kernel (also runs in Node for MCP); `src/headless.js` replays a design without the UI
 * `src/main.js` the app; `src/style.css` all styling (colours are CSS variables with a generated dark theme at the end of the file)

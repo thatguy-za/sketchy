@@ -5,7 +5,6 @@
 //   node server.js reset-password <user> [new-password]   (generates one if omitted)
 //   node server.js make-admin <user>
 import { validateDesign } from './design-validate.js';
-import { validatePackage, LIMITS as ADDIN_LIMITS, ID_RE as ADDIN_ID } from './addin-validate.js';
 import { createMcp } from './mcp.js';
 import { createPool } from './mcp-pool.js';
 import { createOAuth } from './oauth.js';
@@ -13,17 +12,12 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import zlib from 'node:zlib';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
-// the version the app was built with: a saved kernel cache is only read by the same one (the assistant workers inherit this)
-try { process.env.SKETCHY_VERSION ||= JSON.parse(await fs.readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8')).version; } catch { /* no package.json: caches are then not shared with the app */ }
 const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const port = +process.env.PORT || 8080;
 const MAX_VERSIONS = Math.max(0, parseInt(process.env.MAX_VERSIONS ?? '20', 10) || 0); // old revisions kept per design
-const MAX_CACHE_BYTES = (process.env.MAX_CACHE_MB === undefined ? 128 : Math.max(0, +process.env.MAX_CACHE_MB || 0)) * 1048576; // one design's saved kernel cache (a convenience: it can always be rebuilt); 0 = none are kept
 const BIN_DAYS = process.env.BIN_DAYS === undefined ? 30 : Math.max(0, +process.env.BIN_DAYS || 0); // how long a deleted design waits in the recycle bin; 0 = deleting is permanent
 const DAY = 24 * 3600e3;
 const SESSION_MS = Math.max(1, +process.env.SESSION_DAYS || 30) * DAY;                       // sliding: renewed whenever the app is opened, so active people stay signed in
@@ -57,8 +51,6 @@ function hostOk(req) {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':') /* an IPv6 address */ || !h.includes('.') || /\.(local|lan|home\.arpa|internal|localdomain)$/.test(h);
 }
 const log = (event, ip = '', extra = '') => console.log(`${new Date().toISOString()} ${event}${ip ? ' ip=' + ip : ''}${extra ? ' ' + extra : ''}`); // one line per security event, easy to feed to fail2ban
-const brotli = promisify(zlib.brotliCompress), gzip = promisify(zlib.gzip);
-const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.wasm', '.svg', '.json']), packed = new Map(); // static files worth compressing, and the compressed copies
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png' };
 
 // In the Docker image the server starts as root, makes the data directory writable, and then switches to an unprivileged user
@@ -380,31 +372,6 @@ async function freeName(D, name) {
 // every few hours, remove what has waited long enough, for everyone
 if (BIN_DAYS) setInterval(async () => { for (const u of Object.keys(users)) await readBin(dirs(u)).catch(() => {}); }, 6 * 3600e3).unref();
 
-/** Store a design's saved kernel cache (the REST endpoint and the MCP worker both come here). Throws { code, msg } for what is refused. */
-async function putCache(u, name, body) {
-  const refuse = (code, msg) => Object.assign(new Error(msg), { code, msg });
-  if (!MAX_CACHE_BYTES) throw refuse(403, 'Saving the kernel cache is turned off on this server.');
-  if (!nameOk(name)) throw refuse(400, 'Invalid design name.');
-  const D = dirs(u);
-  if (!(await fs.stat(path.join(D.proj, name + '.json')).catch(() => null))) throw refuse(404, 'Not found');
-  if (body.length > MAX_CACHE_BYTES) throw refuse(413, `A saved cache may be at most ${Math.round(MAX_CACHE_BYTES / 1048576)} MB.`);
-  if (body.length < 20 || body[0] !== 0x1f || body[1] !== 0x8b) throw refuse(400, 'Not a saved cache.');
-  const cf = path.join(D.proj, name + '.cache');
-  await checkQuota(u, body.length, (await fs.stat(cf).catch(() => ({ size: 0 }))).size, name);
-  await fs.mkdir(D.proj, { recursive: true });
-  await fs.writeFile(cf + '.tmp', body); await fs.rename(cf + '.tmp', cf); // whole or not at all: a worker stopped while writing must not leave half a file
-}
-/** The saved kernel caches of an account, oldest first: { name, size, mtime }. */
-async function listCaches(D) {
-  const out = [];
-  for (const f of await fs.readdir(D.proj).catch(() => [])) {
-    if (!f.endsWith('.cache')) continue;
-    const st = await fs.stat(path.join(D.proj, f)).catch(() => null);
-    if (st) out.push({ name: f.slice(0, -6), size: st.size, mtime: st.mtimeMs });
-  }
-  return out.sort((a, b) => a.mtime - b.mtime);
-}
-
 // ---------------------------------------------------------------- storage limits
 const usageCache = new Map(); // username -> { bytes, at }
 /** An account's storage limit in bytes (0 = unlimited): the admin's per-person value, else the server default. */
@@ -418,16 +385,15 @@ async function dirBytes(dir) {
   return n;
 }
 /** Throws a 413 when saving `incoming` more bytes would put the account over its quota (a design being replaced counts as `replacing`). */
-async function checkQuota(username, incoming, replacing = 0, skip = '') {
+async function checkQuota(username, incoming, replacing = 0) {
   if (MAX_DESIGN_BYTES && incoming > MAX_DESIGN_BYTES) throw Object.assign(new Error('design too large'), { code: 413, msg: `This design is larger than the ${Math.round(MAX_DESIGN_BYTES / 1048576)} MB limit.` });
   const quota = quotaOf(username);
   if (!quota) return;
   let c = usageCache.get(username);
   if (!c || Date.now() - c.at > 30e3) { const D = dirs(username); c = { bytes: (await dirBytes(D.proj)) + (await dirBytes(D.draft)), at: Date.now() }; usageCache.set(username, c); }
-  if (c.bytes - replacing + incoming > quota) { // what can be rebuilt or restored gives way first: saved kernel caches, then the recycle bin, oldest first
-    const D = dirs(username);
-    for (const it of await listCaches(D)) { if (c.bytes - replacing + incoming <= quota) break; if (it.name === skip) continue; await fs.rm(path.join(D.proj, it.name + '.cache'), { force: true }); c.bytes -= it.size; }
-    for (const it of (await readBin(D)).reverse()) { if (c.bytes - replacing + incoming <= quota) break; await binRemove(D, it.id); c.bytes -= it.size || 0; }
+  if (c.bytes - replacing + incoming > quota) { // the recycle bin gives way first, oldest item first
+    const D = dirs(username), items = (await readBin(D)).reverse();
+    for (const it of items) { if (c.bytes - replacing + incoming <= quota) break; await binRemove(D, it.id); c.bytes -= it.size || 0; }
   }
   if (c.bytes - replacing + incoming > quota) throw Object.assign(new Error('over quota'), { code: 413, msg: `Your account is over its ${Math.round(quota / 1048576)} MB storage limit. Delete old designs (and empty the recycle bin) or ask the admin.` });
   c.bytes += Math.max(0, incoming - replacing);
@@ -495,15 +461,6 @@ const mcpStorage = {
     const obj = JSON.parse(raw), bad = validateDesign(obj);
     if (bad) throw new Error('This design cannot be opened by an assistant: ' + bad);
     return { obj, rev: (await readMeta(D.proj, name)).seq };
-  },
-  /** The design's saved kernel cache (a gzip file) or null, so that an assistant's request starts from the states the app built. */
-  async readCache(u, name) {
-    if (!nameOk(name)) return null;
-    return fs.readFile(path.join(dirs(u).proj, name + '.cache')).catch(() => null);
-  },
-  /** Progress of a build too big for one request: saved so that the next request starts there. A refused one is simply not kept. */
-  async writeCache(u, name, bytes) {
-    try { await putCache(u, name, Buffer.from(bytes)); return true; } catch (e) { if (e.code) return false; throw e; }
   },
   async write(u, name, obj, device, rev, opts = {}) {
     if (!nameOk(name)) throw new Error('Invalid design name.');
@@ -576,7 +533,6 @@ const mcpFile = path.join(dataDir, 'mcp-tokens.json');
 let mcpTokens = nullMap(await readJSON(mcpFile, {})); // id -> {hash, user, name, created, lastUsed}
 const saveMcp = () => writeJSON(mcpFile, mcpTokens);
 if (settings.allowMcp === undefined) settings.allowMcp = process.env.ALLOW_MCP !== 'false';
-if (settings.allowAddins === undefined) settings.allowAddins = process.env.ALLOW_ADDINS !== 'false'; // may people install their own add-ins? (the ones shipped with Sketchy are always there)
 const mcpPool = createPool({ storage: mcpStorage, size: Math.max(1, +process.env.MCP_WORKERS || 2), timeoutMs: (+process.env.MCP_TIMEOUT_SECONDS || 20) * 1000, memoryMb: +process.env.MCP_WORKER_MEMORY_MB || 512 });
 const mcpHandle = createMcp({ storage: mcpStorage, pool: mcpPool, device: 'Claude / ChatGPT (MCP)', activity: (u, ev) => emit(u, { type: 'activity', ...ev }), held: isHeld });
 // Tokens are only accepted in the Authorization header: a token in a URL ends up in proxy logs, browser history and referrers.
@@ -650,7 +606,7 @@ async function api(req, res, url) {
       const tok = tokenOf(req), ss = sessions[sha(tok)];
       if (ss && ss.exp - Date.now() < SESSION_MS - DAY && ss.exp < ss.created + SESSION_MAX_MS) setSession(req, res, user, tok, ss);
     }
-    return send(res, 200, { user, admin: !!(user && users[user].admin), created: user ? users[user].created : 0, registration: settings.allowRegistration, mcp: settings.allowMcp, addins: settings.allowAddins, setup: !Object.keys(users).length });
+    return send(res, 200, { user, admin: !!(user && users[user].admin), created: user ? users[user].created : 0, registration: settings.allowRegistration, mcp: settings.allowMcp, setup: !Object.keys(users).length });
   }
 
   if (p === '/api/register' || p === '/api/login') {
@@ -783,97 +739,6 @@ async function api(req, res, url) {
     return send(res, 200, { used: (await dirBytes(D0.proj)) + (await dirBytes(D0.draft)), quota: quotaOf(user) });
   }
 
-  // ---- live events: one stream per page
-  if (p === '/api/events' && req.method === 'GET') {
-    const set = streams.get(user) || streams.set(user, new Set()).get(user);
-    if (set.size >= 8) return send(res, 429, { error: 'Too many open windows.' });
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-    res.write(`retry: 4000\ndata: ${JSON.stringify({ type: 'hello', hold: isHeld(user) })}\n\n`);
-    set.add(res);
-    const beat = setInterval(() => { try { res.write(': \n\n'); } catch { /* closed */ } }, 25e3);
-    req.on('close', () => { clearInterval(beat); set.delete(res); if (!set.size) streams.delete(user); });
-    return;
-  }
-  // ---- add-ins the person installed (each is a manifest plus a few text files; they run sandboxed in the browser)
-  if (p === '/api/addins' || p.startsWith('/api/addins/')) {
-    const dir = path.join(dataDir, 'addins', users[user].id);
-    if (p === '/api/addins') {
-      if (req.method !== 'GET') return send(res, 405, {});
-      const names = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.json'));
-      const list = (await Promise.all(names.map(async (f) => { const o = await readJSON(path.join(dir, f), null); return o?.manifest ? { manifest: o.manifest, installed: o.installed || 0, bytes: JSON.stringify(o.files || {}).length } : null; }))).filter(Boolean);
-      return send(res, 200, { enabled: settings.allowAddins, addins: list });
-    }
-    const id = decodeURIComponent(p.slice('/api/addins/'.length));
-    if (!ADDIN_ID.test(id)) return send(res, 400, { error: 'Invalid add-in id.' });
-    const file = path.join(dir, id + '.json');
-    if (req.method === 'GET') { const o = await readJSON(file, null); return o ? send(res, 200, { manifest: o.manifest, files: o.files }) : send(res, 404, { error: 'Not found' }); }
-    if (req.method === 'DELETE') { await fs.rm(file, { force: true }); log('addin_removed', ip, `user=${user} id=${id}`); return send(res, 200, {}); }
-    if (req.method === 'PUT') {
-      if (!settings.allowAddins) return send(res, 403, { error: 'Installing add-ins is turned off on this server.' });
-      const wait = rate('addin:' + user, 20, 60e3);
-      if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many installs. Slow down.' }); }
-      const b = await readJSONBody(req, ADDIN_LIMITS.totalBytes * 2 + 65536);
-      if (!b || typeof b !== 'object') return send(res, 400, { error: 'Bad request' });
-      const bad = validatePackage(b.manifest, b.files);
-      if (bad) return send(res, 400, { error: bad });
-      if (b.manifest.id !== id) return send(res, 400, { error: 'The add-in id in the address and in the manifest differ.' });
-      const have = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.json') && f !== id + '.json');
-      if (have.length >= ADDIN_LIMITS.perUser) return send(res, 400, { error: `You can have up to ${ADDIN_LIMITS.perUser} add-ins. Remove one first.` });
-      await fs.mkdir(dir, { recursive: true });
-      await writeJSON(file, { manifest: b.manifest, files: b.files, installed: Date.now() });
-      log('addin_installed', ip, `user=${user} id=${id} v=${String(b.manifest.version).slice(0, 20)}`);
-      return send(res, 200, { id });
-    }
-    return send(res, 405, {});
-  }
-  // ---- what the person is looking at, so an assistant can work on the same thing
-  if (p === '/api/live' && req.method === 'PUT') {
-    const b = await readJSONBody(req, 6144);
-    if (!b || typeof b !== 'object' || Array.isArray(b)) return send(res, 400, { error: 'Bad request' });
-    const str = (v, n = 80) => (typeof v === 'string' ? v.slice(0, n) : '');
-    const list = (v, n = 40, m = 60) => (Array.isArray(v) ? v.slice(0, n).map((x) => str(x, m)).filter(Boolean) : []);
-    const sel = b.selection && typeof b.selection === 'object' ? b.selection : {};
-    const num3 = (v) => (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite) ? v.map((x) => +x.toFixed(4)) : undefined);
-    const face = sel.face && typeof sel.face === 'object' ? { body: str(sel.face.body), point: num3(sel.face.point), normal: num3(sel.face.normal), ...(sel.face.curved ? { curved: true } : {}) } : undefined;
-    liveState.set(user, { at: Date.now(), state: {
-      design: nameOk(str(b.design)) ? str(b.design) : '', dirty: !!b.dirty, openDesigns: list(b.openDesigns, 12, 80), tool: str(b.tool, 40), sketch: str(b.sketch, 64),
-      selection: { bodies: list(sel.bodies), features: list(sel.features), edges: Math.min(1e6, +sel.edges || 0), ...(face && face.point && face.normal ? { face } : {}) },
-      ...(Array.isArray(b.section) && b.section.length ? { section: b.section.slice(0, 6).map((q) => ({ origin: num3(q?.origin), normal: num3(q?.normal) })).filter((q) => q.origin && q.normal) } : {}),
-      view: num3(b.view), units: str(b.units, 4), appVersion: str(b.appVersion, 20),
-    } });
-    return send(res, 200, {});
-  }
-  // ---- Stop / Resume for assistants
-  if (p === '/api/mcp/hold') {
-    if (req.method === 'GET') return send(res, 200, { held: isHeld(user) });
-    if (req.method !== 'POST') return send(res, 405, {});
-    const b = await readJSONBody(req, 512);
-    if (!b) return send(res, 400, { error: 'Bad request' });
-    if (b.on) mcpHold.set(user, Date.now() + HOLD_MS); else mcpHold.delete(user);
-    emit(user, { type: 'hold', on: !!b.on });
-    log(b.on ? 'mcp_stopped_by_user' : 'mcp_resumed_by_user', ip, `user=${user}`);
-    return send(res, 200, { held: isHeld(user) });
-  }
-  // ---- requests left for an assistant (it reads them with list_requests)
-  if (p === '/api/requests') {
-    if (req.method === 'GET') return send(res, 200, (await readRequests(user)).slice(-100).reverse());
-    if (req.method !== 'POST') return send(res, 405, {});
-    const wait = rate('req:' + user, 30, 60e3);
-    if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
-    const b = await readJSONBody(req, 8192);
-    const txt = String(b?.text || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').trim().slice(0, 2000);
-    if (!txt) return send(res, 400, { error: 'Write what you want done.' });
-    const design = nameOk(String(b.design || '')) ? String(b.design) : '';
-    const ctx = b.context && typeof b.context === 'object' && !Array.isArray(b.context) ? JSON.parse(JSON.stringify(b.context).slice(0, 2000) || '{}') : undefined;
-    const l = await readRequests(user);
-    if (l.filter((x) => x.status === 'open').length >= 20) return send(res, 400, { error: 'You already have 20 open requests. Wait for them to be done, or delete some.' });
-    const item = { id: 'r' + crypto.randomBytes(5).toString('hex'), text: txt, design, ...(ctx && Object.keys(ctx).length ? { context: ctx } : {}), status: 'open', created: Date.now() };
-    l.push(item); await writeRequests(user, l); emit(user, { type: 'requests' });
-    return send(res, 200, item);
-  }
-  const rq = /^\/api\/requests\/(r[0-9a-f]{10})$/.exec(p);
-  if (rq && req.method === 'DELETE') { const l = await readRequests(user); await writeRequests(user, l.filter((x) => x.id !== rq[1])); emit(user, { type: 'requests' }); return send(res, 200, {}); }
-
   // ---- signed-in devices
   if (p === '/api/sessions' && req.method === 'GET') {
     const cur = tokenOf(req) && sha(tokenOf(req));
@@ -928,7 +793,6 @@ async function api(req, res, url) {
         const b = await readJSONBody(req, 1024);
         if (typeof b?.allowRegistration === 'boolean') settings.allowRegistration = b.allowRegistration;
         if (typeof b?.allowMcp === 'boolean') settings.allowMcp = b.allowMcp;
-        if (typeof b?.allowAddins === 'boolean') settings.allowAddins = b.allowAddins;
         if (typeof b?.breachCheck === 'boolean') settings.breachCheck = b.breachCheck;
         if (b && 'idleMinutes' in b) { const n = Number(b.idleMinutes); if (!Number.isFinite(n) || (n !== 0 && (n < 0.02 || n > 525600))) return send(res, 400, { error: 'Idle time must be 0 (never sign out) or a number of minutes up to 525600.' }); settings.idleMinutes = n; }
         if (b && 'defaultQuotaMb' in b) { const n = Number(b.defaultQuotaMb); if (!Number.isInteger(n) || n < 0 || n > 1e7) return send(res, 400, { error: 'Storage must be a whole number of megabytes from 0 (no limit) to 10000000.' }); settings.defaultQuotaMb = n; usageCache.clear(); }
@@ -1047,6 +911,64 @@ async function api(req, res, url) {
     return send(res, 405, {});
   }
 
+  // ---- live events: one stream per page
+  if (p === '/api/events' && req.method === 'GET') {
+    const set = streams.get(user) || streams.set(user, new Set()).get(user);
+    if (set.size >= 8) return send(res, 429, { error: 'Too many open windows.' });
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+    res.write(`retry: 4000\ndata: ${JSON.stringify({ type: 'hello', hold: isHeld(user) })}\n\n`);
+    set.add(res);
+    const beat = setInterval(() => { try { res.write(': \n\n'); } catch { /* closed */ } }, 25e3);
+    req.on('close', () => { clearInterval(beat); set.delete(res); if (!set.size) streams.delete(user); });
+    return;
+  }
+  // ---- what the person is looking at, so an assistant can work on the same thing
+  if (p === '/api/live' && req.method === 'PUT') {
+    const b = await readJSONBody(req, 6144);
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return send(res, 400, { error: 'Bad request' });
+    const str = (v, n = 80) => (typeof v === 'string' ? v.slice(0, n) : '');
+    const list = (v, n = 40, m = 60) => (Array.isArray(v) ? v.slice(0, n).map((x) => str(x, m)).filter(Boolean) : []);
+    const sel = b.selection && typeof b.selection === 'object' ? b.selection : {};
+    const num3 = (v) => (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite) ? v.map((x) => +x.toFixed(4)) : undefined);
+    const face = sel.face && typeof sel.face === 'object' ? { body: str(sel.face.body), point: num3(sel.face.point), normal: num3(sel.face.normal), ...(sel.face.curved ? { curved: true } : {}) } : undefined;
+    liveState.set(user, { at: Date.now(), state: {
+      design: nameOk(str(b.design)) ? str(b.design) : '', dirty: !!b.dirty, openDesigns: list(b.openDesigns, 12, 80), tool: str(b.tool, 40), sketch: str(b.sketch, 64),
+      selection: { bodies: list(sel.bodies), features: list(sel.features), edges: Math.min(1e6, +sel.edges || 0), ...(face && face.point && face.normal ? { face } : {}) },
+      view: num3(b.view), units: str(b.units, 4), appVersion: str(b.appVersion, 20),
+    } });
+    return send(res, 200, {});
+  }
+  // ---- Stop / Resume for assistants
+  if (p === '/api/mcp/hold') {
+    if (req.method === 'GET') return send(res, 200, { held: isHeld(user) });
+    if (req.method !== 'POST') return send(res, 405, {});
+    const b = await readJSONBody(req, 512);
+    if (!b) return send(res, 400, { error: 'Bad request' });
+    if (b.on) mcpHold.set(user, Date.now() + HOLD_MS); else mcpHold.delete(user);
+    emit(user, { type: 'hold', on: !!b.on });
+    log(b.on ? 'mcp_stopped_by_user' : 'mcp_resumed_by_user', ip, `user=${user}`);
+    return send(res, 200, { held: isHeld(user) });
+  }
+  // ---- requests left for an assistant (it reads them with list_requests)
+  if (p === '/api/requests') {
+    if (req.method === 'GET') return send(res, 200, (await readRequests(user)).slice(-100).reverse());
+    if (req.method !== 'POST') return send(res, 405, {});
+    const wait = rate('req:' + user, 30, 60e3);
+    if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
+    const b = await readJSONBody(req, 8192);
+    const txt = String(b?.text || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').trim().slice(0, 2000);
+    if (!txt) return send(res, 400, { error: 'Write what you want done.' });
+    const design = nameOk(String(b.design || '')) ? String(b.design) : '';
+    const ctx = b.context && typeof b.context === 'object' && !Array.isArray(b.context) ? JSON.parse(JSON.stringify(b.context).slice(0, 2000) || '{}') : undefined;
+    const l = await readRequests(user);
+    if (l.filter((x) => x.status === 'open').length >= 20) return send(res, 400, { error: 'You already have 20 open requests. Wait for them to be done, or delete some.' });
+    const item = { id: 'r' + crypto.randomBytes(5).toString('hex'), text: txt, design, ...(ctx && Object.keys(ctx).length ? { context: ctx } : {}), status: 'open', created: Date.now() };
+    l.push(item); await writeRequests(user, l); emit(user, { type: 'requests' });
+    return send(res, 200, item);
+  }
+  const rq = /^\/api\/requests\/(r[0-9a-f]{10})$/.exec(p);
+  if (rq && req.method === 'DELETE') { const l = await readRequests(user); await writeRequests(user, l.filter((x) => x.id !== rq[1])); emit(user, { type: 'requests' }); return send(res, 200, {}); }
+
   // ---- projects
   if (p.startsWith('/api/projects')) {
     let name = decodeURIComponent(p.slice('/api/projects/'.length));
@@ -1063,7 +985,7 @@ async function api(req, res, url) {
       res.setHeader('content-type', 'application/json'); res.setHeader('x-rev', vm[2]);
       return res.end(d);
     }
-    const suffix = ['/thumb', '/meta', '/move', '/rename', '/cache'].find((x) => name.endsWith(x));
+    const suffix = ['/thumb', '/meta', '/move', '/rename'].find((x) => name.endsWith(x));
     if (suffix) name = name.slice(0, -suffix.length);
     if (!name) {
       const fmap = (await readFolders(D)).map;
@@ -1094,29 +1016,11 @@ async function api(req, res, url) {
       if (!nameOk(to)) return send(res, 400, { error: 'Invalid design name.' });
       if (to === name) return send(res, 200, { name });
       if (await fs.stat(path.join(D.proj, to + '.json')).catch(() => null)) return send(res, 409, { error: 'A design with that name already exists.' });
-      for (const ext of ['.json', '.jpg', '.meta', '.ver', '.cache']) await fs.rename(path.join(D.proj, name + ext), path.join(D.proj, to + ext)).catch(() => {});
+      for (const ext of ['.json', '.jpg', '.meta', '.ver']) await fs.rename(path.join(D.proj, name + ext), path.join(D.proj, to + ext)).catch(() => {});
       await fs.rename(verDir(D, name), verDir(D, to)).catch(() => {});
       for (const ext of ['.json', '.meta']) await fs.rename(path.join(D.draft, name + ext), path.join(D.draft, to + ext)).catch(() => {});
       if (F.map[name] !== undefined) { F.map[to] = F.map[name]; delete F.map[name]; await writeFolders(D, F); }
       return send(res, 200, { name: to });
-    }
-    if (suffix === '/cache') { // the saved kernel cache of this design: opening it reads shapes instead of rebuilding them
-      const cf = path.join(D.proj, name + '.cache');
-      if (req.method === 'GET') {
-        const d = await fs.readFile(cf).catch(() => null);
-        if (!d) return send(res, 404, { error: 'No saved cache' });
-        res.setHeader('content-type', 'application/octet-stream'); res.setHeader('cache-control', 'private, no-store'); res.setHeader('content-length', d.length);
-        return res.end(d);
-      }
-      if (req.method === 'PUT') {
-        if (!MAX_CACHE_BYTES) return send(res, 403, { error: 'Saving the kernel cache is turned off on this server.' });
-        if (!(await fs.stat(file).catch(() => null))) return send(res, 404, { error: 'Not found' });
-        const body = await readBody(req, MAX_CACHE_BYTES);
-        try { await putCache(user, name, body); } catch (e) { if (e.code) return send(res, e.code, { error: e.msg }); throw e; }
-        return send(res, 200, { size: body.length });
-      }
-      if (req.method === 'DELETE') { await fs.rm(cf, { force: true }); usageCache.delete(user); return send(res, 200, {}); }
-      return send(res, 405, {});
     }
     if (suffix === '/thumb') {
       const img = await fs.readFile(path.join(D.proj, name + '.jpg')).catch(() => null);
@@ -1146,7 +1050,6 @@ async function api(req, res, url) {
         await fs.rm(verDir(D, name), { recursive: true, force: true });
         await fs.rm(path.join(D.draft, name + '.json'), { force: true }); await fs.rm(path.join(D.draft, name + '.meta'), { force: true });
       }
-      await fs.rm(path.join(D.proj, name + '.cache'), { force: true }); // a saved cache goes with the design (a restored one is rebuilt)
       if (F.map[name] !== undefined) { delete F.map[name]; await writeFolders(D, F); }
       usageCache.delete(user);
       if (binned) log('design_binned', ip, `user=${user}`);
@@ -1244,8 +1147,8 @@ async function api(req, res, url) {
 }
 
 // Headers every response carries. The CSP is the main defence if a malicious design file ever manages to put markup on the page:
-// scripts may only come from this server (no inline script; eval is allowed only because OpenCascade's WebAssembly glue builds its bindings with new Function) and styles from files only (no style attributes or style tags), and nothing can be framed, posted elsewhere or sent off-site.
-const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+// scripts may only come from this server (no inline script, no eval) and styles from files only (no style attributes or style tags), and nothing can be framed, posted elsewhere or sent off-site.
+const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 function harden(req, res, api) {
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('x-frame-options', 'DENY');
@@ -1261,13 +1164,6 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const isMcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'), isOauth = url.pathname.startsWith('/.well-known/oauth-') || url.pathname === '/oauth/register' || url.pathname === '/oauth/token', isApi = url.pathname.startsWith('/api/') || isOauth;
     harden(req, res, isMcp || isApi);
-    if (url.pathname === '/addin-sandbox.html') { // the add-in sandbox page: framed by this app only, may run its one inline script and start workers, allowed nothing else (no network)
-      const html = await fs.readFile(path.join(root, 'addin-sandbox.html'), 'utf8').catch(() => '');
-      const inline = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '';
-      const hash = crypto.createHash('sha256').update(inline).digest('base64'); // 'self' does not work in a frame with no origin, so the page's own script is allowed by its hash
-      res.setHeader('content-security-policy', `default-src 'none'; script-src 'sha256-${hash}' blob:; worker-src blob:; connect-src 'none'; img-src 'none'; style-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
-      res.removeHeader('x-frame-options'); res.removeHeader('cross-origin-opener-policy'); res.removeHeader('permissions-policy'); res.setHeader('cross-origin-resource-policy', 'cross-origin'); // frame-ancestors above decides who may frame it (X-Frame-Options SAMEORIGIN would block a frame that has no origin)
-    }
     if (!hostOk(req)) { log('bad_host', clientIp(req), String(req.headers.host || '').slice(0, 60)); res.setHeader('content-type', 'text/plain'); res.statusCode = 421; return res.end('This address is not one this server answers to. Set PUBLIC_URL or ALLOWED_HOSTS to the address you use.'); }
     const ip = clientIp(req), wait = rate((isMcp ? 'mcp:' : isApi ? 'api:' : 'static:') + ip, isMcp ? 600 : isApi ? 1500 : 900, 60e3);
     if (wait) { log('rate_limited', ip, url.pathname.slice(0, 40)); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
@@ -1282,18 +1178,7 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('content-type', types[path.extname(p)] || 'application/octet-stream');
     if (p.startsWith(path.join(root, 'assets') + path.sep)) res.setHeader('cache-control', 'public, max-age=31536000, immutable');
     else res.setHeader('cache-control', 'no-cache'); // the page itself is re-checked on every visit, so an upgrade shows up straight away
-    if (url.pathname === '/sw.js') res.setHeader('service-worker-allowed', '/');
-    let out = body;
-    const ext = path.extname(p), enc = COMPRESSIBLE.has(ext) && body.length > 1024 ? (/\bbr\b/.test(String(req.headers['accept-encoding'] || '')) ? 'br' : /\bgzip\b/.test(String(req.headers['accept-encoding'] || '')) ? 'gzip' : '') : '';
-    if (COMPRESSIBLE.has(ext)) res.setHeader('vary', 'accept-encoding');
-    if (enc) { // the 23 MB CAD kernel is 7 MB compressed; each file is compressed once and kept
-      const key = `${p}|${enc}|${body.length}`;
-      let z = packed.get(key);
-      if (!z) { z = await (enc === 'br' ? brotli(body, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 6 } }) : gzip(body, { level: 9 })); packed.set(key, z); }
-      res.setHeader('content-encoding', enc); out = z;
-    }
-    res.setHeader('content-length', out.length);
-    res.end(out);
+    res.end(body);
   } catch (e) { if (e.code === 413) res.setHeader('connection', 'close'); /* the unread upload makes the connection unusable */ if (e.code !== 413) console.error(`${new Date().toISOString()} server_error ${e.stack || e}`); const known = e.code === 413 || (e.code === 400 && e.msg); send(res, known ? e.code : 500, { error: known ? e.msg || 'File too large' : 'Server error' }); }
 });
 server.requestTimeout = 5 * 60e3; server.headersTimeout = 30e3; server.keepAliveTimeout = 5e3; server.maxHeadersCount = 100;

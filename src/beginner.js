@@ -119,19 +119,6 @@ export function createBeginner(ctx) {
   const customizerOpen = () => !!$('#cz-root');
 
   // ------------------------------------------------------------ welcome card (empty design)
-  // ------------------------------------------------------------ the modelling engine (the 23 MB kernel) downloads while you are here
-  const mbs = (n) => (n / 1048576).toFixed(1);
-  const kernelText = (k) => `Getting the modelling engine ready… ${mbs(k.n)} of ${mbs(k.total)} MB`;
-  /** Shows how far the download is on the welcome card and the guide's first step; the bottom pill hides while one of them says it. */
-  function syncKernel() {
-    const k = ctx.kernel(), pct = k.total ? Math.min(100, Math.round((k.n / k.total) * 100)) : 0;
-    const put = (box) => { if (!box) return; box.hidden = k.ok; box.querySelector('progress').value = pct; box.querySelector('span').textContent = kernelText(k); };
-    put($('#w-kernel')); put($('#t-kernel'));
-    if (tour && tour.step === 0 && !!tour.waiting === k.ok) renderTour(); // the first step starts the moment the engine is ready
-    document.body.classList.toggle('kernel-inline', !k.ok && (!!$('#w-kernel') || !!$('#t-kernel')));
-  }
-  addEventListener('sketchy-kernel', syncKernel);
-
   /** Wait until no window is open: the next step of a journey never opens on top of one. */
   const noModal = () => new Promise((resolve) => { const t = setInterval(() => { if (!document.querySelector('.modal-back')) { clearInterval(t); resolve(); } }, 250); });
   /** The three ways in. Each hides the card first, then runs its steps one after the other, so no window opens over another. */
@@ -162,8 +149,7 @@ export function createBeginner(ctx) {
         <button type="button" class="wbtn primary" data-a="tour"><b>Make my first part</b><span>A guided two-minute walk-through, from a sketch to a file ready for your slicer.</span></button>
         <button type="button" class="wbtn" data-a="open"><b>Import an existing model file</b><span>Start from an STL, 3MF, OBJ or STEP file.</span></button>
         <button type="button" class="wbtn" data-a="ai"><b>Start making with your LLM</b><span>Connect Claude, ChatGPT or another assistant, then describe what you want.</span></button>
-      </div>
-      <div class="welcome-kernel" id="w-kernel" hidden><progress max="100" value="0"></progress><span></span></div>`;
+      </div>`;
     $('#viewport').appendChild(el);
     el.querySelector('.welcome-x').onclick = async () => {
       welcomeClosed = true; store.set('sketchy.welcomeOff', '1'); el.remove();
@@ -171,7 +157,6 @@ export function createBeginner(ctx) {
       toast('Templates and the guided tour are in the Utilities tab, or use the search button at the top.');
     };
     el.querySelectorAll('.wbtn').forEach((b) => (b.onclick = () => choose(b.dataset.a)));
-    syncKernel();
   }
   /** True when the welcome card should be the first thing seen, so the design is not named before it. */
   const welcomeWanted = () => !welcomeClosed;
@@ -184,7 +169,7 @@ export function createBeginner(ctx) {
     clearInterval(tourTimer); tourTimer = setInterval(tick, 400);
   }
   function endTour(finished) {
-    tour = null; document.body.classList.remove('kernel-inline'); clearInterval(tourTimer); tourTimer = null;
+    tour = null; clearInterval(tourTimer); tourTimer = null;
     $('#tour')?.remove(); glow(null);
     if (finished) store.set('sketchy.tour', 'done');
   }
@@ -205,19 +190,13 @@ export function createBeginner(ctx) {
       el.querySelector('#tour-done').onclick = () => endTour(true);
       glow(null); return;
     }
-    tour.waiting = tour.step === 0 && !ctx.kernel().ok;
-    if (tour.waiting) {
-      el.innerHTML = `<div class="tour-n">Step 1 of ${TOUR.length}</div><div class="tour-t">Getting ready</div><div class="tour-x">The modelling engine is still arriving. This happens once, and your first step starts as soon as it is here.</div><div class="welcome-kernel" id="t-kernel"><progress max="100" value="0"></progress><span></span></div><div class="tour-b"><button class="btn" id="tour-skip" type="button">Skip tour</button></div>`;
-      el.querySelector('#tour-skip').onclick = () => endTour(false);
-      glow(null); syncKernel(); return;
-    }
     const s = TOUR[tour.step];
     el.innerHTML = `<div class="tour-n">Step ${tour.step + 1} of ${TOUR.length}</div><div class="tour-t">${s.title}</div><div class="tour-x">${s.text}</div><div class="tour-b"><button class="btn" id="tour-skip" type="button">Skip tour</button></div>`;
     el.querySelector('#tour-skip').onclick = () => endTour(false);
     glow(s.target);
   }
   function tick() {
-    if (!tour || tour.waiting) return;
+    if (!tour) return;
     const st = ctx.tourState();
     let moved = false;
     while (tour.step < TOUR.length && TOUR[tour.step].done(st)) { tour.step++; moved = true; }

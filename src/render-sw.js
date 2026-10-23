@@ -2,7 +2,6 @@
 // Flat-shaded triangles with smooth shading on curved surfaces, a depth buffer, dark outlines on sharp edges, optional
 // section cut, highlighted faces or bodies, and a small axis triad. Pure JS plus Node's zlib.
 import zlib from 'node:zlib';
-import { cutsFromSpec, keepsPoint } from './section.js';
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -29,12 +28,11 @@ function pngOf(w, h, rgb) {
 
 /**
  * @param bodies  [{ id, verts, tris, bbox, color?, opacity? }]  (color is '#rrggbb')
- * @param o  { view: name | { azimuth, elevation }, width, height, perspective, section: { axis, offset, flip } (keeps the side with the larger coordinate; flip keeps the other), or { origin, normal, flip } (cuts away the side the normal points to), or { box: { center, half } }, or an array of those (see section.js), highlight: { bodies: [ids], tris: { bodyId: [triangle indexes] } },
+ * @param o  { view: name | { azimuth, elevation }, width, height, perspective, section: { axis, offset, flip } (keeps the side with the larger coordinate; flip keeps the other), highlight: { bodies: [ids], tris: { bodyId: [triangle indexes] } },
  *             edges: true, background: '#rrggbb', zoom }
  * @returns { png: Buffer, width, height, camera }
  */
 export function renderPNG(bodies, o = {}) {
-  const cuts = cutsFromSpec(o.section);
   const W = Math.max(64, Math.min(1600, Math.round(o.width || 800))), H = Math.max(64, Math.min(1600, Math.round(o.height || 600)));
   const SS = W * H > 700000 ? 1 : 2, w = W * SS, h = H * SS;
   const bg = hex(o.background || '#f4f5f7');
@@ -46,7 +44,7 @@ export function renderPNG(bodies, o = {}) {
   // camera
   let dir;
   if (typeof o.view === 'object' && o.view) { const az = ((o.view.azimuth ?? 35) * Math.PI) / 180, el = ((o.view.elevation ?? 25) * Math.PI) / 180; dir = [Math.sin(az) * Math.cos(el), -Math.cos(az) * Math.cos(el), Math.sin(el)]; }
-  else if (!o.view && cuts.length) { const n = cuts[0].n; dir = [0.25, -0.2, 0.3].map((v, k) => v + 1.4 * n[k] * (Math.abs(n[k]) > 0.9 ? 1 : 0.7)); } // by default look at the cut face (the cut faces away from the half that is kept)
+  else if (!o.view && o.section && 'xyz'.includes(String(o.section.axis).toLowerCase())) { const ax = 'xyz'.indexOf(String(o.section.axis).toLowerCase()), sg = o.section.flip ? 1 : -1; dir = [0.25, -0.2, 0.3]; dir[ax] = 1.4 * sg; } // by default look at the cut face (the cut faces away from the half that is kept)
   else dir = VIEWS[o.view || 'iso'] || VIEWS.iso;
   dir = unit(dir);
   const up0 = Math.abs(dir[2]) > 0.98 ? [0, 1, 0] : [0, 0, 1];
@@ -60,8 +58,8 @@ export function renderPNG(bodies, o = {}) {
     const s = persp ? f / Math.max(1e-6, depth) : scale;
     return [w / 2 + x * s, h / 2 - y * s, depth];
   };
-  const clipPlane = cuts.length > 0;
-  const keep = (p) => keepsPoint(cuts, p); // the side that stays
+  const clipPlane = o.section && 'xyz'.includes(String(o.section.axis).toLowerCase()) ? { a: 'xyz'.indexOf(String(o.section.axis).toLowerCase()), v: +o.section.offset || 0, sign: o.section.flip ? 1 : -1 } : null;
+  const keep = (p) => !clipPlane || clipPlane.sign * (p[clipPlane.a] - clipPlane.v) <= 1e-9; // the side that stays
 
   const rgb = new Float32Array(w * h * 3), zb = new Float32Array(w * h).fill(Infinity);
   for (let i = 0; i < w * h; i++) { rgb[i * 3] = bg[0]; rgb[i * 3 + 1] = bg[1]; rgb[i * 3 + 2] = bg[2]; }
@@ -109,7 +107,7 @@ export function renderPNG(bodies, o = {}) {
         if (w0 < 0 || w1 < 0 || w2 < 0) continue;
         const z = w0 * pa[2] + w1 * pb[2] + w2 * pc[2], zi = y * w + x;
         if (z >= zb[zi]) continue;
-        if (clipPlane && !keepsPoint(cuts, [w0 * A[0] + w1 * B[0] + w2 * C[0], w0 * A[1] + w1 * B[1] + w2 * C[1], w0 * A[2] + w1 * B[2] + w2 * C[2]])) continue; // the cut-away side
+        if (clipPlane && clipPlane.sign * (w0 * A[clipPlane.a] + w1 * B[clipPlane.a] + w2 * C[clipPlane.a] - clipPlane.v) > 1e-9) continue; // the cut-away side
         zb[zi] = z;
         let r, g, bl;
         if (!facing && clipPlane) { r = 214; g = 96; bl = 64; } // the inside of a cut: shown in orange so the cut reads clearly

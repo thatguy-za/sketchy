@@ -29,7 +29,6 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { PLANES, planeFrame, findFaceTri } from './kernel.js';
 import { look, textureById } from './materials.js';
 import { planarFace, curvedFace, findCurvedTri, faceOf } from './edges.js';
-import { matchBrepFace } from './brepface.js';
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -385,30 +384,7 @@ export class Viewport {
     }
     this.lodSwapped = on;
   }
-  /**
-   * A stand-in while the exact rebuild runs: the body's current mesh moved by `translate` and stretched by `scale` about `about` (world
-   * coordinates), with no kernel involved. setBodies puts every body back as the kernel made it, so the exact result replaces the stand-in.
-   */
-  previewBody(id, { translate = [0, 0, 0], scale = [1, 1, 1], about = [0, 0, 0] } = {}) {
-    const mesh = this.bodyGroup.children.find((c) => c.userData.id === id && !c.userData.surface);
-    if (!mesh) return false;
-    const m = new THREE.Matrix4().makeTranslation(...translate).multiply(new THREE.Matrix4().makeTranslation(...about)).multiply(new THREE.Matrix4().makeScale(...scale)).multiply(new THREE.Matrix4().makeTranslation(-about[0], -about[1], -about[2]));
-    mesh.matrixAutoUpdate = false; mesh.matrix.copy(m); mesh.matrixWorldNeedsUpdate = true; mesh.userData.previewed = true;
-    return true;
-  }
-  clearBodyPreviews() {
-    for (const c of this.bodyGroup.children) if (c.userData.previewed) { c.matrixAutoUpdate = true; c.matrix.identity(); c.position.set(0, 0, 0); c.scale.set(1, 1, 1); c.updateMatrix(); c.userData.previewed = false; }
-  }
-  /** The centre of a body's bounding box as drawn (what Scale and Move stretch about). */
-  bodyCentre(id) {
-    const mesh = this.bodyGroup.children.find((c) => c.userData.id === id && !c.userData.surface);
-    const b = mesh?.userData.src; if (!b) return null;
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < b.verts.length; i += 3) for (let k = 0; k < 3; k++) { const v = b.verts[i + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
-    return lo.map((v, k) => (v + hi[k]) / 2);
-  }
   setBodies(bodies) {
-    this.clearBodyPreviews();
     // A body whose shape did not change keeps its mesh (same key from the kernel): building the smooth normals and the edge
     // lines of a big body is the slow part, and most edits change one body of many.
     const old = new Map();
@@ -423,7 +399,7 @@ export class Viewport {
       geo = toCreasedNormals(geo, (35 * Math.PI) / 180);
       mesh = new THREE.Mesh(geo, this.mats.body);
       mesh.userData.id = b.id; mesh.userData.surface = !!b.surface; mesh.userData.key = b.key || null; mesh.castShadow = true; mesh.receiveShadow = true;
-      mesh.userData.src = { verts: b.verts, tris: b.tris, ...(b.faceOf && b.faceOf.length === b.tris.length / 3 ? { faceOf: b.faceOf, faces: b.faces } : {}) }; // an exact (B-rep) body also knows which of its faces each triangle is on
+      mesh.userData.src = { verts: b.verts, tris: b.tris };
       if (b.tris.length / 3 >= BVH_MIN) mesh.raycast = bvhRaycast; // big body: pick through a tree (built on first use)
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30), this.mats.edge);
       edges.raycast = () => {};
@@ -439,79 +415,35 @@ export class Viewport {
     if (!this.fitted && bodies.length) { this.fit(); this.fitted = true; }
   }
 
-  // ---- section analysis: clip planes + stencil-capped cut faces
-  /**
-   * cuts: [{ o: [x, y, z], n: [x, y, z] }] (see section.js): a point on each plane and the unit normal of the side cut away. What stays is what is on
-   * the kept side of all of them. An empty list or null ends the section.
-   */
-  setSections(cuts) {
+  // ---- section analysis: clip plane + stencil-capped cut face
+  setSection(sec) { // {axis:'X'|'Y'|'Z', offset, flip} or null
     this.section = null;
-    this.sections = (cuts || []).map((c) => {
-      const n = new THREE.Vector3(...c.n).normalize(), o = new THREE.Vector3(...c.o);
-      return { o, n, plane: new THREE.Plane(n.clone().negate(), n.dot(o)) }; // three keeps the side the plane's normal points to
-    });
-    if (!this.sections.length) this.sections = null;
+    if (sec) {
+      const n = new THREE.Vector3(); n['xyz'['XYZ'.indexOf(sec.axis)]] = sec.flip ? 1 : -1;
+      this.section = { ...sec, plane: new THREE.Plane(n, -n.dot(this.sectionAxisVec(sec.axis).multiplyScalar(sec.offset))) };
+    }
     this.refreshMaterials(); this.rebuildSection();
   }
+  sectionAxisVec(a) { const v = new THREE.Vector3(); v['xyz'['XYZ'.indexOf(a)]] = 1; return v; }
   rebuildSection() {
     if (this.sectionGroup) { this.scene.remove(this.sectionGroup); this.sectionGroup.traverse((o) => o.material?.dispose?.()); this.sectionGroup = null; }
-    if (!this.sections) return;
-    const g = new THREE.Group(), size = this.bounds().getSize(new THREE.Vector3()).length() * 4 + 100;
-    this.sections.forEach((sc, i) => {
-      const plane = sc.plane, others = this.sections.filter((x) => x !== sc).map((x) => x.plane);
-      const stencil = (side, op) => new THREE.MeshBasicMaterial({ side, colorWrite: false, depthWrite: false, depthTest: false, clippingPlanes: [plane], stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op });
-      for (const m of this.bodyGroup.children) {
-        const back = new THREE.Mesh(m.geometry, stencil(THREE.BackSide, THREE.IncrementWrapStencilOp));
-        const front = new THREE.Mesh(m.geometry, stencil(THREE.FrontSide, THREE.DecrementWrapStencilOp));
-        for (const x of [back, front]) { x.renderOrder = 2 * i + 1; x.raycast = () => {}; x.matrixAutoUpdate = false; x.matrix.copy(m.matrix); g.add(x); }
-      }
-      // the cap is clipped by the other planes, so a box or several planes cap only what is left of the part
-      const cap = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshStandardMaterial({ color: 0xe0584d, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide, clippingPlanes: others, stencilWrite: true, stencilRef: 0, stencilFunc: THREE.NotEqualStencilFunc, stencilFail: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp, stencilZPass: THREE.ReplaceStencilOp }));
-      cap.renderOrder = 2 * i + 1.5; cap.raycast = () => {};
-      cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), plane.normal);
-      plane.coplanarPoint(cap.position);
-      cap.onAfterRender = (r) => r.clearStencil();
-      g.add(cap);
-    });
+    if (!this.section) return;
+    const g = new THREE.Group(), plane = this.section.plane;
+    const stencil = (side, op) => new THREE.MeshBasicMaterial({ side, colorWrite: false, depthWrite: false, depthTest: false, clippingPlanes: [plane], stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op });
+    for (const m of this.bodyGroup.children) {
+      const back = new THREE.Mesh(m.geometry, stencil(THREE.BackSide, THREE.IncrementWrapStencilOp));
+      const front = new THREE.Mesh(m.geometry, stencil(THREE.FrontSide, THREE.DecrementWrapStencilOp));
+      for (const x of [back, front]) { x.renderOrder = 1; x.raycast = () => {}; g.add(x); }
+    }
+    const size = this.bounds().getSize(new THREE.Vector3()).length() * 4 + 100;
+    const cap = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshStandardMaterial({ color: 0xe0584d, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide, stencilWrite: true, stencilRef: 0, stencilFunc: THREE.NotEqualStencilFunc, stencilFail: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp, stencilZPass: THREE.ReplaceStencilOp }));
+    cap.renderOrder = 1.1; cap.raycast = () => {};
+    const n = plane.normal.clone();
+    cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    plane.coplanarPoint(cap.position);
+    cap.onAfterRender = (r) => r.clearStencil();
+    g.add(cap);
     this.sectionGroup = g; this.scene.add(g);
-  }
-  /**
-   * Arrows in the view, one per cut, pointing to the side that is cut away; `list` is [{ base: [x, y, z], n: [x, y, z] }] or null. The arrow's
-   * tip can be picked (pickSectionHandle) and dragged (sectionHandleDistance) to move that plane.
-   */
-  setSectionHandles(list) {
-    if (!this.sectionHandles) { this.sectionHandles = new THREE.Group(); this.scene.add(this.sectionHandles); }
-    for (const c of [...this.sectionHandles.children]) { c.traverse((o) => { o.geometry?.dispose(); }); this.sectionHandles.remove(c); }
-    this.secHit = [];
-    if (!list) return;
-    const diag = this.bounds().getSize(new THREE.Vector3()).length() || 100, size = Math.max(diag * 0.035, 1);
-    list.forEach((h, i) => {
-      const n = new THREE.Vector3(...h.n).normalize(), p0 = new THREE.Vector3(...h.base), tip = p0.clone().addScaledVector(n, size * 2.2);
-      const mat = new THREE.MeshBasicMaterial({ color: 0xe0584d, depthTest: false });
-      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.08, size * 0.08, size * 2.2, 8), mat);
-      shaft.position.copy(p0).addScaledVector(n, size * 1.1); shaft.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(size * 0.42, size * 1.1, 16), mat);
-      cone.position.copy(tip).addScaledVector(n, size * 0.5); cone.quaternion.copy(shaft.quaternion);
-      const hit = new THREE.Mesh(new THREE.SphereGeometry(size * 1.1, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
-      hit.position.copy(tip).addScaledVector(n, size * 0.3); hit.userData.cut = i;
-      for (const o of [shaft, cone, hit]) { o.renderOrder = 13; o.raycast = o === hit ? THREE.Mesh.prototype.raycast : () => {}; this.sectionHandles.add(o); }
-      this.secHit.push({ hit, p0, n });
-    });
-  }
-  /** The index of the cut whose arrow is under the pointer, or -1. */
-  pickSectionHandle(ev) {
-    if (!this.secHit?.length) return -1;
-    this.setRay(ev);
-    const h = this.ray.intersectObjects(this.secHit.map((x) => x.hit), false)[0];
-    return h ? h.object.userData.cut : -1;
-  }
-  /** The signed distance from a cut's arrow base to the point on its axis closest to the pointer's ray. */
-  sectionHandleDistance(ev, i) {
-    const t = this.secHit?.[i]; if (!t) return null;
-    this.setRay(ev);
-    const o = this.ray.ray.origin, d = this.ray.ray.direction, w = t.p0.clone().sub(o), b = t.n.dot(d), dd = t.n.dot(w), e = d.dot(w), den = 1 - b * b;
-    if (Math.abs(den) < 1e-6) return null;
-    return (b * e - dd) / den;
   }
 
   // Per-body appearance (doc.appearance): a material, a colour and/or a texture; falls back to the default grey material.
@@ -614,7 +546,7 @@ export class Viewport {
   /** A PNG data URL of the current view at the given size. background: a CSS colour, or null for transparent. */
   snapshot({ width = 1920, height = 1080, background = null, clean = true } = {}) {
     const r = this.renderer, size = r.getSize(new THREE.Vector2()), pr = r.getPixelRatio(), cam = this.camera;
-    const hide = clean ? [this.sketchGroup, this.overlay, this.planeHandles, this.originGroup, this.faceHL, this.edgeSelGroup, this.measureGroup, this.manipGroup, this.profileGroup, this.previewGroup, this.sectionHandles, this.gizmo.getHelper(), ...(this.opts.render ? [this.grid, this.originMarks] : [])] : [];
+    const hide = clean ? [this.sketchGroup, this.overlay, this.planeHandles, this.originGroup, this.faceHL, this.edgeSelGroup, this.measureGroup, this.manipGroup, this.profileGroup, this.previewGroup, this.gizmo.getHelper(), ...(this.opts.render ? [this.grid, this.originMarks] : [])] : [];
     const was = hide.map((o) => o?.visible); hide.forEach((o) => o && (o.visible = false));
     const aspect0 = this.persp.aspect;
     r.setPixelRatio(1); r.setSize(width, height, false);
@@ -637,7 +569,7 @@ export class Viewport {
       e.visible = this.opts.edges && !this.opts.render;
       e.material = sel ? this.mats.edgeSel : this.mats.edge;
     }
-    const clip = this.sections ? this.sections.map((x) => x.plane) : this.slicePlane ? [this.slicePlane] : null;
+    const clip = this.section ? [this.section.plane] : this.slicePlane ? [this.slicePlane] : null;
     for (const mm of [this.mats.surface, this.mats.body, this.mats.sel, this.mats.hover, this.mats.edge, this.mats.edgeSel, ...Object.values(this.colorMats || {})]) {
       if ((mm.clippingPlanes === null) !== (clip === null)) mm.needsUpdate = true;
       mm.clippingPlanes = clip;
@@ -665,8 +597,7 @@ export class Viewport {
     const face = planarFace(src.verts, src.tris, hit.faceIndex);
     if (!face) return { curved: true, id, point: hit.point.toArray().map(r4), normal: hit.face.normal.toArray().map(r4) };
     const n = face.normal.map((c) => +c.toFixed(6));
-    const bf = src.faceOf && src.faces[src.faceOf[hit.faceIndex]]; // an exact body: remember which B-rep face this is
-    return { face: true, id, point: hit.point.toArray().map(r4), normal: n, tris: face.tris, mesh: hit.object, ...(bf ? { brepFace: bf.key } : {}) };
+    return { face: true, id, point: hit.point.toArray().map(r4), normal: n, tris: face.tris, mesh: hit.object };
   }
   /** Like pickPlanarFace, but a curved surface gives its whole curved face too ({face, curved: true, tris, mesh}). */
   pickFace(ev) {
@@ -674,37 +605,14 @@ export class Viewport {
     const hit = this.ray.intersectObjects(this.bodyGroup.children, false)[0];
     if (!hit) return null;
     const id = hit.object.userData.id, src = hit.object.userData.src, r4 = (v) => +v.toFixed(4);
-    if (src.faceOf) { // an exact body: the face is the B-rep face, flat or curved, with a key that survives a rebuild
-      const gi = src.faceOf[hit.faceIndex], meta = src.faces[gi], tris = this.brepFaceTris(src, gi);
-      if (meta && tris.length) {
-        const curved = meta.type !== 'PLANE';
-        return { face: true, ...(curved ? { curved: true, tangent: this.smoothNormalAt(hit) } : {}), brepFace: meta.key, id, point: hit.point.toArray().map(r4), normal: hit.face.normal.toArray().map((c) => +c.toFixed(6)), tris, mesh: hit.object };
-      }
-    }
     const face = faceOf(src.verts, src.tris, hit.faceIndex);
     if (!face) return null;
     if (face.curved) return { face: true, curved: true, id, point: face.point, normal: face.normal, tris: face.tris, mesh: hit.object };
     return { face: true, id, point: hit.point.toArray().map(r4), normal: face.normal.map((c) => +c.toFixed(6)), tris: face.tris, mesh: hit.object };
   }
-  /** The surface normal at a ray hit, interpolated from the smoothed vertex normals of its triangle (the flat triangle normal is up to the tessellation angle off the true surface). */
-  smoothNormalAt(hit) {
-    const g = hit.object.geometry, nA = g.attributes.normal, pA = g.attributes.position, f = hit.face;
-    if (!nA || !f) return hit.face.normal.toArray().map((c) => +c.toFixed(6));
-    const a = new THREE.Vector3().fromBufferAttribute(pA, f.a), b = new THREE.Vector3().fromBufferAttribute(pA, f.b), c = new THREE.Vector3().fromBufferAttribute(pA, f.c);
-    const bary = new THREE.Vector3(); THREE.Triangle.getBarycoord(hit.point, a, b, c, bary);
-    const n = new THREE.Vector3().fromBufferAttribute(nA, f.a).multiplyScalar(bary.x).add(new THREE.Vector3().fromBufferAttribute(nA, f.b).multiplyScalar(bary.y)).add(new THREE.Vector3().fromBufferAttribute(nA, f.c).multiplyScalar(bary.z));
-    return n.lengthSq() > 1e-12 ? n.normalize().toArray().map((q) => +q.toFixed(6)) : hit.face.normal.toArray().map((q) => +q.toFixed(6));
-  }
-  /** The triangles of B-rep face number `gi` of a body mesh. */
-  brepFaceTris(src, gi) {
-    const out = [];
-    for (let t = 0; t < src.faceOf.length; t++) if (src.faceOf[t] === gi) out.push(t);
-    return out;
-  }
-  /** The triangles of a stored face {point, normal, curved?, brepFace?} on a body mesh now, or null. */
+  /** The triangles of a stored face {point, normal, curved?} on a body mesh now, or null. */
   faceTris(mesh, f) {
-    const { verts, tris, faces } = mesh.userData.src;
-    if (f.brepFace && faces) { const gi = matchBrepFace(faces, f); if (gi >= 0) return this.brepFaceTris(mesh.userData.src, gi); } // an exact body: the face by its key
+    const { verts, tris } = mesh.userData.src;
     if (f.curved) { const t = findCurvedTri(verts, tris, f.point, f.normal); const c = t >= 0 ? curvedFace(verts, tris, t) : null; return c ? c.tris : null; }
     const t = findFaceTri(verts, tris, f.point, f.normal), pf = t >= 0 ? planarFace(verts, tris, t) : null;
     return pf ? pf.tris : null;
@@ -911,42 +819,6 @@ export class Viewport {
     this.previewGroup.add(m);
   }
 
-  /**
-   * Stretch the translucent tool solid by `k` along the unit vector `n` about the point `o` (a stand-in for a straight extrusion whose distance
-   * changed). With `two` ({ k2, side1 }) the solid has two sides with their own distances: the side the distance points to (`side1` is 1 along
-   * `n`, -1 against it) stretches by `k`, the other side by `k2`.
-   */
-  previewToolStretch(o, n, k, two) {
-    const N = new THREE.Vector3(...n).normalize(), O = new THREE.Vector3(...o);
-    for (const c of this.previewGroup.children) {
-      const pos = c.geometry.getAttribute('position');
-      if (!c.userData.base) c.userData.base = pos.array.slice();
-      const base = c.userData.base, arr = pos.array, v = new THREE.Vector3();
-      for (let i = 0; i < base.length; i += 3) {
-        v.set(base[i], base[i + 1], base[i + 2]).sub(O);
-        const t = v.dot(N), f = two && Math.sign(t || 1) !== two.side1 ? two.k2 : k;
-        v.addScaledVector(N, t * (f - 1)).add(O);
-        arr[i] = v.x; arr[i + 1] = v.y; arr[i + 2] = v.z;
-      }
-      pos.needsUpdate = true; c.geometry.computeBoundingSphere();
-      const e = c.children[0]; if (e) { e.geometry.dispose(); e.geometry = new THREE.EdgesGeometry(c.geometry, 30); }
-    }
-  }
-
-  /** A stand-in for a Fillet or Chamfer being rebuilt: a translucent tube of the radius (or distance) along each picked edge, until the kernel's result arrives. */
-  previewEdgeSize(chains, r, kind) {
-    for (const c of [...this.previewGroup.children]) { c.traverse((o) => o.geometry?.dispose()); this.previewGroup.remove(c); }
-    for (const pts of chains) {
-      const v = pts.map((p) => new THREE.Vector3(...p));
-      if (v.length < 2) continue;
-      const path = new THREE.CurvePath();
-      for (let i = 0; i < v.length - 1; i++) path.add(new THREE.LineCurve3(v[i], v[i + 1]));
-      const m = new THREE.Mesh(new THREE.TubeGeometry(path, Math.max(2, v.length * 2), r, kind === 'chamfer' ? 4 : 12, false), new THREE.MeshStandardMaterial({ color: 0x2f7cf6, transparent: true, opacity: 0.35, depthWrite: false, roughness: 0.7 }));
-      m.raycast = () => {}; m.renderOrder = 3;
-      this.previewGroup.add(m);
-    }
-  }
-
   // ---- on-canvas distance manipulator (arrow) ----
   setManip(base, dir, dist) {
     for (const c of [...this.manipGroup.children]) { c.traverse((o) => { o.geometry?.dispose(); }); this.manipGroup.remove(c); }
@@ -1054,10 +926,7 @@ export class Viewport {
     if (hit.object.userData.plane) return { plane: hit.object.userData.plane };
     const src = hit.object.userData.src;
     const face = planarFace(src.verts, src.tris, hit.faceIndex);
-    if (!face) { // a curved face: the plane that touches the surface where the ray hit it
-      const nn = this.smoothNormalAt(hit), h = Math.hypot(nn[0], nn[1]);
-      return { face: { plane: 'custom', origin: hit.point.toArray().map((c) => +c.toFixed(4)), normal: nn, xdir: h < 0.01 ? [1, 0, 0] : [-nn[1] / h, nn[0] / h, 0].map((q) => +q.toFixed(6)) }, curvedPlane: true, tris: [], mesh: hit.object };
-    }
+    if (!face) return { curved: true };
     const n = face.normal.map((c) => (Math.abs(c) < 1e-6 ? 0 : +c.toFixed(6)));
     const d = n[0] * face.point[0] + n[1] * face.point[1] + n[2] * face.point[2];
     const origin = n.map((c) => +(c * d).toFixed(4));

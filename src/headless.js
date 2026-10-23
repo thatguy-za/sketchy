@@ -1,7 +1,6 @@
 // Headless design evaluation, shared by the MCP server (Node) and anything else that needs to replay a design
 // without the UI: resolve parameters, run the kernel, summarise bodies and errors, build new features from the catalogue.
-import { rebuild, cacheReach } from './kernel.js';
-import { loadBrep, brepSupport, exactStep } from './backend-brep.js';
+import { initKernel, rebuild } from './kernel.js';
 import { FEATURES, defOf, fieldKind } from './features.js';
 import { resolveParams, resolveFeature, applyConfig } from './params.js';
 import { resolveSketch } from './sketchdims.js';
@@ -16,13 +15,13 @@ import { planarFace, curvedFace, findCurvedTri } from './edges.js';
 import { findFaceTri } from './kernel.js';
 
 let ready = null;
-/** Start the kernel (OpenCascade). */
-export const initHeadless = () => (ready ||= loadBrep());
+/** Start the kernel (manifold). */
+export const initHeadless = () => (ready ||= initKernel());
 
 const round = (v, n = 3) => +Number(v).toFixed(n);
 
-/** The design's features with parameters and expressions resolved, as the kernel is given them. */
-export function resolveDoc(doc) {
+/** Replay the whole timeline (or up to doc.marker) exactly like the UI does. */
+export function evaluate(doc, { cache = false } = {}) {
   const ps = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
   const evalErr = {};
   const scope = Object.assign((n) => ps.values[n], { names: () => Object.keys(ps.values) });
@@ -37,28 +36,7 @@ export function resolveDoc(doc) {
     }
     return ff;
   });
-  return { feats, evalErr, ps };
-}
-/**
- * Build the design in a few pieces, from where the kernel's cache already has it (see cacheReach), calling onPiece(done, total) after each
- * so that the caller can save progress: a build that is stopped part-way leaves the states it reached, and the next attempt starts there.
- * Nothing is meshed; a following evaluate(doc, { cache: true }) takes the finished states and makes the result.
- */
-export async function prebuild(doc, { onPiece, pieceSize = 8 } = {}) {
-  const { feats } = resolveDoc(doc), n = feats.length, from = cacheReach(feats, doc.bodyComp), rest = n - from;
-  const pieces = rest >= 12 ? Math.min(6, Math.ceil(rest / pieceSize)) : 1;
-  for (let k = 1; k <= pieces; k++) {
-    const upTo = k === pieces ? n : from + Math.round((rest * k) / pieces);
-    rebuild(feats, upTo, { bodyComp: doc.bodyComp, cache: true, discard: true });
-    await onPiece?.(k, pieces);
-  }
-  return { features: n, from };
-}
-
-/** Replay the whole timeline (or up to doc.marker) exactly like the UI does. */
-export function evaluate(doc, { cache = false, keepShapes = false } = {}) {
-  const { feats, evalErr, ps } = resolveDoc(doc);
-  const result = rebuild(feats, feats.length, { bodyComp: doc.bodyComp, cache, keepShapes }); // a one-off evaluation (assistants, compare) must not leave a design's shapes in the kernel's cache // always the full timeline (ignores any UI roll-back marker)
+  const result = rebuild(feats, feats.length, { bodyComp: doc.bodyComp, cache }); // a one-off evaluation (assistants, compare) must not leave a design's shapes in the kernel's cache // always the full timeline (ignores any UI roll-back marker)
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   return { result, resolved: feats, paramErrors: ps.errors || {} };
 }
@@ -161,28 +139,16 @@ export function faceTrisOf(body, ref) {
   return f ? f.tris : null;
 }
 /**
- * Export bodies in a format: { bytes: Buffer, filename, mime }. Pass the design as `doc` (and optionally `ids`, the body ids) and a STEP
- * export is exact (true planes, cylinders, fillets, AP242) when the exact kernel supports every feature of it; the result then has
- * exact: true. Otherwise STEP is the faceted file and result.note says which feature kept it from being exact.
+ * Export bodies in a format: { bytes: Buffer, filename, mime }. STEP is the faceted file (every curved surface is made of flat faces); when the
+ * design is passed, the result says so (exact: false, note).
  */
-export async function exportOf(format, bodies, name, doc = null, ids = null) {
+export async function exportOf(format, bodies, name, doc = null) {
   const f = String(format || 'stl').toLowerCase();
   const mime = { stl: 'model/stl', '3mf': 'model/3mf', obj: 'model/obj', step: 'model/step' };
-  let note;
-  if (f === 'step' && doc) {
-    const { resolved } = evaluate(doc);
-    const sup = brepSupport(resolved.slice(0, doc.marker ?? resolved.length));
-    if (sup.ok) {
-      await loadBrep();
-      const { blob } = exactStep(resolved, { ids, name });
-      return { bytes: Buffer.from(await blob.arrayBuffer()), filename: `${name}.step`, mime: mime.step, exact: true };
-    }
-    note = `Not exact: ${sup.feature.name} uses ${sup.reason}, which the exact kernel does not have yet, so the STEP file is faceted.`;
-  }
   const make = { stl: () => writeSTL(bodies, name), '3mf': () => write3MF(bodies, name), obj: () => writeOBJ(bodies, name), step: () => writeSTEP(bodies, name) }[f];
   if (!make) throw new Error(`Unknown format "${format}". Use stl, 3mf, obj or step.`);
   const blob = make();
-  return { bytes: Buffer.from(await blob.arrayBuffer()), filename: `${name}.${f}`, mime: mime[f], ...(f === 'step' && doc ? { exact: false, note } : {}) };
+  return { bytes: Buffer.from(await blob.arrayBuffer()), filename: `${name}.${f}`, mime: mime[f], ...(f === 'step' && doc ? { exact: false, note: 'STEP is written as flat faces: a curved surface is made of many small planes.' } : {}) };
 }
 
 export const MATERIAL_IDS = MATERIALS.map((m) => m.id);

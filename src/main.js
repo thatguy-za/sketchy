@@ -2,18 +2,11 @@ import './style.css';
 import * as THREE from 'three';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
-import { loadBrep, brepSupport, brepReady, replicad, exactStep, profilesOfExact, interferenceOf, compareResults } from './backend-brep.js';
-import { buildExtrudePreview } from './extrude-preview.js';
-import { boxCuts, cutsFromSpec } from './section.js';
-import { extrudeRanges } from './featurespec.js';
-import { rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri } from './kernel.js';
+import { initKernel, rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference, compareBodies } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { writeSTL } from './stl.js';
 import { readModelFile } from './importers.js';
-import runtimeSource from './addin-runtime.js?raw';
-import { createAddinManager } from './addins-ui.js';
-import { buildTree } from './csg-service.js';
-import occtUrl from 'replicad-opencascadejs/wasm?url'; // OpenCascade, 23 MB: only fetched when an exact STEP export needs it
+import wasmUrl from 'manifold-3d/manifold.wasm?url';
 import { evaluate as evaluateDoc } from './headless.js';
 import { initA11y } from './a11y.js';
 import { initTheme, getTheme, setTheme, onTheme } from './theme.js';
@@ -35,9 +28,9 @@ import { smoothPath } from './solids.js';
 import { bedFit, overhangs, wallThickness } from './printcheck.js';
 import { orientations, placement, findings, verdict, minWallFor, weightEstimate } from './printprofile.js';
 import { createBeginner, designProfile } from './beginner.js';
+import { createAssistant, toolPast } from './assistant.js';
 import { templateDoc, templateById } from './templates.js';
 import { withoutSkins } from './skins.js';
-import { createAssistant, toolPast } from './assistant.js';
 import { MATERIALS, TEXTURES, textureById, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
 import { resolveSketch } from './sketchdims.js';
 import { CON_GLYPH, CON_LABEL, definedState } from './sketchcons.js';
@@ -61,6 +54,8 @@ const saveCustomPrinters = (l) => { try { localStorage.setItem('sketchy.printers
 const printerSize = (name) => PRINTERS[name] || customPrinters().find((x) => x.name === name)?.size || null;
 let bedName = localStorage.getItem('sketchy.bed') || Object.keys(PRINTERS)[0];
 let doc = blankDoc();
+let aiFlash = new Set(); // features the assistant just changed (pulsed in the timeline for a few seconds)
+let assistant = null;
 let undoStack = [], redoStack = [];
 let result = { bodies: [], errors: {}, snaps: [], sketchUsed: new Set() };
 let dirty = false;
@@ -69,7 +64,6 @@ let selFeature = null;           // timeline selection (primary)
 let selSet = new Set();          // timeline multi-selection
 let paramState = { values: {}, errors: {} };
 let resolvedMap = {};
-let resolvedFeats = []; // the features as the kernel last saw them (parameters and planes resolved)
 let measure = null;
 let navMode = 'orbit';
 let SU = null;
@@ -86,9 +80,6 @@ let selPriority = prefPriority;
 const savePriority = (v) => { prefPriority = v; try { localStorage.setItem('sketchy.selPriority', v); } catch { /* storage unavailable */ } };
 let selMode = 'click';           // click | window | freeform | paint (drag-selection tools)
 let selFace = null;
-let addins = null; // the add-in manager (src/addins-ui.js)
-let aiFlash = new Set(); // features the assistant just changed (pulsed in the timeline for a few seconds)
-let assistant = null;
 let paintMode = null; // Appearance picked with nothing selected: { val, target: 'faces' | 'bodies' }; each click applies it, Esc finishes
 let viewBodies = [], skinCount = 0, skinWarned = false; // what the viewport draws, and how many triangles of zero-thickness walls were left out of it
 let selFaceB = null; // a second flat face (Shift or Ctrl-click) to measure against; only valid while selFace is still the face it was added to
@@ -130,76 +121,9 @@ let pending = false;
 // ------------------------------------------------------------------ rebuilding off the main thread
 // A design that takes a while to rebuild is rebuilt in a Web Worker instead (kernel-worker.js), so orbiting, menus and typing stay
 // responsive. Small designs keep rebuilding on the page itself: no round trip, and the result is there straight away.
-let appliedParams = new Map();
-let kernelOk = false, kernelReady = null; // the geometry kernel downloads while the page starts
-let kernelBytes = { n: 0, total: 0 };
-const kernelEvent = () => window.dispatchEvent(new Event('sketchy-kernel')); // the welcome card and the guided tour show how far the download is
 const HEAVY_MS = 150; // a rebuild slower than this moves the kernel to the worker
 const canWorker = typeof Worker !== 'undefined';
-let kernelHeavy = false, lastRebuildMs = 0;
-// A rebuild on the page freezes the whole interface for as long as it takes, so a design that is slow to build is built in the worker
-// from the start. Which designs those are is remembered here (by name, in this browser); a design with no history that already has
-// many features goes to the worker too, rather than freezing once to find out.
-const HEAVY_KEY = 'sketchy.heavy', HEAVY_FEATURES = 25;
-const heavyHints = () => { try { const m = JSON.parse(localStorage.getItem(HEAVY_KEY) || '{}'); return m && typeof m === 'object' ? m : {}; } catch { return {}; } };
-function noteHeavy(ms) {
-  if (!doc.name || doc.name === 'Untitled' || !(ms > HEAVY_MS)) return;
-  try {
-    const m = heavyHints(); m[doc.name] = { ms: Math.round(ms), n: doc.features.length, at: Date.now() };
-    const keep = Object.entries(m).sort((a, b) => b[1].at - a[1].at).slice(0, 200);
-    localStorage.setItem(HEAVY_KEY, JSON.stringify(Object.fromEntries(keep)));
-  } catch { /* storage unavailable */ }
-}
-// A slow design is not rebuilt from nothing each time it is opened: the worker's states are saved next to the design on the server (a gzip file
-// of the kernel's cache, see exportBrepCache) and read back before the first rebuild. A saved cache is only a head start: the rebuild compares
-// it with the design and keeps what still fits, so an out-of-date one costs time, never correctness.
-const APP_KERNEL = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev';
-const cacheUrl = (name) => '/api/projects/' + encodeURIComponent(name) + '/cache';
-let cacheTimer = 0;
-function startCacheRestore() {
-  if (!kernelHeavy || !canWorker || !acct.server || !acct.user || !doc.rev) return;
-  const name = doc.name;
-  if (kw.cacheOf === name) return; // the worker already holds this design's states
-  ensureKernelWorker();
-  if (!kw.worker) return;
-  const worker = kw.worker; kw.cacheOf = name;
-  clearTimeout(kw.busyTimer); kw.busyTimer = setTimeout(() => showBusy(true), 400);
-  const limit = new Promise((resolve) => setTimeout(resolve, 30000)); // never wait for it for long
-  kw.restoring = Promise.race([(async () => {
-    try {
-      const r = await fetch(cacheUrl(name), { headers: { 'x-sketchy': '1' } });
-      if (!r.ok || kw.worker !== worker) return;
-      const bytes = new Uint8Array(await r.arrayBuffer());
-      if (kw.worker !== worker) return;
-      await new Promise((resolve) => { kw.onCacheImported = resolve; worker.postMessage({ type: 'cache-import', bytes, kernel: APP_KERNEL }, [bytes.buffer]); });
-    } catch { /* no saved cache (or none that can be read): the design is built as usual */ }
-  })(), limit]).then(() => {
-    kw.restoring = null;
-    const q = kw.deferred; kw.deferred = null;
-    if (q && kw.worker === worker) sendRebuild(q); else if (!kernelBusy()) { showBusy(false); for (const f of kw.idle.splice(0)) f(); }
-  });
-}
-function scheduleCacheSave() {
-  clearTimeout(cacheTimer);
-  if (!kernelHeavy || !kw.worker || !acct.server || !acct.user || !doc.rev) return;
-  cacheTimer = setTimeout(() => {
-    if (kernelBusy() || dialog || sketch) return scheduleCacheSave(); // not while something is being built or edited
-    kw.cacheFor = doc.name; kw.cacheOf = doc.name;
-    kw.worker?.postMessage({ type: 'cache-export', kernel: APP_KERNEL });
-  }, 6000);
-}
-async function uploadCache(bytes) {
-  const name = kw.cacheFor; kw.cacheFor = null;
-  if (!bytes || !name || name !== doc.name || !acct.server) return;
-  try { await fetch(cacheUrl(name), { method: 'PUT', headers: { 'x-sketchy': '1', 'content-type': 'application/octet-stream' }, body: bytes }); } catch { /* it is only a convenience */ }
-}
-/** Choose where the design just opened is built: the worker when it is known to be slow (or is big), the page otherwise. */
-function applyHeavyHint() {
-  if (!canWorker || !doc) return;
-  const h = heavyHints()[doc.name], n = doc.features.length;
-  kernelHeavy = h ? n >= h.n * 0.5 : n >= HEAVY_FEATURES; // a design that has become much simpler than it was is light again
-  if (kernelHeavy) { ensureKernelWorker(); startCacheRestore(); }
-}
+let kernelHeavy = false, lastRebuildMs = 0, quickRuns = 0;
 const kw = { worker: null, ready: false, seq: 0, running: null, pending: null, meshes: new Map(), idle: [], busyTimer: 0 };
 function ensureKernelWorker() {
   if (kw.worker || !canWorker) return;
@@ -207,55 +131,47 @@ function ensureKernelWorker() {
     kw.worker = new Worker(new URL('./kernel-worker.js', import.meta.url), { type: 'module' });
     kw.worker.onmessage = onKernelMessage;
     kw.worker.onerror = (e) => { console.error(e); stopKernelWorker(); kernelHeavy = false; toast('The background rebuild failed, so Sketchy went back to rebuilding on the page.', true); refresh(); };
-    kw.worker.postMessage({ type: 'init', occtUrl });
+    kw.worker.postMessage({ type: 'init', wasmUrl });
   } catch (e) { console.error(e); kw.worker = null; kernelHeavy = false; }
 }
 function stopKernelWorker() {
-  kw.stops = (kw.stops || 0) + 1; kw.progress = null;
-  kw.worker?.terminate(); kw.worker = null; kw.running = null; kw.pending = null; kw.meshes = new Map(); kw.restoring = null; kw.deferred = null; kw.cacheOf = null; kw.onCacheImported?.(); kw.onCacheImported = null;
+  kw.worker?.terminate(); kw.worker = null; kw.running = null; kw.pending = null; kw.meshes = new Map();
   showBusy(false); for (const f of kw.idle.splice(0)) f();
 }
-const kernelBusy = () => !!(kw.running || kw.pending || kw.restoring || kw.deferred);
+const kernelBusy = () => !!(kw.running || kw.pending);
 const kernelIdle = () => new Promise((res) => (kernelBusy() ? kw.idle.push(res) : res()));
 function rebuildInWorker(req, done) {
   ensureKernelWorker();
   if (!kw.worker) { kernelHeavy = false; refresh(); return; }
   req.done = done;
-  if (kw.restoring) { kw.deferred = req; return; } // the saved cache of this design is being read into the worker: the rebuild starts from it, the newest request only
-  sendRebuild(req); // a rebuild still running is abandoned by the worker at its next piece boundary: the newest change wins
+  if (kw.running) { kw.pending = req; return; } // only the newest change waits its turn; the ones in between are skipped
+  sendRebuild(req);
 }
 function sendRebuild(req, resend = false) {
   kw.running = { id: ++kw.seq, req, t0: performance.now() };
   kw.worker.postMessage({ type: 'rebuild', id: kw.running.id, features: req.features, count: req.count, opts: req.opts, resend });
-  clearTimeout(kw.busyTimer); if (!req.silent) kw.busyTimer = setTimeout(() => showBusy(true), 400); // a warm-up build for the next change is not announced
+  clearTimeout(kw.busyTimer); kw.busyTimer = setTimeout(() => showBusy(true), 400);
 }
 function onKernelMessage(e) {
   const m = e.data;
   if (m.type === 'ready') { kw.ready = true; return; }
-  if (m.type === 'progress') { if (kw.running && m.id === kw.running.id) { kw.progress = m; kw.onProgress?.(m); const t = $('#busy-text'); if (t) t.textContent = progressText(m); } return; }
-  if (m.type === 'cache-imported') { const f = kw.onCacheImported; kw.onCacheImported = null; f?.(m); return; }
-  if (m.type === 'cache') { uploadCache(m.bytes); return; }
-  if (m.type === 'superseded') { kw.abandoned = (kw.abandoned || 0) + 1; return; } // an older rebuild given up for a newer one
   const run = kw.running;
   if (!run || m.id !== run.id) return; // an answer for a request that was stopped
   kw.running = null;
-  if (m.type === 'error') {
-    console.error(m.message); toast('Kernel error: ' + m.message, true);
-  } else {
+  if (m.type === 'error') { console.error(m.message); toast('Kernel error: ' + m.message, true); } else {
     const res = m.result;
     const missing = res.bodies.some((b) => !b.verts && !kw.meshes.has(b.key));
     if (missing) { sendRebuild(run.req, true); return; } // the page lost a mesh the worker thought it had: ask for everything again
     for (const b of res.bodies) { if (b.verts) kw.meshes.set(b.key, { verts: b.verts, tris: b.tris }); else Object.assign(b, kw.meshes.get(b.key)); }
     const keep = new Set(res.bodies.map((b) => b.key)); for (const k of [...kw.meshes.keys()]) if (!keep.has(k)) kw.meshes.delete(k);
     lastRebuildMs = m.ms;
-    noteHeavy(m.ms);
-    scheduleCacheSave(); // the worker now holds this design's states: save them a moment after the changes stop
+    quickRuns = m.ms < 40 ? quickRuns + 1 : 0;
+    if (quickRuns >= 6 && !kw.pending) { kernelHeavy = false; quickRuns = 0; kw.worker.postMessage({ type: 'clear' }); kw.meshes = new Map(); } // cheap again: go back to rebuilding on the page
     run.req.done(res);
   }
   if (kw.pending) { const next = kw.pending; kw.pending = null; sendRebuild(next); }
   else { showBusy(false); for (const f of kw.idle.splice(0)) f(); }
 }
-const progressText = (m) => `${m.stage}: ${Math.round(m.done).toLocaleString()} of ${Math.round(m.total).toLocaleString()}…`;
 function showBusy(on) {
   clearTimeout(kw.busyTimer);
   let el = $('#busybar');
@@ -269,14 +185,13 @@ function showBusy(on) {
   el.hidden = false;
   const t0 = kw.running?.t0 || performance.now();
   clearInterval(kw.busyTick);
-  kw.busyTick = setInterval(() => { const t = $('#busy-text'); if (t && !(kw.progress && kw.running && kw.progress.id === kw.running.id)) t.textContent = `Rebuilding the design… ${((performance.now() - t0) / 1000).toFixed(1)} s`; }, 200);
+  kw.busyTick = setInterval(() => { const t = $('#busy-text'); if (t) t.textContent = `Rebuilding the design… ${((performance.now() - t0) / 1000).toFixed(1)} s`; }, 200);
 }
 
 function refresh() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; refreshNow(); }); } }
 const paramScope = Object.assign((n) => paramState.values[n], { names: () => Object.keys(paramState?.values || {}) });
 function refreshParamsNow() { paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig)); }
 function refreshNow() {
-  if (!kernelOk) { kernelReady?.then(() => refresh(), () => {}); return; } // the kernel is still loading: the design builds as soon as it is there
   if (vp?.compareGroup && !/COMPARE/.test($('#props-wrap .title')?.textContent || '')) vp.setCompare(null); // a compare view never outlives its panel
   const pickF = dialog && defOf(doc.features[dialog.index])?.pickEdges;
   paramState = resolveParams(applyConfig(doc.params || [], doc.configs, doc.activeConfig));
@@ -300,90 +215,20 @@ function refreshNow() {
     }
   });
   resolvedMap = Object.fromEntries(feats.map((f) => [f.id, f.params]));
-  resolvedFeats = feats;
   vp.setCanvases((doc.canvases || []).map((c) => ({ ...c, hidden: canvasHidden.has(c.id) })));
   vp.setConstructionLines(feats.filter((f, i) => (f.type === 'axis' || f.type === 'cpoint') && !f.suppressed && !f.params.error && i < limit()).map((f) => (f.type === 'axis' ? { id: f.id, kind: 'axis', origin: f.params.origin, dir: f.params.dir, hidden: planeHidden.has(f.id) } : { id: f.id, kind: 'point', origin: (f.params.pos || [0, 0, 0]).map(Number), hidden: planeHidden.has(f.id) })));
   vp.setConstructionPlanes(feats.filter((f, i) => f.type === 'plane' && !f.suppressed && i < limit()).map((f) => ({ id: f.id, name: f.name, origin: f.params.origin, normal: f.params.normal, xdir: f.params.xdir, hidden: planeHidden.has(f.id) })));
   const req = { features: feats, count: limit(), opts: { bodyComp: doc.bodyComp, capture: pickF ? dialog.index : -1, previewId: dialog ? doc.features[dialog.index]?.id : null } };
-  if (kernelHeavy && canWorker) { cheapPreview(feats); rebuildInWorker(req, (res) => { result = res; applyResult(evalErr); }); return; } // a big design: the page stays usable while it rebuilds
+  if (kernelHeavy && canWorker) { rebuildInWorker(req, (res) => { result = res; applyResult(evalErr); }); return; } // a big design: the page stays usable while it rebuilds
   const t0 = performance.now();
   try { result = rebuild(req.features, req.count, req.opts); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
   lastRebuildMs = performance.now() - t0;
-  if (lastRebuildMs > HEAVY_MS && canWorker) { // slow: from now on rebuild off the main thread, and remember it for the next time this design is opened
-    kernelHeavy = true; noteHeavy(lastRebuildMs); ensureKernelWorker();
-    rebuildInWorker({ ...req, silent: true }, () => {}); // warm the worker's cache now, quietly, so the next change builds only what it touches
-  }
+  if (lastRebuildMs > HEAVY_MS && canWorker) { kernelHeavy = true; clearKernelCache(); ensureKernelWorker(); } // from the next change on, rebuild off the main thread
   applyResult(evalErr);
-}
-/**
- * While the worker builds the exact result of a Move or Scale being dragged or typed, show the body's current mesh moved or stretched the
- * same way at once (a stand-in: it is replaced by the kernel's shape when that arrives). Only the plain cases: a translation, or a
- * stretch about the body's centre, from the values the shapes on screen were built with.
- */
-function cheapPreview(feats) {
-  try {
-    if (!dialog || !vp) return;
-    const f = feats[dialog.index], prev = f && appliedParams.get(f.id);
-    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-    if (f && prev && !f.suppressed && f.type === 'extrude') { stretchExtrudePreview(f, prev, same); return; }
-    if (f && !f.suppressed && (f.type === 'fillet' || f.type === 'chamfer')) { const r = f.type === 'fillet' ? (f.params.mode === 'chord' ? +f.params.chord / 2 : +f.params.radius) : +f.params.distance; if (r > 0 && f.params.edges?.length) vp.previewEdgeSize(f.params.edges.map((e) => e.pts), r, f.type); return; }
-    if (!f || !prev || f.suppressed || !['move', 'scale'].includes(f.type) || f.params.body !== prev.body) return;
-    if (f.type === 'move') {
-      if (f.params.mode === 'points' || !same(f.params.r, prev.r) || !same(f.params.s, prev.s) || !!f.params.copy !== !!prev.copy || f.params.copy) return;
-      const d = f.params.t.map((v, k) => v - prev.t[k]);
-      if (d.some((v) => Math.abs(v) > 1e-12)) vp.previewBody(f.params.body, { translate: d });
-    } else {
-      const fac = (q) => (q.mode === 'nonuniform' ? q.s : [q.factor, q.factor, q.factor]);
-      if (f.params.copy || prev.copy || (f.params.about || 'center') !== (prev.about || 'center')) return;
-      const a = fac(f.params), b = fac(prev);
-      if (!a.every((v) => v > 0) || !b.every((v) => v > 0)) return;
-      const c = f.params.about === 'origin' ? [0, 0, 0] : vp.bodyCentre(f.params.body);
-      if (c) vp.previewBody(f.params.body, { scale: a.map((v, k) => v / b[k]), about: c });
-    }
-  } catch { /* a preview is a nicety */ }
-}
-/**
- * A plain straight Extrude whose only change is the distance: the translucent tool solid on screen is a prism, so it is stretched along the
- * profile's normal about the profile plane at once (the exact result replaces it when the kernel is done).
- */
-function standInExtrude(f) {
-  const a = f.params;
-  if (a.extent && a.extent !== 'distance') return;
-  const sk = resolvedFeats.find((k) => k.id === a.sketch);
-  if (!sk || sk.type !== 'sketch') return;
-  const sp = resolvedMap[sk.id] || sk.params, fr = planeFrame(sp);
-  const sel = effectiveProfiles(f, sk), profiles = profilesFor(sk).filter((q) => sel.has(q.id)).map((q) => q.polys);
-  if (!profiles.length) return;
-  const X = extrudeRanges(a, { params: sp }, () => null);
-  const off = a.start === 'offset' && a.startOffset ? a.startOffset : 0;
-  const pv = buildExtrudePreview(profiles, fr, X.ranges, { twist: +a.twist || 0, endFactor: +(a.scaleTop ?? 1) || 1, taper: +a.taper || 0, thin: a.thin ? { wall: +a.wall || 1, side: a.wallSide || 'inside' } : null, planeZ: off });
-  if (pv.tris.length) vp.setPreview({ op: a.op === 'cut' ? 'cut' : 'join', ...pv });
-}
-function stretchExtrudePreview(f, prev, same) {
-  const a = f.params, b = prev;
-  const special = (q) => q.taper || q.taper2 || q.thin || q.twist || (q.scaleTop ?? 1) !== 1;
-  if (special(a) || special(b)) { if (!same(a, b)) { try { standInExtrude(f); } catch { /* a stand-in is a nicety */ } } return; }
-  const { distance: da, distance2: da2, ...ra } = a, { distance: db, distance2: db2, ...rb } = b;
-  if (!same(ra, rb) || (a.extent && a.extent !== 'distance')) return;
-  if (a.taper || a.taper2 || a.thin || a.twist || (a.scaleTop ?? 1) !== 1) return;
-  const two = (a.direction || (a.symmetric ? 'symmetric' : 'one')) === 'two';
-  const k1 = da / db, k2 = two ? Math.abs(da2) / Math.abs(db2) : k1;
-  if (!da || !db || Math.sign(da) !== Math.sign(db) || !isFinite(k1) || !isFinite(k2) || (k1 === 1 && k2 === 1)) return;
-  if (two && (a.extent2 === 'all' || !da2 || !db2)) return;
-  const sk = resolvedFeats.find((k) => k.id === a.sketch);
-  if (!sk || sk.type !== 'sketch') return;
-  const fr = planeFrame(resolvedMap[sk.id] || sk.params);
-  const off = a.start === 'offset' && a.startOffset ? a.startOffset : 0; // the extrusion begins off the profile plane: that plane stays put
-  const o = [0, 1, 2].map((k) => fr.o[k] + fr.n[k] * off);
-  // side 1 lies on the side the distance points to (a negative distance goes against the normal), side 2 on the other
-  vp.previewToolStretch(o, fr.n, k1, two ? { k2, side1: Math.sign(da) } : undefined);
 }
 /** Everything that follows a rebuild: colours, meshes, selection, panels. */
 function applyResult(evalErr) {
-  appliedParams = new Map(resolvedFeats.map((f) => [f.id, f.params])); // what the shapes on screen were built from (cheapPreview compares against it)
-  if (!performance.getEntriesByName('sketchy-first-result').length) performance.mark('sketchy-first-result');
-  if (result.bodies.length && !performance.getEntriesByName('sketchy-first-bodies').length) performance.mark('sketchy-first-bodies'); // the first time there is something to see
   for (const [id, m] of Object.entries(evalErr)) result.errors[id] ||= m;
   for (const [id, origin] of Object.entries(result.shifted || {})) if (resolvedMap[id]) resolvedMap[id] = { ...resolvedMap[id], origin }; // sketches that followed their face
   vp.bodyColors = doc.appearance || {};
@@ -408,14 +253,13 @@ function applyResult(evalErr) {
   $('#btn-undo').disabled = !undoStack.length || !!dialog || !!sketch;
   $('#btn-redo').disabled = !redoStack.length || !!dialog || !!sketch;
   if (dialog) renderDialogErrors();
-  if (sec) applySection(); // the cut follows the rebuilt bodies, construction planes and parameters
 }
 
 // ---- sketch profile regions
 function profilesFor(sk) {
   const params = resolvedMap[sk.id] || sk.params;
   let r = profileCache.get(params);
-  if (!r) { try { r = profilesOfExact({ ...sk, params }); } catch { r = []; } profileCache.set(params, r); }
+  if (!r) { try { r = profilesOf({ ...sk, params }); } catch { r = []; } profileCache.set(params, r); }
   return r;
 }
 function effectiveProfiles(df, sk) {
@@ -667,7 +511,6 @@ const CUSTOM = {
   canvas: () => pickCanvasImage(),
   cfg1: () => showConfigurations(), cfg3: (ev) => showConfigMenu(ev?.currentTarget),
   importstl: () => $('#file-stl').click(),
-  addins: () => (addins ? addins.showDialog() : toast('Add-ins are still loading. Try again in a moment.', true)),
   repairimport: () => $('#file-repair').click(),
   measure: () => startMeasure('dist'), angle: () => startMeasure('angle'), edgelen: () => startMeasure('edge'), faces: () => startMeasure('faces'),
   properties: () => showInfo(),
@@ -689,16 +532,14 @@ const CUSTOM = {
 function runCommand(id, ev) {
   const c = CMD[id];
   if (!c) return;
-  if (!kernelOk && (c.feature || ['sketch', 'extrude', 'importstl', 'remove'].includes(id))) return toast('Still loading the geometry kernel. Try again in a moment.');
   if (paintMode && id !== 'appearance') endPaint(); // starting anything else ends the painting
   if (c.sk) { if (sketch && !sketch.picking) setSketchTool(c.sk); return; }
   if (c.skAction === 'delete') return sketchDeleteSelected();
   if (sketch && !['select', 'finishsketch', 'cancelpick', 'svg', 'dxf', 'sk_text'].includes(id)) return toast('Finish the sketch first.');
   if (id === 'remove') { lastCmd = id; return deleteSelection(); }
-  if (selFace?.curved && id === 'extrude') return toast('Press/Pull needs a flat face. Pick a flat face, or use a plane.', true);
+  if (selFace?.curved && (id === 'extrude' || id === 'sketch')) return toast('A sketch or Press/Pull needs a flat face. Pick a flat face, or use a plane.', true);
   if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
   if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
-  if (c.addinCommand) { lastCmd = id; return runAddinCommand(c); }
   if (c.feature) { lastCmd = id; return startFeature(c.feature, c.preset); }
   CUSTOM[id]?.(ev);
   if (!['select', 'finishsketch', 'cancelpick'].includes(id)) lastCmd = id;
@@ -724,16 +565,6 @@ function selectionMenu(anchor) {
   ]);
 }
 function sketchOnSelectedFace() {
-  if (selFace.curved) { // a curved face: the sketch lies on the plane that touches the surface at the clicked point
-    const n0 = selFace.tangent || selFace.normal, nl = Math.hypot(...n0), nn = n0.map((c) => +(c / nl).toFixed(6)), h = Math.hypot(nn[0], nn[1]);
-    const xdir = h < 0.01 ? [1, 0, 0] : [-nn[1] / h, nn[0] / h, 0].map((q) => +q.toFixed(6)); // along the surface's horizontal when it has one
-    const origin = selFace.point.map((c) => +c.toFixed(4));
-    selFace = null; vp.showFaces([], null);
-    sketch = { picking: true, index: doc.marker };
-    toast('Sketch placed on the plane touching the curved face at the point you clicked.');
-    enterSketch(sketch.index, true, { plane: 'custom', origin, normal: nn, xdir });
-    return;
-  }
   const n = selFace.normal.map((c) => (Math.abs(c) < 1e-6 ? 0 : +c.toFixed(6)));
   const d = n[0] * selFace.point[0] + n[1] * selFace.point[1] + n[2] * selFace.point[2];
   const nl = Math.hypot(...n), nn = n.map((c) => c / nl);
@@ -803,13 +634,6 @@ function renderTree() {
     });
     const planes = doc.features.map((f, i) => [f, i]).filter(([f, i]) => (f.type === 'plane' || f.type === 'axis' || f.type === 'cpoint') && i < limit());
     if (planes.length) folder(1, 'construction', 'Construction', 'folder', {}, () => planes.forEach(([f]) => R(2, f.name, { kind: f.type === 'plane' ? 'plane' : f.type === 'axis' ? 'axis' : 'point', eye: !planeHidden.has(f.id), sel: selSet.has(f.id), onEye: () => { planeHidden.has(f.id) ? planeHidden.delete(f.id) : planeHidden.add(f.id); refresh(); }, click: (ev) => selectFeature(f.id, ev), dbl: () => editFeature(featureIndex(f.id)) })));
-    if (sec) {
-      const anyOn = sec.planes.some((q) => q.on) || !!sec.box?.on, redraw = () => { applySection(); renderTree(); if ($('#sa-root')) renderSectionPanel(); };
-      folder(1, 'analysis', 'Analysis', 'folder', { eye: anyOn, onEye: () => { const on = !anyOn; sec.planes.forEach((q) => (q.on = on)); if (sec.box) sec.box.on = on; redraw(); } }, () => {
-        if (sec.box) R(2, 'Section box', { kind: 'plane', eye: sec.box.on, onEye: () => { sec.box.on = !sec.box.on; redraw(); }, click: () => showSection() });
-        else sec.planes.forEach((q) => R(2, `Section: ${secSrcName(q.src)}`, { kind: 'plane', eye: q.on, onEye: () => { q.on = !q.on; redraw(); }, click: () => showSection() }));
-      });
-    }
     if ((doc.canvases || []).length) folder(1, 'canvases', 'Canvases', 'folder', {}, () => doc.canvases.forEach((c) => R(2, c.name, { kind: 'camera', ctx: { kind: 'canvas', id: c.id }, eye: !canvasHidden.has(c.id), onEye: () => { canvasHidden.has(c.id) ? canvasHidden.delete(c.id) : canvasHidden.add(c.id); refresh(); }, dbl: () => showCanvasDialog(c) })));
     if ((doc.params || []).length) folder(1, 'params', 'Parameters', 'gear', {}, () => { const ac = (doc.configs || []).find((c) => c.id === doc.activeConfig); if (ac) R(2, `Configuration: ${ac.name}`, { kind: 'file', dim: true }); doc.params.forEach((p) => R(2, p.name, { kind: 'file', val: paramState.errors[p.name] ? '⚠' : `= ${paramShow(p, paramState.values[p.name])}`, click: openParameters })); });
     const bodyRow = (b, d) => R(d, b.name, { kind: 'body', ctx: { kind: 'body', id: b.id }, eye: !hiddenBodies.has(b.id), sel: vp.selected.has(b.id), onEye: () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); refresh(); }, click: (ev) => selectBody(b.id, ev.shiftKey) });
@@ -1368,14 +1192,14 @@ function startFeature(key, overrides = {}) {
   const params = { ...def.make(c), ...overrides };
   if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
   if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
-  if (selFace?.curved && !selEdges.length && ['fillet', 'chamfer', 'presspull', 'hole', 'shell', 'draft'].includes(key) && !(key === 'shell' && selFace.brepFace)) return toast('That tool needs a flat face (or edges). A curved face can be given an appearance.', true);
+  if (selFace?.curved && !selEdges.length && ['fillet', 'chamfer', 'presspull', 'hole', 'shell', 'draft'].includes(key)) return toast('That tool needs a flat face (or edges). A curved face can be given an appearance.', true);
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
     params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
     if (!params.edges.length) toast('That face has no edges to round.', true);
     selEdges = []; edgeHover = null; selFace = null; vp.showFaces([], null); updateEdgeView();
   }
   if (selFace) {
-    const fc = { point: selFace.point, normal: selFace.normal, ...(selFace.brepFace ? { brepFace: selFace.brepFace } : {}) }; // the face key lets the exact kernel find the face again; the point and normal serve the mesh kernel
+    const fc = { point: selFace.point, normal: selFace.normal };
     if (key === 'presspull') { params.face = fc; params.body = selFace.id; }
     else if (key === 'hole') { params.pos = [...selFace.point]; params.dir = [...selFace.normal]; }
     else if (key === 'shell') { params.body = selFace.id; params.open = [fc]; }
@@ -1609,8 +1433,8 @@ function renderDialog() {
       ctl.innerHTML = `<div class="profrow"><div class="selbtn on"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 3l12 11.5-5.2.7 3 5.6-2.6 1.4-3-5.7-4.2 3.2z" fill="#fff" stroke="#333" stroke-width="1.4" stroke-linejoin="round"/></svg><span>${items.length ? `${chosen} selected` : 'No closed profiles'}</span></div><button type="button" class="xclear" title="Reset to the default selection">×</button></div>`;
       ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
     } else if (fld.type === 'bodies') {
-      const avail = bodiesBefore(idx).filter((q) => q.id !== f.params.target), cur = Array.isArray(val) ? val : val ? [val] : []; // older designs stored one body as text
-      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${cur.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
+      const avail = bodiesBefore(idx);
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
       ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'surfaces') {
       const avail = result.surfSnaps?.[idx] || result.surfaces.map((q) => ({ id: q.id, name: q.name }));
@@ -1631,10 +1455,6 @@ function renderDialog() {
       ctl.querySelector('#p3-clear').onclick = () => { set([]); renderDialog(); };
       ctl.querySelectorAll('input[data-k]').forEach((inp) => (inp.onchange = () => { const k = +inp.dataset.k, a = +inp.dataset.a, n = [...pts]; n[k] = [...n[k]]; n[k][a] = (+inp.value || 0) * f2; set(n); }));
       ctl.querySelectorAll('.p3-del').forEach((b2) => (b2.onclick = () => { set(pts.filter((_, k) => k !== +b2.dataset.k)); renderDialog(); }));
-    } else if (fld.type === 'text') {
-      const inp = document.createElement('input'); inp.type = 'text'; inp.value = val ?? ''; inp.maxLength = 80; inp.setAttribute('aria-label', fld.label); inp.autocomplete = 'off'; inp.spellcheck = false;
-      inp.oninput = () => set(inp.value);
-      ctl.appendChild(inp);
     } else if (fld.type === 'bool') {
       const c = document.createElement('input'); c.type = 'checkbox'; c.setAttribute('aria-label', fld.label); c.checked = !!val; c.onchange = () => { set(c.checked); if (['thread', 'through', 'internal'].includes(fld.key)) rerender(); }; ctl.appendChild(c);
     } else if (fld.type === 'sketchlist') {
@@ -1741,7 +1561,7 @@ function dialogPick(e) {
   const tg = vp.pickPlanarFace(e);
   if (!tg) return;
   if (tg.curved) return toast('Pick a flat (planar) face.', true);
-  const entry = { point: tg.point, normal: tg.normal, ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) };
+  const entry = { point: tg.point, normal: tg.normal };
   if (pk.kind === 'face') patchParams(i, { [pk.key]: entry, body: tg.id });
   else {
     const cur = f.params[pk.key] || [];
@@ -1852,7 +1672,6 @@ function closeDialog(ok, force = false) {
   if (ok) {
     const f = doc.features[dialog.index];
     if (f.type === 'extrude' && f.params.extent === 'distance') LAST.extrude = Math.abs((resolvedMap[f.id] || f.params).distance) || undefined;
-    if (f.by && JSON.stringify(f.params) !== JSON.stringify(pre.features[dialog.index]?.params)) { const nf = { ...f }; delete nf.by; doc.features[dialog.index] = nf; } // you changed it: it is yours now
     pushUndo(pre);
   } else restore(pre);
   dialog = null;
@@ -1952,7 +1771,7 @@ function sketchStateChip(shapes, cons) {
   const d = definedState(shapes, cons);
   if (d.state === 'empty') return '';
   const label = { defined: 'Fully defined', partial: 'Partly defined', free: 'Not defined yet' }[d.state];
-  const tip = d.state === 'defined' ? 'Every size and direction is locked by a dimension expression or a constraint.' : `Not locked yet: ${d.free.slice(0, 12).join(', ')}${d.free.length > 12 ? '…' : ''}. Lock a size by typing a parameter in its dimension, or add a constraint. Where the first shape sits is not counted.`;
+  const tip = d.state === 'defined' ? 'Every size and direction is locked by a dimension expression or a constraint.' : `Not locked yet: ${d.free.slice(0, 12).join(', ')}${d.free.length > 12 ? '…' : ''}. Lock a size by typing a parameter in its dimension, or add a constraint. The sketch's position is not counted.`;
   return `<div class="sk-state sk-${d.state}" title="${esc(tip)}"><span class="dot"></span>${label} <small>${d.locked} of ${d.total} locked</small></div>`;
 }
 function renderSketchPanel() {
@@ -2312,7 +2131,7 @@ function measureClick(e) {
 function showInterference() {
   if (dialog || sketch) return;
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id));
-  const hits = bodies.length > 1 ? interferenceOf(bodies) : [];
+  const hits = bodies.length > 1 ? interference(bodies) : [];
   const wrap = $('#props-wrap');
   wrap.innerHTML = `<div class="props"><div class="title">${ficon('combine', 20)}INTERFERENCE</div><div class="body">${
     bodies.length < 2 ? 'Needs at least two visible bodies.' : hits.length ? `<div class="stat"><span>Interfering pairs</span><b class="warn">${hits.length}</b></div>` + hits.map((h) => `<div class="sep"></div><b>${esc(h.a.name)} ∩ ${esc(h.b.name)}</b><div class="stat"><span>Overlap volume</span><b>${fmtVolume(h.volume)}</b></div>`).join('') : '<div class="stat"><span>Result</span><b class="ok">No interference</b></div>'
@@ -2344,13 +2163,13 @@ function showDriveJoints() {
   $('#i-close').onclick = () => { wrap.classList.remove('open'); };
 }
 /** The stored appearance of a face (doc.faceAppearance), matched by body and plane. */
-const faceEntryIdx = (f) => (doc.faceAppearance || []).findIndex((e) => e.body === f.id && (f.brepFace && e.brepFace ? e.brepFace === f.brepFace : true) && (f.curved ? e.curved && Math.hypot(e.point[0] - f.point[0], e.point[1] - f.point[1], e.point[2] - f.point[2]) < 0.05 : !e.curved) && e.normal[0] * f.normal[0] + e.normal[1] * f.normal[1] + e.normal[2] * f.normal[2] > 0.999 && Math.abs((e.point[0] - f.point[0]) * f.normal[0] + (e.point[1] - f.point[1]) * f.normal[1] + (e.point[2] - f.point[2]) * f.normal[2]) < 0.05);
+const faceEntryIdx = (f) => (doc.faceAppearance || []).findIndex((e) => e.body === f.id && (f.curved ? e.curved && Math.hypot(e.point[0] - f.point[0], e.point[1] - f.point[1], e.point[2] - f.point[2]) < 0.05 : !e.curved) && e.normal[0] * f.normal[0] + e.normal[1] * f.normal[1] + e.normal[2] * f.normal[2] > 0.999 && Math.abs((e.point[0] - f.point[0]) * f.normal[0] + (e.point[1] - f.point[1]) * f.normal[1] + (e.point[2] - f.point[2]) * f.normal[2]) < 0.05);
 const texPreview = (t) => { try { const c = document.createElement('canvas'); c.width = c.height = 48; const x = c.getContext('2d'); const big = document.createElement('canvas'); big.width = big.height = 256; t.draw(big.getContext('2d'), 256); x.fillStyle = x.createPattern(big, 'repeat'); x.scale(48 / 128, 48 / 128); x.fillRect(0, 0, 128, 128); return c.toDataURL(); } catch { return ''; } };
 function setFaceAppearance(face, val) {
   const any = !!(val.material || val.color || val.texture);
   mutate(() => {
     const list = (doc.faceAppearance || []).map((x) => ({ ...x })), i = faceEntryIdx(face);
-    if (!any) { if (i >= 0) list.splice(i, 1); } else { const ent = { body: face.id, point: [...face.point], normal: [...face.normal], ...(face.curved ? { curved: true } : {}), ...(face.brepFace ? { brepFace: face.brepFace } : {}), ...val }; if (i >= 0) list[i] = ent; else list.push(ent); }
+    if (!any) { if (i >= 0) list.splice(i, 1); } else { const ent = { body: face.id, point: [...face.point], normal: [...face.normal], ...(face.curved ? { curved: true } : {}), ...val }; if (i >= 0) list[i] = ent; else list.push(ent); }
     doc.faceAppearance = list;
   });
 }
@@ -2364,7 +2183,7 @@ function paintClick(e) {
   if (paintMode.target === 'faces') {
     const tg = vp.pickFace(e);
     if (!tg?.face) return;
-    setFaceAppearance({ id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}), ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) }, paintMode.val);
+    setFaceAppearance({ id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) }, paintMode.val);
   } else {
     const hit = vp.pickBody(e);
     if (hit) setBodyAppearance([hit.id], paintMode.val);
@@ -2528,183 +2347,30 @@ new MutationObserver(() => {
   b.onclick = () => $('#props-wrap').querySelector(PANEL_CLOSE)?.click();
   t.appendChild(b);
 }).observe($('#props-wrap'), { childList: true, subtree: true });
-// ---- section analysis: up to three cutting planes (an origin plane, a construction plane or a flat face) or a box, view only
-const SEC_MAX = 3;
-const SEC_AXIS = { X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] }, SEC_AXIS_NAME = { X: 'YZ plane', Y: 'XZ plane', Z: 'XY plane' };
-let sec = null; // { planes: [{ src, mm, expr, flip, on }], box: null | { c: [{ mm, expr }], h: [{ mm, expr }], on } }; it outlives the panel and is not saved with the design
-let secPick = null; // choosing a plane: { index } (null: not choosing), or { index, face: true } while waiting for a click on a flat face
-/** Where a plane source lies now: { o, n } (n unit), or null when it is gone. */
-function secBase(src) {
-  if (src.kind === 'axis') return { o: [0, 0, 0], n: SEC_AXIS[src.axis] };
-  if (src.kind === 'plane') { const q = resolvedMap[src.id]; if (!q?.origin || !q?.normal) return null; const l = Math.hypot(...q.normal); return l > 1e-9 ? { o: q.origin.map(Number), n: q.normal.map((v) => v / l) } : null; }
-  const l = Math.hypot(...src.normal); return l > 1e-9 ? { o: src.point, n: src.normal.map((v) => v / l) } : null; // a face, or a plane an assistant sent
-}
-const secSrcName = (src) => (src.kind === 'axis' ? SEC_AXIS_NAME[src.axis] : src.kind === 'plane' ? (doc.features.find((f) => f.id === src.id)?.name || 'Plane') : src.kind === 'custom' ? 'Assistant plane' : `Face of ${result.bodies.find((b) => b.id === src.body)?.name || 'a body'}`);
-/** A length typed in the panel as { mm, expr } (a plain number in the display unit, or an expression); null when it does not parse. */
-function secLen(text, was) {
-  const t = String(text).trim();
-  if (!t) return { mm: 0, expr: null };
-  if (isPlainNumber(t)) return { mm: parseFloat(t) * lenF(), expr: null };
-  try { return { mm: evalExpr(t, paramScope, 'len'), expr: t }; } catch { return null; }
-}
-const secShow = (v) => v.expr ?? dispStr(v.mm);
-function secNewPlane(src) {
-  const base = secBase(src), b = vp.bounds(), c = b.getCenter(new THREE.Vector3()).toArray();
-  const mid = base ? [0, 1, 2].reduce((d, k) => d + (c[k] - base.o[k]) * base.n[k], 0) : 0; // through the middle of the model, parallel to the plane
-  return { src, mm: +mid.toFixed(3), expr: null, flip: false, on: true };
-}
-/** The cuts of the section as section.js has them, plus where to draw each one's arrow and what a drag of it changes. */
-function secCuts() {
-  if (!sec) return [];
-  const out = [], b = vp.bounds(), c = b.getCenter(new THREE.Vector3()).toArray();
-  sec.planes.forEach((p, i) => {
-    if (!p.on) return;
-    const base = secBase(p.src); if (!base) return;
-    const o = base.o.map((v, k) => v + base.n[k] * p.mm), n = p.flip ? base.n.map((v) => -v) : base.n;
-    const d = [0, 1, 2].reduce((t, k) => t + (c[k] - o[k]) * base.n[k], 0);
-    out.push({ o, n, arrow: o.map((v, k) => v + base.n[k] * d), kind: 'plane', i, bn: base.n });
-  });
-  if (sec.box?.on) {
-    const cc = sec.box.c.map((v) => v.mm), hh = sec.box.h.map((v) => v.mm);
-    boxCuts(cc, hh).forEach((q, j) => out.push({ ...q, arrow: q.o, kind: 'box', axis: Math.floor(j / 2), sign: j % 2 ? -1 : 1 }));
-  }
-  return out;
-}
-function applySection() {
-  if (!vp) return;
-  const cuts = result.bodies.length ? secCuts() : [];
-  secLastCuts = cuts;
-  vp.setSections(cuts.map(({ o, n }) => ({ o, n })));
-  vp.setSectionHandles(cuts.length ? cuts.map((q) => ({ base: q.arrow, n: q.n })) : null);
-}
-let secLastCuts = [];
-function secClose() { $('#props-wrap').classList.remove('open'); secPick = null; renderTree(); }
-function secEnd() { sec = null; secPick = null; applySection(); $('#props-wrap').classList.remove('open'); renderTree(); }
 function showSection() {
   if (dialog || sketch) return;
   if (!result.bodies.length) return toast('Nothing to section yet.', true);
-  if (!sec) sec = { planes: [secNewPlane({ kind: 'axis', axis: 'Z' })], box: null };
-  secPick = null;
-  $('#props-wrap').classList.add('open');
-  renderSectionPanel(); applySection(); renderTree();
-}
-/** Click on a flat face while choosing one for the section. */
-function secFacePick(e) {
-  const tg = vp.pickPlanarFace(e);
-  if (!tg?.face) { toast('Click a flat face, or choose a plane in the panel.'); return; }
-  secChoose({ kind: 'face', body: tg.id, point: tg.point, normal: tg.normal });
-}
-function secChoose(src) {
-  const i = secPick.index, np = secNewPlane(src);
-  if (i === 'add') sec.planes.push(np); else sec.planes[i] = { ...np, flip: sec.planes[i].flip, on: sec.planes[i].on };
-  sec.box = null; sec.saved = null; secPick = null; vp.showFaces([], null);
-  renderSectionPanel(); applySection(); renderTree();
-}
-/** A section an assistant asked for (the forms of section.js): planes become rows, a box becomes the box. */
-function assistantSection(spec) {
-  const items = [].concat(spec), planes = [];
-  let box = null;
-  for (const it of items) {
-    if (it?.box) { const q = boxCuts(it.box.center, it.box.half); if (!q.length) throw new Error('a section box needs a centre and positive half sizes'); box = { c: it.box.center.map((v) => ({ mm: +v, expr: null })), h: it.box.half.map((v) => ({ mm: +v, expr: null })), on: true }; continue; }
-    for (const c of cutsFromSpec(it)) planes.push({ src: { kind: 'custom', point: c.o, normal: c.n }, mm: 0, expr: null, flip: false, on: true });
-  }
-  if (planes.length > SEC_MAX) throw new Error(`at most ${SEC_MAX} planes, or a box`);
-  sec = { planes: box ? [] : planes, box };
-  if (!sec.planes.length && !box) { sec = null; return; }
-  applySection(); renderTree();
-  if ($('#sa-root')) renderSectionPanel();
-}
-function renderSectionPanel() {
-  const wrap = $('#props-wrap'), u = getUnits();
-  const body = [];
-  if (secPick) {
-    const cps = resolvedFeats.filter((f) => f.type === 'plane' && !f.suppressed && resolvedMap[f.id]?.origin && !resolvedMap[f.id]?.error);
-    body.push(`<div class="note">Choose a plane, a construction plane or a flat face.</div><div class="sa-choices">
-      ${['Z', 'Y', 'X'].map((a) => `<button type="button" class="btn sm" data-src="axis:${a}">${SEC_AXIS_NAME[a]}</button>`).join('')}
-      ${cps.map((f) => `<button type="button" class="btn sm" data-src="plane:${esc(f.id)}">${esc(f.name)}</button>`).join('')}
-      <button type="button" class="btn sm${secPick.face ? ' primary' : ''}" data-src="face">A flat face…</button></div>
-      ${secPick.face ? '<div class="note">Click a flat face on the model.</div>' : ''}
-      <div class="foot-in"><button type="button" class="btn sm" id="sa-pcancel">Cancel</button></div>`);
-  } else {
-    if (sec.box) {
-      const ax = ['X', 'Y', 'Z'];
-      body.push(`<div class="sa-box">${ax.map((a, k) => `<div class="row"><label>Centre ${a} (${u})</label><input type="text" data-box="c${k}" value="${esc(secShow(sec.box.c[k]))}"></div>`).join('')}
-        ${ax.map((a, k) => `<div class="row"><label>Half-size ${a} (${u})</label><input type="text" data-box="h${k}" value="${esc(secShow(sec.box.h[k]))}"></div>`).join('')}
-        <div class="row"><label>Show section</label><input type="checkbox" id="sa-boxon"${sec.box.on ? ' checked' : ''}></div></div>`);
-    } else {
-      sec.planes.forEach((p, i) => {
-        const gone = !secBase(p.src);
-        body.push(`<div class="sa-plane" data-i="${i}">
-          <div class="row"><label>Plane ${sec.planes.length > 1 ? i + 1 : ''}</label><span class="sa-name${gone ? ' warn' : ''}">${esc(secSrcName(p.src))}${gone ? ' (gone)' : ''}</span><button type="button" class="btn sm" data-act="change">Change</button>${sec.planes.length > 1 ? '<button type="button" class="btn sm" data-act="remove">Remove</button>' : ''}</div>
-          <div class="row"><label>Offset (${u})</label><input type="text" class="sa-off" value="${esc(secShow(p))}" aria-label="Offset"></div>
-          <div class="row"><label>Flip side</label><input type="checkbox" class="sa-flip"${p.flip ? ' checked' : ''}></div>
-          <div class="row"><label>Show section</label><input type="checkbox" class="sa-on"${p.on ? ' checked' : ''}></div></div>`);
-      });
-    }
-    body.push(`<div class="sa-add">${!sec.box && sec.planes.length < SEC_MAX ? '<button type="button" class="btn sm" id="sa-add">Add plane</button>' : ''}${!sec.box ? '<button type="button" class="btn sm" id="sa-box">Box</button>' : '<button type="button" class="btn sm" id="sa-planes">Back to planes</button>'}</div>
-      <div class="note">${sec.box ? 'A box is six planes: what is outside it is cut away. Drag an arrow to move that face.' : `The model is cut away on the side each arrow points to. Drag an arrow to move its cut. Up to ${SEC_MAX} planes, or a box. Nothing is added to the timeline.`}</div>`);
-  }
-  wrap.innerHTML = `<div class="props" id="sa-root"><div class="title">${ficon('sectionan', 20)}SECTION ANALYSIS</div><div class="body">${body.join('')}</div>
-    <div class="foot"><button class="btn" id="sa-remove">Remove</button><button class="btn primary" id="i-close">Done</button></div></div>`;
-  $('#i-close').onclick = () => secClose();
-  $('#sa-remove').onclick = () => secEnd();
-  if (secPick) {
-    wrap.querySelectorAll('[data-src]').forEach((bt) => (bt.onclick = () => {
-      const [k, id] = bt.dataset.src.split(':');
-      if (k === 'face') { secPick.face = true; renderSectionPanel(); return; }
-      secChoose(k === 'axis' ? { kind: 'axis', axis: id } : { kind: 'plane', id });
-    }));
-    $('#sa-pcancel').onclick = () => { secPick = null; vp.showFaces([], null); renderSectionPanel(); };
-    return;
-  }
-  const bad = (el, v) => el.classList.toggle('bad', !v);
-  wrap.querySelectorAll('.sa-plane').forEach((row) => {
-    const p = sec.planes[+row.dataset.i];
-    row.querySelector('.sa-off').oninput = (e) => { const v = secLen(e.target.value); bad(e.target, v); if (v) { p.mm = v.mm; p.expr = v.expr; applySection(); } };
-    row.querySelector('.sa-flip').onchange = (e) => { p.flip = e.target.checked; applySection(); };
-    row.querySelector('.sa-on').onchange = (e) => { p.on = e.target.checked; applySection(); renderTree(); };
-    row.querySelector('[data-act="change"]').onclick = () => { secPick = { index: +row.dataset.i }; renderSectionPanel(); };
-    row.querySelector('[data-act="remove"]')?.addEventListener('click', () => { sec.planes.splice(+row.dataset.i, 1); renderSectionPanel(); applySection(); renderTree(); });
-  });
-  wrap.querySelectorAll('[data-box]').forEach((inp) => {
-    inp.oninput = (e) => {
-      const [t, k] = [inp.dataset.box[0], +inp.dataset.box[1]], v = secLen(e.target.value);
-      bad(e.target, v && (t === 'c' || v.mm > 0)); if (!v || (t === 'h' && !(v.mm > 0))) return;
-      sec.box[t][k] = v; applySection();
-    };
-  });
-  $('#sa-boxon')?.addEventListener('change', (e) => { sec.box.on = e.target.checked; applySection(); renderTree(); });
-  $('#sa-add')?.addEventListener('click', () => { secPick = { index: 'add' }; renderSectionPanel(); });
-  $('#sa-box')?.addEventListener('click', () => {
-    const b = vp.bounds(), c = b.getCenter(new THREE.Vector3()).toArray(), h = b.getSize(new THREE.Vector3()).toArray().map((v) => Math.max(v * 0.3, 0.5));
-    sec.saved = sec.planes; sec.planes = []; // a box and planes exclude each other; the planes come back with "Back to planes"
-    sec.box = { c: c.map((v) => ({ mm: +v.toFixed(3), expr: null })), h: h.map((v) => ({ mm: +v.toFixed(3), expr: null })), on: true }; renderSectionPanel(); applySection(); renderTree();
-  });
-  $('#sa-planes')?.addEventListener('click', () => { sec.box = null; sec.planes = sec.saved?.length ? sec.saved : [secNewPlane({ kind: 'axis', axis: 'Z' })]; sec.saved = null; renderSectionPanel(); applySection(); renderTree(); });
-}
-/** Dragging a section arrow in the view moves its plane (or a box's face). */
-function bindSectionDrag() {
-  const cv = $('#gl');
-  $('#viewport').addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || e.target !== cv || !sec || dialog || sketch) return;
-    const i = vp.pickSectionHandle(e);
-    if (i < 0) return;
-    const cut = secLastCuts[i]; if (!cut) return;
-    e.stopPropagation(); e.preventDefault();
-    vp.controls.enabled = false;
-    const d0 = vp.sectionHandleDistance(e, i), p = cut.kind === 'plane' ? sec.planes[cut.i] : null, box = cut.kind === 'box' ? sec.box : null;
-    const start = p ? { mm: p.mm } : { c: box.c[cut.axis].mm, h: box.h[cut.axis].mm };
-    const move = (ev) => {
-      const d1 = vp.sectionHandleDistance(ev, i); if (d1 == null || d0 == null) return;
-      let d = d1 - d0; if (!ev.shiftKey) d = Math.round(d * 2) / 2;
-      if (p) { p.mm = +(start.mm + (p.flip ? -d : d)).toFixed(3); p.expr = null; }
-      else { const half = start.h + d / 2; if (!(half > 0.01)) return; box.h[cut.axis] = { mm: +half.toFixed(3), expr: null }; box.c[cut.axis] = { mm: +(start.c + (cut.sign * d) / 2).toFixed(3), expr: null }; }
-      applySection(); // the arrow follows the plane because it is rebuilt from it
-    };
-    const up = () => { removeEventListener('pointermove', move); vp.controls.enabled = true; if ($('#sa-root')) renderSectionPanel(); };
-    addEventListener('pointermove', move);
-    addEventListener('pointerup', up, { once: true });
-  }, true);
+  const wrap = $('#props-wrap'), st = { axis: 'Z', offset: 0, flip: false };
+  const range = () => { const b = vp.bounds(), k = 'xyz'['XYZ'.indexOf(st.axis)]; return [b.min[k], b.max[k]]; };
+  const apply = () => vp.setSection({ ...st });
+  const render = () => {
+    const [lo, hi] = range(), u = getUnits();
+    st.offset = Math.min(hi, Math.max(lo, st.offset));
+    wrap.innerHTML = `<div class="props"><div class="title">${ficon('sectionan', 20)}SECTION ANALYSIS</div><div class="body">
+      <div class="row"><label>Plane</label><select id="sa-ax"><option value="X"${st.axis === 'X' ? ' selected' : ''}>YZ (normal X)</option><option value="Y"${st.axis === 'Y' ? ' selected' : ''}>XZ (normal Y)</option><option value="Z"${st.axis === 'Z' ? ' selected' : ''}>XY (normal Z)</option></select></div>
+      <div class="row"><label>Offset (${u})</label><input id="sa-off" type="number" step="any" value="${+(st.offset / lenF()).toFixed(4)}"></div>
+      <input id="sa-sl" type="range" min="${lo}" max="${hi}" step="${Math.max((hi - lo) / 400, 0.01)}" value="${st.offset}" class="w100">
+      <div class="row"><label>Flip side</label><input id="sa-fl" type="checkbox"${st.flip ? ' checked' : ''}></div>
+      <div class="note">Hides everything beyond the plane and caps the cut. Nothing is added to the timeline.</div></div>
+      <div class="foot"><button class="btn primary" id="i-close">Done</button></div></div>`;
+    $('#sa-ax').onchange = (e) => { st.axis = e.target.value; const [l, h] = range(); st.offset = (l + h) / 2; render(); apply(); };
+    $('#sa-off').oninput = (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { st.offset = v * lenF(); $('#sa-sl').value = st.offset; apply(); } };
+    $('#sa-sl').oninput = (e) => { st.offset = +e.target.value; $('#sa-off').value = +(st.offset / lenF()).toFixed(4); apply(); };
+    $('#sa-fl').onchange = (e) => { st.flip = e.target.checked; apply(); };
+    $('#i-close').onclick = () => { wrap.classList.remove('open'); vp.setSection(null); };
+  };
+  { const [l, h] = range(); st.offset = (l + h) / 2; }
+  render(); wrap.classList.add('open'); apply();
 }
 function pick2D(accept) { const i = $('#file-2d'); i.accept = accept; i.click(); }
 /** Add imported 2D shapes to the open sketch, or start a new one on the XY plane first. */
@@ -2818,8 +2484,8 @@ const BG = createBeginner({
     const sks = doc.features.filter((f) => f.type === 'sketch');
     return { sketch: !!sketch, picking: !!sketch?.picking, shapes: sketch && !sketch.picking ? (curSketch()?.params.shapes || []).length : 0, hasSketch: sks.length > 0, hasShapes: sks.some((f) => (f.params.shapes || []).length > 0), has: (t) => doc.features.some((f) => f.type === t && !result.errors[f.id]), dialog: !!dialog, exported: BG.exported() };
   },
-  nameNow: () => nameNow(), kernel: () => ({ ok: kernelOk, n: kernelBytes.n, total: kernelBytes.total || __WASM_BYTES__ }),
-  canConnect: () => !!(acct.server && acct.user && acct.mcp), connectAssistant: () => connectAssistant(),
+  nameNow: () => nameNow(),
+  canConnect: () => !!(acct.server && acct.user), connectAssistant: () => connectAssistant(),
   run: (id) => runCommand(id), renderRibbon: () => renderRibbon(), afterSetup: () => { renderRibbon(); if (BG.customizerOpen()) BG.customizer(); },
 });
 /** The AI assistants page of the Account window: the server address, tokens and a step-by-step guide for each assistant. */
@@ -2832,7 +2498,6 @@ function connectAssistant() {
 async function openTemplate(id) {
   const t = templateById(id);
   if (!t || busy()) return;
-  if (!kernelOk) return toast('Still loading the geometry kernel. Try again in a moment.');
   const td = templateDoc(id, designProfileForNew());
   const apply = (name) => {
     doc.name = name; doc.features = td.features; doc.marker = td.marker; doc.nextId = td.nextId; doc.params = td.params; doc.template = td.template; doc.units = 'mm';
@@ -2952,28 +2617,14 @@ const EXPORT_FORMATS = [
   ['3mf', '3MF', 'Recommended for 3D printing. Keeps units and colours, and opens in every slicer.'],
   ['stl', 'STL', 'Works everywhere, but has no units or colours.'],
   ['obj', 'OBJ', ''],
-  ['step', 'STEP', 'For other CAD programs. Exact (true cylinders, fillets and holes) when the design uses only sketches, extrude, revolve, combine, fillet, chamfer, holes, mirror and patterns; otherwise curved surfaces are small flat facets, and you are told which feature caused it.'],
+  ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
   ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
 ];
-/** The formats Export offers: the built-in ones, then the ones add-ins add. */
-function exportFormats() { return [...EXPORT_FORMATS, ...(addins ? addins.exporters().map((e) => [e.value, e.label, e.description, e.extension]) : [])]; }
-async function exportViaAddin(fmt, name, selectedOnly) {
-  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id)));
-  if (!bodies.length) return toast('Nothing to export.', true);
-  try {
-    const out = await addins.runExporter(fmt, { name, units: getUnits(), parameters: (doc.params || []).map((p) => ({ name: p.name, expr: p.expr })), bodies: bodies.map((b) => ({ id: b.id, name: b.name, color: look((doc.appearance || {})[b.id]).color, verts: b.verts, tris: b.tris })) });
-    const ext = (out.name.match(/\.[A-Za-z0-9]+$/) || [''])[0];
-    download(new Blob([out.text !== undefined ? out.text : out.bytes], { type: out.mime || 'application/octet-stream' }), `${name}${ext}`);
-    toast(`Exported "${name}${ext}"`);
-  } catch (e) { toast(`Export failed: ${e.message}`, true); }
-}
 function exportFile(fmt, name, selectedOnly, split = false) {
-  if (fmt.startsWith('addin:')) return exportViaAddin(fmt, name, selectedOnly);
   if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: look((doc.appearance || {})[b.id]).color }));
   if (!bodies.length) return toast('Nothing to export.', true);
-  if (fmt === 'step') { exportStep(bodies, name, split); return; }
-  const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ }[fmt];
+  const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
   if (split && bodies.length > 1) { // one file per body: "Name_v3_Lid.stl", numbered if two bodies share a name
     const used = new Map();
     bodies.forEach((b, i) => {
@@ -2985,33 +2636,7 @@ function exportFile(fmt, name, selectedOnly, split = false) {
     return;
   }
   download(w(bodies, name), `${name}.${fmt}`);
-  toast(`Exported ${bodies.length} ${bodies.length > 1 ? 'bodies' : 'body'} as ${fmt.toUpperCase()}`);
-}
-/**
- * STEP: exact (real planes, cylinders and fillets) when the exact kernel supports every feature of the design, otherwise the faceted file
- * with a message that names the feature that kept it from being exact. The 23 MB OpenCascade file is fetched only here, then cached.
- */
-async function exportStep(bodies, name, split) {
-  const feats = resolvedFeats.slice(0, limit());
-  const sup = brepSupport(feats);
-  const noun = `${bodies.length} ${bodies.length > 1 ? 'bodies' : 'body'}`;
-  const faceted = (why) => {
-    if (split && bodies.length > 1) bodies.forEach((b, i) => setTimeout(() => download(writeSTEP([b], `${name}_${fileSafeName(b.name) || 'body' + (i + 1)}`), `${name}_${fileSafeName(b.name) || 'body' + (i + 1)}.step`), i * 300));
-    else download(writeSTEP(bodies, name), `${name}.step`);
-    toast(`Exported ${noun} as a faceted STEP file. ${why}`);
-  };
-  if (!sup.ok) return faceted(`Not exact: ${sup.feature.name} uses ${sup.reason}, which the exact kernel does not have yet.`);
-  toast('Preparing an exact STEP file…');
-  try {
-    await loadBrep({ locateFile: () => occtUrl });
-    const groups = split && bodies.length > 1 ? bodies.map((b) => [b]) : [bodies];
-    groups.forEach((g, i) => {
-      const { blob } = exactStep(feats, { ids: g.map((b) => b.id), name });
-      const file = split && bodies.length > 1 ? `${name}_${fileSafeName(g[0].name) || 'body' + (i + 1)}` : name;
-      setTimeout(() => download(blob, `${file}.step`), i * 300);
-    });
-    toast(`Exported ${noun} as an exact STEP file`);
-  } catch (e) { console.error(e); faceted(`Not exact: ${e.message}`); }
+  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}`);
 }
 /** "_v3" for a saved design, so an exported file says which version it came from. */
 const verSuffix = () => (doc.rev ? `_v${doc.rev}` : '');
@@ -3027,7 +2652,7 @@ function exportDialog() {
   BG.noteExport();
   if (kernelBusy()) return toast('Still rebuilding the design. Try again in a moment.', true);
   let last = '3mf'; try { last = localStorage.getItem('sketchy.exportFormat') || '3mf'; } catch { /* storage unavailable */ }
-  if (!exportFormats().some((f) => f[0] === last)) last = '3mf';
+  if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = '3mf';
   const hasSel = vp.selected.size > 0;
   /** The design's name, then the body's name when only one body of several is exported, then the version: "Bracket_Lid_v3". */
   const nameFor = (selectedOnly, split = false) => {
@@ -3038,7 +2663,7 @@ function exportDialog() {
   const m = modal(`<div class="modal-title">Export</div>
     <form class="modal-body ex">
       <label>File name<input id="ex-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
-      <label>Format<select id="ex-fmt" name="fmt">${exportFormats().map(([v, l, , x]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + (x || v)})</option>`).join('')}</select></label>
+      <label>Format<select id="ex-fmt" name="fmt">${EXPORT_FORMATS.map(([v, l]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + v})</option>`).join('')}</select></label>
       <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
       <div class="ex-check" id="ex-check" aria-live="polite" hidden></div>
       <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
@@ -3049,7 +2674,7 @@ function exportDialog() {
   const form = m.el.querySelector('form'), fmtSel = m.el.querySelector('#ex-fmt');
   const sync = () => {
     const f = fmtSel.value, proj = f === 'sketchy';
-    const d = (exportFormats().find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
+    const d = (EXPORT_FORMATS.find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
     de.textContent = d; de.hidden = !d;
     m.el.querySelector('#ex-sel').disabled = proj || !hasSel; m.el.querySelector('#ex-scope').style.opacity = proj || !hasSel ? '.55' : '';
     runChecks();
@@ -3105,32 +2730,19 @@ function exportDialog() {
 /** Add one imported piece as a body: try it as it is, and repair it (weld, flip, fill holes) if that doesn't make a solid. */
 /** Rebuild the design now, and wait for it (the page rebuilds in place; a big design rebuilds in the worker). */
 async function rebuildNow() { refreshNow(); if (kernelHeavy && canWorker) await kernelIdle(); }
-async function importPart(part, prog = null) {
-  if (part.stepText && brepReady()) { // a STEP file keeps its true surfaces (the exact kernel reads it)
-    const pre = snapshot(), f = { id: 'f' + doc.nextId++, type: 'importstep', name: part.name, params: { data: part.stepText } };
-    doc.features.splice(doc.marker, 0, f); doc.marker++;
-    pushUndo(pre);
-    await rebuildNow();
-    if (!result.errors[f.id]) return { tris: part.soup.length / 9, note: 'kept as exact surfaces', exact: true, id: f.id };
-    restore(pre); undoStack.pop(); // could not read it exactly: fall back to its triangles
-  }
+async function importPart(part) {
   let soup = part.soup;
   const attempt = async (data) => {
-    const pre = snapshot(), stops0 = kw.stops || 0;
-    if (data.length / 9 > 2000 && canWorker && !kernelHeavy) { kernelHeavy = true; clearKernelCache(); ensureKernelWorker(); } // sewing a big mesh takes seconds: not on the page, so that it can show progress and be cancelled
-    const f = { id: 'f' + doc.nextId++, type: 'import', name: part.name, params: { data: encodeFloats(data), tris: data.length / 9, ...(part.reduce ? { reduce: part.reduce } : {}) } };
+    const pre = snapshot();
+    const f = { id: 'f' + doc.nextId++, type: 'import', name: part.name, params: { data: encodeFloats(data), tris: data.length / 9 } };
     doc.features.splice(doc.marker, 0, f); doc.marker++;
     pushUndo(pre);
-    if (prog) { prog.onCancel = () => { if (kernelBusy()) stopKernelWorker(); }; kw.onProgress = (m) => prog.set(`${part.name}: ${progressText(m)}`); }
     await rebuildNow();
-    kw.onProgress = null; if (prog) prog.onCancel = null;
-    if (prog?.cancelled || (kw.stops || 0) !== stops0) { restore(pre); undoStack.pop(); refresh(); return { cancelled: true }; }
     if (result.errors[f.id]) { restore(pre); undoStack.pop(); return { err: result.errors[f.id] }; }
     if (part.color) doc.appearance = { ...(doc.appearance || {}), [f.id]: part.color };
     return { id: f.id };
   };
   let r = await attempt(soup), note = '';
-  if (r.err && /flat faces once neighbouring/.test(r.err)) return { err: r.err, limit: true }; // too many faces: repairing cannot help, reducing can
   if (r.err) {
     const fixed = repairSoup(soup);
     r = await attempt(fixed.soup);
@@ -3173,8 +2785,8 @@ function repairDialog(part, why = '') {
   });
 }
 // ---- importing big models: say what is happening, offer to cancel, and offer to reduce a very dense mesh
-const IMPORT_WARN = 30000; // triangles: above this a mesh takes long to sew into a solid (about 0.2 s per thousand faces, 6 s at 30,000) and may be over the 32,000 face limit
-const IMPORT_TARGET = 20000;
+const IMPORT_WARN = 300000; // triangles: above this a model makes editing noticeably slower
+const IMPORT_TARGET = 250000;
 const tick = () => new Promise((r) => setTimeout(r, 30)); // let the page paint between steps
 function importProgress(name) {
   const el = document.createElement('div');
@@ -3182,47 +2794,50 @@ function importProgress(name) {
   el.innerHTML = '<span class="spin"></span><span id="imp-text"></span><button type="button" class="btn small" id="imp-cancel">Cancel</button>';
   $('#viewport').appendChild(el);
   const ctl = { cancelled: false, set: (t) => { el.querySelector('#imp-text').textContent = t; }, close: () => el.remove() };
-  el.querySelector('#imp-cancel').onclick = () => { ctl.cancelled = true; ctl.set('Cancelling…'); ctl.onCancel?.(); };
+  el.querySelector('#imp-cancel').onclick = () => { ctl.cancelled = true; ctl.set('Cancelling after this step…'); };
   ctl.set(`Reading ${name}…`);
   return ctl;
+}
+/** A very dense model: import as it is, or import and add a Reduce step that brings it near IMPORT_TARGET triangles. */
+function askLargeImport(name, tris) {
+  return new Promise((resolve) => {
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const keep = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / tris) * 100)));
+    const m = modal(`<div class="modal-title">Large model</div>
+      <div class="modal-body"><p class="p0"><b>${esc(name)}</b> has ${tris.toLocaleString()} triangles. Editing and rebuilding get slower the denser a model is, and most designs do not need more than about ${IMPORT_TARGET.toLocaleString()}.</p>
+      <p class="p0">Importing with a <b>Reduce</b> step keeps about ${keep}% of the triangles. It is a step in the timeline, so you can change the amount or turn it off later.</p>
+      <div class="modal-foot flush stack"><button type="button" class="btn primary" id="li-reduce">Import and reduce to ~${keep}%</button><button type="button" class="btn" id="li-asis">Import as it is</button><button type="button" class="btn" id="li-cancel">Cancel</button></div></div>`);
+    m.el.querySelector('#li-reduce').onclick = () => { m.close(); finish({ keep }); };
+    m.el.querySelector('#li-asis').onclick = () => { m.close(); finish({ keep: 0 }); };
+    m.el.querySelector('#li-cancel').onclick = () => { m.close(); finish(null); };
+    m.el.querySelector('.modal-x')?.addEventListener('click', () => finish(null));
+  });
 }
 async function importModel(file, { always = false } = {}) {
   const prog = importProgress(file.name);
   try {
     await tick();
-    const parts = await readImport(file);
+    const parts = await readModelFile(file);
     if (prog.cancelled) return toast('Import cancelled.');
     let tris = 0, made = 0; const notes = new Set(), errs = [];
-    // A mesh is always imported. One that is too dense to sew quickly (over IMPORT_WARN triangles, and past the 32,000 faces the kernel will sew into a solid)
-    // is simplified by default: the import reduces its triangles to about IMPORT_TARGET before it sews them, and the amount stays editable in the import step.
-    for (const part of parts) {
-      const n = part.soup.length / 9; part.origTris = n;
-      if (n > IMPORT_WARN) part.reduce = { keep: Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / n) * 100))), tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) };
-    }
     for (const part of parts) {
       if (prog.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
       prog.set(`Checking ${part.name} (${(part.soup.length / 9).toLocaleString()} triangles)…`); await tick();
-      let r = always ? { err: '' } : await importPart(part, prog); // 'always' (Repair Mesh…) goes straight to the repair window
-      if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
-      for (let more = 0; r.limit && more < 5; more++) { // still too many faces (the reduction stops at its deviation limit): simplify harder and try again
-        const was = part.reduce || { keep: 100, tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) };
-        part.reduce = { keep: Math.max(1, Math.floor(was.keep / 2)), tolerance: +(was.tolerance * 2.5).toFixed(3) };
-        prog.set(`Simplifying ${part.name} further…`); await tick();
-        r = await importPart(part, prog);
-        if (r.cancelled) break;
-      }
-      if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
-      if (r.limit) { errs.push(`${part.name}: ${r.err}`); continue; }
+      let r = always ? { err: '' } : await importPart(part);
       if (r.err !== undefined && (always || r.err)) { // won't make a solid by itself: let the user steer the repair
         const fixed = await repairDialog(part, r.err);
         if (!fixed) { errs.push(`${part.name}: cancelled`); continue; }
         prog.set(`Building ${part.name}…`); await tick();
-        r = await importPart({ ...part, soup: fixed }, prog);
-        if (r.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
+        r = await importPart({ ...part, soup: fixed });
       }
       if (r.err) errs.push(`${part.name}: ${r.err}`); else {
-        made++; tris += part.reduce ? (result.bodies.find((b) => b.id === r.id)?.tris.length / 3 || r.tris) : r.tris; if (r.note) notes.add(r.exact ? r.note : `repaired: ${r.note}`);
-        if (part.reduce) notes.add(`simplified from ${part.origTris.toLocaleString()} triangles (change the amount in the Reduce setting of the import step)`);
+        made++; tris += r.tris; if (r.note) notes.add(`repaired: ${r.note}`);
+        if (keep && r.id && r.tris > IMPORT_TARGET) { // the dense part gets a Reduce step after it
+          const pre = snapshot(), n = Math.max(1, Math.min(99, Math.round((IMPORT_TARGET / r.tris) * 100)));
+          doc.features.splice(doc.marker, 0, { id: 'f' + doc.nextId++, type: 'mreduce', name: `Reduce ${part.name}`.slice(0, 60), params: { body: r.id, keep: n, tolerance: Math.max(0.05, +(boundsDiag(part.soup) * 0.002).toFixed(3)) } });
+          doc.marker++; pushUndo(pre);
+          prog.set(`Reducing ${part.name}…`); await tick(); await rebuildNow();
+        }
       }
       part.notes?.forEach((n) => notes.add(n));
     }
@@ -3254,11 +2869,10 @@ function captureThumb() {
 }
 const projectJSON = (name = doc.name, withThumb = false) => { const { rev, viewingRev, ...rest } = doc; return JSON.stringify({ format: 'sketchy', version: 1, ...rest, name, ...(withThumb ? { thumb: captureThumb() } : {}) }); };
 function loadProject(txt, rev = 0, seq = rev) {
-  if (sec) { sec = null; secPick = null; applySection(); } // a section belongs to what is on screen, not to the next design
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], template: d.template && typeof d.template === 'object' && Array.isArray(d.template.sliders) ? d.template : undefined, rev, seq };
-  setUnits(doc.units); applyHeavyHint();
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, template: d.template && typeof d.template === 'object' && Array.isArray(d.template.sliders) ? d.template : undefined, rev, seq };
+  setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
   vp.fitted = false; refresh();
@@ -3416,7 +3030,7 @@ function captureTabState() {
   };
 }
 function applyTabState(st) {
-  doc = st.doc; applyHeavyHint(); undoStack = st.undoStack; redoStack = st.redoStack; dirty = st.dirty;
+  doc = st.doc; undoStack = st.undoStack; redoStack = st.redoStack; dirty = st.dirty;
   hiddenBodies.clear(); st.hidden.forEach((h) => hiddenBodies.add(h));
   for (const k of Object.keys(sketchVis)) delete sketchVis[k];
   Object.assign(sketchVis, st.sketchVis);
@@ -3703,11 +3317,11 @@ function bindViewport() {
       const tg = vp.pickSketchTarget(e);
       if (tg?.ref) enterSketch(sketch.index, true, { planeRef: tg.ref, plane: 'custom', origin: tg.geo.origin, normal: tg.geo.normal, xdir: tg.geo.xdir });
       else if (tg?.plane) enterSketch(sketch.index, true, tg.plane);
-      else if (tg?.face) { vp.highlightFace(null); if (tg.curvedPlane) toast('Sketch placed on the plane touching the curved face at the point you clicked.'); enterSketch(sketch.index, true, tg.face); }
+      else if (tg?.face) { vp.highlightFace(null); enterSketch(sketch.index, true, tg.face); }
+      else if (tg?.curved) toast('Pick a flat (planar) face.', true);
       return;
     }
     if (measure) { measureClick(e); return; }
-    if (secPick?.face) { secFacePick(e); return; }
     if (paintMode && !dialog) { paintClick(e); return; }
     if (dialog) {
       if (defOf(doc.features[dialog.index])?.pickEdges) { const en = vp.pickEdge(e); if (en) toggleEdge(en); }
@@ -3736,7 +3350,7 @@ function bindViewport() {
       const tg = vp.pickFace(e);
       vp.selected.clear(); vp.refreshMaterials();
       if (add && selFace && tg?.face && !tg.curved && !selFace.curved && !faceB()) selFaceB = { id: tg.id, point: tg.point, normal: tg.normal, base: selFace }; // a second flat face: measure between them
-      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true, tangent: tg.tangent } : {}), ...(tg.brepFace ? { brepFace: tg.brepFace } : {}) } : null;
+      else selFace = tg?.face ? { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) } : null;
       vp.showFaces(shownFaces(), null);
       renderTree(); renderRibbon();
       return;
@@ -4167,7 +3781,7 @@ async function compareVersion(pr, rev, oldTxt) {
   let A, B;
   try { A = JSON.parse(oldTxt); B = typeof cur.data === 'string' ? JSON.parse(cur.data) : cur.data; } catch { return toast('Could not read those versions.', true); }
   let ra, rb, diff;
-  try { ra = evaluateDoc({ ...A, params: A.params || [] }, { keepShapes: true }); rb = evaluateDoc({ ...B, params: B.params || [] }, { keepShapes: true }); diff = compareResults(ra.result, rb.result); }
+  try { ra = evaluateDoc({ ...A, params: A.params || [] }); rb = evaluateDoc({ ...B, params: B.params || [] }); diff = compareBodies(ra.result.bodies, rb.result.bodies); }
   catch (e) { return toast('Could not compare: ' + e.message, true); }
   const byId = (d) => new Map(d.features.map((f) => [f.id, f]));
   const ma = byId(A), mb = byId(B), lines = [];
@@ -4505,14 +4119,7 @@ function bindKeys() {
 }
 
 // ------------------------------------------------------------------ boot
-/** Keep the app shell and the CAD kernel for repeat visits and offline use (src/sw.js). Production builds on a secure origin only; nothing from /api is ever kept. */
-function registerServiceWorker() {
-  if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.type === 'sketchy-updated') toast('Sketchy was updated. Reload the page to use the new version.'); });
-  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((e) => console.warn('Offline support is off:', e.message));
-}
 async function boot() {
-  performance.mark('sketchy-boot');
   if (location.pathname === '/oauth/authorize') { await refreshAccount(); await ensureSignedIn(); await oauthConsent(); return; } // an assistant is asking to connect: just the approval page
   const caret = uicon('caret', 7, 0).replace('class="ui"', 'class="ui caret"');
   const set = (id, html) => { $('#' + id).innerHTML = html; };
@@ -4522,19 +4129,14 @@ async function boot() {
  
   set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
   set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
-  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading" role="status">Loading geometry kernel…</div>');
-  const loadingEl = $('#loading'), mb = (n) => (n / 1048576).toFixed(1);
-  // The kernel (23 MB of WebAssembly) downloads and compiles while the rest of the page starts up: the viewport, the ribbon and the
-  // sign-in no longer wait for it. Only the work that needs it waits (refreshNow and runCommand check kernelOk).
-  kernelReady = loadBrep({ locateFile: () => occtUrl, wasmUrl: occtUrl, totalBytes: __WASM_BYTES__, onProgress: (n, total) => { kernelBytes = { n, total: total || __WASM_BYTES__ }; if (loadingEl) loadingEl.textContent = `Loading geometry kernel… ${mb(n)} of ${mb(total || __WASM_BYTES__)} MB`; kernelEvent(); } }) // about 23 MB; the service worker and the browser keep it for the next visit
-    .then(() => { kernelOk = true; performance.mark('sketchy-kernel'); $('#loading')?.remove(); kernelEvent(); });
-  kernelReady.catch((e) => { console.error(e); $('#loading')?.remove(); toast('The geometry kernel could not be loaded: ' + e.message + '. Reload the page to try again.', true); });
+  $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading">Loading CAD kernel…</div>');
+  await initKernel({ locateFile: () => wasmUrl });
   vp = new Viewport($('#gl'), $('#cube'));
   vp.opts.bedSize = printerSize(bedName) || vp.opts.bedSize;
   vp.buildBed();
   vp.home();
   vp.fitted = true; // only opening a design re-frames the view; making the first body must not move the camera
-  registerServiceWorker();
+  $('#loading')?.remove();
   SU = createSketchUI({
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
     setShapes: (sh) => setSketchShapes(sh), remapCons: (si, delta) => remapSketchCons(si, delta), projectHover: (e) => projectHover(e), projectPick: (e, all) => projectPick(e, all), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
@@ -4542,7 +4144,7 @@ async function boot() {
     toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, paramScope, kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });
   if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('touch');
-  buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip(); bindSectionDrag(); bindAppearanceDrop();
+  buildTouchBar(); buildNavBar(); bindViewport(); bindZoomWindow(); bindSelectTool(); bindKeys(); bindManip(); bindAppearanceDrop();
   bindTooltips();
   $('#btn-undo').onclick = (ev) => { const r = ev.currentTarget.getBoundingClientRect(); if (ev.clientX > r.right - 14) historyMenu(ev.currentTarget); else undo(); };
   $('#btn-undo').oncontextmenu = (ev) => { ev.preventDefault(); historyMenu(ev.currentTarget); };
@@ -4578,7 +4180,7 @@ async function boot() {
   $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importModel(f); };
   $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { const txt = await f.text(); if (!newTab({ reuseBlank: true })) return; loadProject(txt); renderDocTabs(); } catch (x) { toast(x.message, true); } };
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
-  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && isImportName(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
+  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.(stl|obj|3mf|step|stp)$/i.test(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
   initA11y();
   const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x3d94ff : 0x1f5fa8); sketchMatActive.color.setHex(d ? 0x2f8cff : 0x0b6bcb); };
   paint(getTheme()); onTheme(paint);
@@ -4593,79 +4195,10 @@ async function boot() {
   setAccountChangeHandler(() => { if (dataOpen) renderDataPanel(); });
   startRemotePolling();
   setupAssistant();
-  setupAddins();
-  window.__sketchy = { kernelState: () => ({ abandoned: kw.abandoned || 0, heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, editFeature, rebuild, refresh, runCommand, openMarking };
-  performance.mark('sketchy-shell');
-  try { await kernelReady; } catch { return; }
   refresh();
+  window.__sketchy = { kernelState: () => ({ heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
   openLastOrCreate().then(checkDrafts); // not awaited: the New design dialog must not hold up the rest of start-up
 }
-// ------------------------------------------------------------------ add-ins (src/addins.js, src/addins-ui.js)
-const BASE_IMPORT_EXT = ['stl', 'obj', '3mf', 'step', 'stp'];
-const isImportName = (name) => { const ext = (/\.([a-z0-9]+)$/i.exec(name)?.[1] || '').toLowerCase(); return BASE_IMPORT_EXT.includes(ext) || !!addins?.importerFor(ext); };
-/** Read a model file: with an add-in when one handles that file type, otherwise with the built-in readers. */
-async function readImport(file) {
-  const ext = (/\.([a-z0-9]+)$/i.exec(file.name)?.[1] || '').toLowerCase();
-  const ref = !BASE_IMPORT_EXT.includes(ext) && addins?.importerFor(ext);
-  if (!ref) return readModelFile(file);
-  try { return await addins.readFile(file, ref); }
-  catch (e) { throw new Error(e.message === 'cancelled' ? 'Import cancelled.' : `${ref.addin.manifest.name}: ${e.message}`); }
-}
-async function runAddinCommand(c) {
-  try { await addins.runCommand(c.addinCommand); } catch (e) { toast(`${c.label}: ${e.message}`, true); }
-}
-/** A form an add-in asked for: resolves the values, or null if cancelled. */
-function addinForm(spec) {
-  return new Promise((resolve) => {
-    const rows = spec.fields.map((f) => `<label class="ad-row"><span>${esc(f.label)}</span>${f.type === 'bool' ? `<input type="checkbox" name="${esc(f.name)}" ${f.value ? 'checked' : ''}>` : f.type === 'select' ? `<select name="${esc(f.name)}">${(f.options || []).map(([v, l]) => `<option value="${esc(v)}" ${String(f.value) === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : `<input name="${esc(f.name)}" type="${f.type === 'number' ? 'number' : 'text'}" ${f.type === 'number' ? 'step="any"' : 'maxlength="200"'} value="${esc(f.value)}">`}</label>`).join('');
-    const m = modal(`<div class="modal-title">${esc(spec.title)}</div><form class="modal-body">${spec.intro ? `<p class="rp-lead">${esc(spec.intro)}</p>` : ''}<div class="ad-form">${rows}</div><div class="modal-foot flush"><button type="button" class="btn" id="ad-c">Cancel</button><button type="submit" class="btn primary">${esc(spec.ok)}</button></div></form>`, () => resolve(null));
-    const form = m.el.querySelector('form');
-    m.el.querySelector('#ad-c').onclick = () => m.close();
-    form.onsubmit = (e) => {
-      e.preventDefault();
-      const out = {};
-      for (const f of spec.fields) { const el = form.elements[f.name]; out[f.name] = f.type === 'bool' ? el.checked : f.type === 'number' ? (Number.isFinite(parseFloat(el.value)) ? parseFloat(el.value) : f.value) : el.value; }
-      resolve(out); m.closeSilently?.() ?? m.close();
-    };
-    setTimeout(() => form.querySelector('input,select')?.focus(), 0);
-  });
-}
-function setupAddins() {
-  addins = createAddinManager({
-    runtime: runtimeSource,
-    onChange: () => {
-      // contributed commands appear in the ADD-INS group's menu
-      const ids = [];
-      for (const c of addins.commands()) { const id = `addin:${c.ref}`; CMD[id] = { label: c.label, icon: 'addin', desc: `${c.description ? c.description + ' ' : ''}(Add-in: ${c.addin})`, addinCommand: c.ref }; ids.push(id); }
-      const g = TOOLBAR.UTILITIES.find((x) => x.label === 'ADD-INS'); if (g) g.menu = ids.length ? ['addins', '|', ...ids] : [];
-      const accept = [...BASE_IMPORT_EXT, ...addins.importExtensions()].map((x) => '.' + x).join(',');
-      $('#file-stl').accept = accept; $('#file-repair').accept = accept;
-      if (!dialog && !sketch) renderRibbon();
-    },
-    hooks: {
-      toast, menu: showMenu,
-      confirm: (message, o = {}) => confirmBox({ title: o.title || 'Add-in', message, ok: o.ok || 'OK', danger: !!o.danger }),
-      form: addinForm,
-      pickFile: (o) => new Promise((resolve) => {
-        const inp = document.createElement('input'); inp.type = 'file'; if (o.accept) inp.accept = o.accept;
-        inp.onchange = async () => { const f = inp.files[0]; resolve(f ? { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) } : null); };
-        inp.oncancel = () => resolve(null); inp.click();
-      }),
-      readDocument: async (o) => ({ name: doc.name, units: getUnits(), parameters: (doc.params || []).map((p) => ({ name: p.name, expr: p.expr })), bodies: result.bodies.map((b) => ({ id: b.id, name: b.name, color: look((doc.appearance || {})[b.id]).color, ...(o.meshes ? { verts: b.verts, tris: b.tris } : {}) })) }),
-      addBody: async ({ name, verts, tris }) => {
-        const n = tris.length / 3, soup = new Float32Array(n * 9);
-        for (let t = 0; t < n; t++) for (let k = 0; k < 3; k++) soup.set(verts.subarray(tris[t * 3 + k] * 3, tris[t * 3 + k] * 3 + 3), t * 9 + k * 3);
-        const r = await importPart({ name, soup });
-        if (r.err) throw new Error(r.err);
-        return { id: r.id };
-      },
-      buildGeometry: async (tree) => { if (!brepReady()) throw new Error('The geometry engine is not ready yet.'); await tick(); return buildTree(replicad(), tree); },
-      saveFile: async ({ name, bytes, mime }) => { download(new Blob([bytes], { type: mime }), name); return true; },
-    },
-  });
-  addins.startup().catch(() => {});
-}
-
 /** The assistant as part of the app: live changes, the Stop chip and the request box (see assistant.js). */
 const LIVE_VIEWS = { iso: [1, -1, 0.8], iso_back: [-1, 1, 0.8], front: [0, -1, 0], back: [0, 1, 0], left: [-1, 0, 0], right: [1, 0, 0], top: [0, 0, 1], bottom: [0, 0, -1] };
 let liveT = null, liveLast = '';
@@ -4680,7 +4213,7 @@ function queueLive(force = false) {
     if (selEdges.length) sel.edges = selEdges.length;
     if (selFace) sel.face = { body: selFace.id, point: selFace.point, normal: selFace.normal, ...(selFace.curved ? { curved: true } : {}) };
     const cam = vp.camera.position.clone().sub(vp.controls.target).normalize();
-    const state = { design: doc.name && doc.name !== 'Untitled' && doc.rev ? doc.name : '', dirty, openDesigns: tabs.map(tabName).filter((n) => n && n !== 'Untitled'), tool: sketch ? 'sketch' : dialog ? (doc.features[dialog.index]?.type || 'feature') : measure ? 'measure' : '', sketch: sketch && !sketch.picking ? doc.features[sketch.index]?.id || '' : '', selection: sel, ...(sec && secLastCuts.length ? { section: secLastCuts.slice(0, 6).map((q) => ({ origin: q.o.map((v) => +v.toFixed(3)), normal: q.n.map((v) => +v.toFixed(4)) })) } : {}), view: [cam.x, cam.y, cam.z], units: getUnits(), appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '' };
+    const state = { design: doc.name && doc.name !== 'Untitled' && doc.rev ? doc.name : '', dirty, openDesigns: tabs.map(tabName).filter((n) => n && n !== 'Untitled'), tool: sketch ? 'sketch' : dialog ? (doc.features[dialog.index]?.type || 'feature') : measure ? 'measure' : '', sketch: sketch && !sketch.picking ? doc.features[sketch.index]?.id || '' : '', selection: sel, view: [cam.x, cam.y, cam.z], units: getUnits(), appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '' };
     const key = JSON.stringify({ ...state, view: state.view.map((v) => +v.toFixed(1)) });
     if (!force && key === liveLast) return;
     liveLast = key;
@@ -4708,8 +4241,6 @@ function setupAssistant() {
       if (ev.view && LIVE_VIEWS[ev.view]) { const d = LIVE_VIEWS[ev.view]; vp.lookAlong(d, Math.abs(d[2]) > 0.9 * Math.hypot(...d) ? [0, 1, 0] : [0, 0, 1], true); }
       if (ev.bodies?.length) { const ids = ev.bodies.filter((id) => result.bodies.some((b) => b.id === id)); selFace = null; vp.showFaces([], null); vp.selected.clear(); ids.forEach((id) => vp.selected.add(id)); vp.refreshMaterials(); renderTree(); renderRibbon(); }
       if (ev.face?.point && ev.face?.normal && result.bodies.some((b) => b.id === ev.face.body)) { vp.selected.clear(); vp.refreshMaterials(); selFace = { id: ev.face.body, point: ev.face.point, normal: ev.face.normal, ...(ev.face.curved ? { curved: true } : {}) }; vp.showFaces(shownFaces(), null); renderTree(); renderRibbon(); }
-      if (ev.clear_section && sec) secEnd();
-      if (ev.section) { try { assistantSection(ev.section); } catch (e) { toast(`Assistant: could not show the section (${e.message})`, true); } }
       if (ev.message) toast(`Assistant: ${ev.message}`);
     },
     designChanged: async (ev) => {
@@ -4724,7 +4255,7 @@ function setupAssistant() {
       toast(`The assistant ${toolPast(tool)}.`);
     },
   });
-  btn.onclick = () => assistant.togglePanel(acct.mcp);
+  btn.onclick = () => assistant.togglePanel(true);
   assistant.start();
   setInterval(() => queueLive(true), 60e3); // the server forgets what you are looking at after 3 minutes of silence
   queueLive(true);

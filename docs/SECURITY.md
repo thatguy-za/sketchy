@@ -24,7 +24,6 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 | Variable | Default | What it does |
 |---|---|---|
 | `TRUST_PROXY` | trust private addresses | Set `false` if the container port is reachable directly. Forwarded addresses are then ignored, so a client can't pretend to be someone else to dodge limits. Leave it unset behind a proxy, or every visitor looks like the proxy. |
-| `MAX_CACHE_MB` | `128` | Largest saved kernel cache the server keeps for one design (a gzip file the app writes next to a slow design so that opening it does not rebuild it from nothing). `0` keeps none. It counts toward the storage limit and is removed first when space runs short. |
 | `BIN_DAYS` | `30` | How many days a deleted design waits in the recycle bin before it is removed for good. `0` turns the bin off (deleting is permanent). The bin counts toward the account's storage limit and is emptied first when a save would go over it. |
 | `MAX_DESIGN_MB` | `64` | Largest single design (or draft) the server accepts. `0` turns the limit off. |
 | `USER_QUOTA_MB` | `2048` | Starting value for the default storage per account (`0` = no limit). Admins change the default, and each person's own limit, under Server settings → Users. |
@@ -40,7 +39,7 @@ Sketchy is built to be self-hosted. The container serves plain HTTP, so **put it
 | `MCP_ALLOWED_ORIGINS` | none | Comma-separated browser origins (or `*`) allowed to call `/mcp` from a web page. By default no web page may; command-line and desktop assistants are unaffected. |
 | `MCP_RATE_PER_MIN` | `60` | Calls per minute for one AI assistant token (one person's tokens together get twice this). |
 | `MCP_WORKERS` | `2` | Worker threads that rebuild designs for assistants. |
-| `MCP_TIMEOUT_SECONDS` | `20` | A request that runs longer is stopped. A design too heavy to build in one request is not lost work: the build is saved as it goes (see the saved kernel cache in REFERENCE.md), so the next attempt carries on from there. Only a single step longer than the limit (sewing a very large mesh, one huge boolean) needs this raised. |
+| `MCP_TIMEOUT_SECONDS` | `20` | A rebuild that runs longer is stopped. |
 | `MCP_WORKER_MEMORY_MB` | `512` | JavaScript memory a worker may use before it is stopped. The modelling kernel's WebAssembly memory is outside this limit; the time limit bounds it. |
 | `ALLOW_MCP` | `true` | Whether AI assistants can connect. Admins can also switch this in Server settings. |
 

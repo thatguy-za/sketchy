@@ -8,7 +8,7 @@ const S = (name, label, min, max, step, unit = 'mm', hint = '') => ({ name, labe
 let ids;
 const feat = (type, name, params, exprs = {}, id) => ({ id: id || `${type[0]}${ids.n++}`, type, name, params, ...(Object.keys(exprs).length ? { exprs } : {}) });
 const prim = (id, name, shape, params, exprs) => feat('primitive', name, { shape, pos: [0, 0, 0], op: 'new', ...params }, exprs, id);
-const combine = (name, target, tool, op) => feat('combine', name, { target, tool, op, keepTool: false });
+const combine = (name, target, tool, op) => feat('combine', name, { target, tool: Array.isArray(tool) ? tool[0] : tool, op, keepTool: false }); // one tool body: that is what Combine takes here
 const move = (name, body, r, t, exprs) => feat('move', name, { body, t: t || [0, 0, 0], r: r || [0, 0, 0], s: [1, 1, 1], copy: false, mode: 'free', from: [0, 0, 0], to: [0, 0, 0] }, exprs);
 
 /** The numbers a template shares: print settings, then its own. */
@@ -45,7 +45,7 @@ const PHONE_STAND = {
     const features = [
       prim('plate', 'Base', 'box', { sx: 70, sy: 70, sz: 4, radius: 1, pos: [0, 35, 0] }, { sx: 'width', sy: 'lipT + slot + rest * sin(lean) + 2 * thick', sz: 'thick', 'pos.1': '(lipT + slot + rest * sin(lean) + 2 * thick) / 2' }),
       prim('lip', 'Front lip', 'box', { sx: 70, sy: 4, sz: 12, radius: 1, pos: [0, 2, 0] }, { sx: 'width', sy: 'lipT', sz: 'lipH', 'pos.1': 'lipT / 2' }),
-      prim('back', 'Back', 'box', { sx: 70, sy: 5, sz: 70, radius: 1, pos: [0, 40, 0] }, { sx: 'width', sy: 'thick', sz: 'rest', 'pos.1': 'lipT + slot + (rest / 2) * sin(lean)', 'pos.2': 'thick + (rest / 2) * cos(lean) - rest / 2 - 1.5 mm' }),
+      prim('back', 'Back', 'box', { sx: 70, sy: 5, sz: 70, radius: 0, pos: [0, 40, 0] }, { sx: 'width', sy: 'thick', sz: 'rest', 'pos.1': 'lipT + slot + (rest / 2) * sin(lean)', 'pos.2': 'thick + (rest / 2) * cos(lean) - rest / 2 - 1.5 mm' }),
       move('Lean the back', 'back', [-15, 0, 0], [0, 0, 0], { 'r.0': '-lean' }),
       combine('Join the lip', 'plate', ['lip'], 'join'),
       combine('Join the back', 'plate', ['back'], 'join'),

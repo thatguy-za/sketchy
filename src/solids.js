@@ -1,5 +1,5 @@
 // Pure geometry helpers for lofts, sweeps, helical solids and frames. No manifold dependency:
-// they return indexed triangle meshes ({verts, tris}).
+// they return indexed triangle meshes ({verts, tris}) that the kernel turns into manifolds.
 import { ShapeUtils, Vector2 } from 'three';
 
 export const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];

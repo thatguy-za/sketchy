@@ -42,7 +42,7 @@ volumes:
 * **Modelling:** extrude, revolve, sweep, loft, coil, rib, hole, thread, fillet, chamfer, draft, emboss, shell, press/pull, scale, split, combine, mirror, pipe, surfaces (stitch, thicken, trim, extend), thicken and replace face, boundary fill and patterns (linear, circular, along a path, on a face)
 * **Sketching:** lines, rectangles, circles, ellipses, slots, polygons, arcs, splines, text, SVG and DXF import, rectangular and circular patterns, 3D sketch paths, mirror, trim, include model edges, dimensions and constraints
 * **Parametric:** timeline you can edit, roll back and suppress; named parameters and expressions; design configurations (variants such as Small and Large)
-* **3D printing:** STL, OBJ, 3MF and STEP import with automatic repair, mesh reduction and separating pieces; STL, 3MF, OBJ and exact STEP export; build-volume overlay; print checks in plain words (bed fit across bodies, overhangs with a "lay it flat" fix, wall thickness against your nozzle); print setup (printer, nozzle, layer height, material, fit gap); starter templates with sliders and a guided first part; undo history; materials, render view and image export; volume and mass; section view
+* **3D printing:** STL, OBJ, 3MF and STEP import with automatic repair, mesh reduction and separating pieces; STL, 3MF, OBJ and STEP (flat faces) export; build-volume overlay; print checks in plain words (bed fit across bodies, overhangs, wall thickness, with a "lay it flat" fix); print setup (printer, nozzle, layer height, material, fit gap); starter templates with sliders and a guided first part; undo history; materials, render view and image export; volume and mass; section view
 * **Organising:** folders for your saved designs, components, offset construction planes, reference-image canvases, and inserting one design into another
 * **Assemblies:** joints, drive sliders, interference check
 * **Accounts:** several users per server, version history you can restore, drafts that follow you between devices, tabs, dark mode
@@ -67,11 +67,9 @@ Sketchy is released under the **[MIT licence](LICENSE)**. In plain terms, you ca
 
 | Component | Used for | Licence |
 |---|---|---|
-| [replicad](https://replicad.xyz) and [OpenCascade](https://dev.opencascade.org) (replicad-opencascadejs) | The modelling kernel (boundary representation): true curved faces, fillets, booleans and exact STEP export | replicad: MIT. OpenCascade Technology: **LGPL-2.1 with the OCCT exception** (see below) |
+| [manifold-3d](https://github.com/elalish/manifold) | The modelling kernel (booleans and solids) | Apache-2.0 |
 | [three.js](https://threejs.org) | 3D display | MIT |
 | [opentype.js](https://opentype.js.org) | Turning text into sketch outlines | MIT |
 | [Roboto](https://fonts.google.com/specimen/Roboto) (via Fontsource) | The text tool's font | SIL Open Font Licence 1.1 |
-
-**OpenCascade (LGPL-2.1).** The exact kernel uses the OpenCascade Technology library, compiled to WebAssembly and shipped unmodified in the npm package `replicad-opencascadejs` (about 23 MB, 6 MB compressed, fetched when the app starts; the browser and a service worker keep it, so repeat visits start at once and the app opens offline on https or localhost). OpenCascade is licensed under the GNU LGPL version 2.1 with an additional exception; see [its licence](https://dev.opencascade.org/resources/licensing). Sketchy keeps the library as a separate file (`replicad_single.wasm`) that is loaded at run time, so you can replace it with your own build of the same package version. If you redistribute Sketchy with this file, keep this notice and offer the OpenCascade source on request (it is public at https://git.dev.opencascade.org/gitweb/?p=occt.git).
 
 If you redistribute Sketchy, keep these notices. Contributions are welcome and are accepted under the same MIT licence.

@@ -49,7 +49,7 @@ const call = async (method, p, body, headers = {}, raw = false) => {
 try {
   console.log('Headers');
   const page = await call('GET', '/');
-  check('page has a CSP without unsafe-inline scripts', /script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval';/.test(page.headers.get('content-security-policy') || '') && !/script-src[^;]*unsafe-inline/.test(page.headers.get('content-security-policy') || ''));
+  check('page has a CSP without unsafe-inline scripts', /script-src 'self' 'wasm-unsafe-eval'/.test(page.headers.get('content-security-policy') || '') && !/script-src[^;]*unsafe-inline/.test(page.headers.get('content-security-policy') || ''));
   check('frames are refused', page.headers.get('x-frame-options') === 'DENY' && /frame-ancestors 'none'/.test(page.headers.get('content-security-policy') || ''));
   check('nosniff and no-referrer', page.headers.get('x-content-type-options') === 'nosniff' && page.headers.get('referrer-policy') === 'no-referrer');
   const me = await call('GET', '/api/me');
@@ -306,62 +306,6 @@ try {
   check('a resource address cannot climb out of the designs', /error/i.test(await rr.text()));
   const img = await callA('render_view', { design: 'Robot', width: 200, height: 150 });
   check('render_view returns an image to an assistant', img.result?.content?.some((c) => c.type === 'image'));
-  console.log('Add-ins');
-  for (const [m, u] of [['GET', '/api/addins'], ['PUT', '/api/addins/demo'], ['DELETE', '/api/addins/demo']]) {
-    const r = await fetch(base + u, { method: m, headers: { 'x-sketchy': '1', 'content-type': 'application/json' }, body: m === 'PUT' ? '{}' : undefined });
-    check(`${m} ${u} needs a signed-in person`, r.status === 401, String(r.status));
-  }
-  const pkg = (over = {}, files = { 'main.js': 'export function activate(){}' }) => ({ manifest: { id: 'demo', name: 'Demo', version: '1.0.0', permissions: [], ...over }, files });
-  check('a valid add-in installs', (await call('PUT', '/api/addins/demo', pkg())).status === 200);
-  const lst = await call('GET', '/api/addins');
-  check('the list has the manifest only', lst.json.addins.some((a) => a.manifest.id === 'demo') && !JSON.stringify(lst.json).includes('activate'));
-  check('the package can be fetched back by its owner', (await call('GET', '/api/addins/demo')).json.files['main.js'].includes('activate'));
-  check('an install without the custom header is refused (CSRF)', (await fetch(base + '/api/addins/demo', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(pkg()) })).status === 403);
-  check('the id in the address must match the manifest', (await call('PUT', '/api/addins/other', pkg())).status === 400);
-  for (const bad of ['../../users', 'A', 'x', 'UPPER', '..%2F..%2Fusers']) check(`an add-in id of "${bad}" is refused`, [400, 404].includes((await call('GET', '/api/addins/' + bad)).status));
-  check('an unknown permission is refused', (await call('PUT', '/api/addins/demo', pkg({ permissions: ['network'] }))).status === 400);
-  check('a file path that climbs out is refused', (await call('PUT', '/api/addins/demo', pkg({}, { 'main.js': 'x', '../evil.js': 'y' }))).status === 400);
-  check('a binary-looking file type is refused', (await call('PUT', '/api/addins/demo', pkg({}, { 'main.js': 'x', 'payload.exe': 'y' }))).status === 400);
-  check('a missing main file is refused', (await call('PUT', '/api/addins/demo', pkg({ main: 'start.js' }))).status === 400);
-  check('an oversized file is refused', (await call('PUT', '/api/addins/demo', pkg({}, { 'main.js': 'x'.repeat(2e6) }))).status === 400);
-  check('an exporter without document.read is refused', (await call('PUT', '/api/addins/demo', pkg({ contributes: { exporters: [{ id: 'e', label: 'E', extension: 'txt' }] } }))).status === 400);
-  const sb = await fetch(base + '/addin-sandbox.html');
-  const csp = sb.headers.get('content-security-policy') || '';
-  check('the sandbox page allows no network and only its own hashed script', /connect-src 'none'/.test(csp) && /script-src 'sha256-/.test(csp) && !/unsafe-inline|unsafe-eval/.test(csp) && /frame-ancestors 'self'/.test(csp), csp);
-  check('and carries no X-Frame-Options that would block it', !sb.headers.get('x-frame-options'));
-  check('the rest of the app still refuses to be framed', (await fetch(base + '/')).headers.get('x-frame-options') === 'DENY');
-  await call('PUT', '/api/admin/settings', { allowAddins: false });
-  check('with add-ins switched off, installing is refused', (await call('PUT', '/api/addins/demo', pkg())).status === 403);
-  check('but existing ones can still be listed and removed', (await call('GET', '/api/addins')).json.enabled === false && (await call('DELETE', '/api/addins/demo')).status === 200);
-  await call('PUT', '/api/admin/settings', { allowAddins: true });
-  const inv = [
-    ['unknown argument', 'get_design', { design: 'Robot', extra: 1 }],
-    ['wrong type', 'add_feature', { design: 'Robot', kind: 5 }],
-    ['missing required', 'get_design', {}],
-    ['too-long name', 'create_design', { name: 'x'.repeat(200) }],
-    ['bad position', 'add_feature', { design: 'Robot', kind: 'box', position: 'first' }],
-    ['prototype pollution key', 'add_feature', { design: 'Robot', kind: 'box', params: JSON.parse('{"__proto__":{"x":1}}') }],
-    ['absurd nesting', 'add_feature', { design: 'Robot', kind: 'box', params: JSON.parse('{"a":'.repeat(12) + '1' + '}'.repeat(12)) }],
-    ['huge array', 'add_feature', { design: 'Robot', kind: 'box', params: { pts: new Array(6000).fill(1) } }],
-    ['infinite number', 'set_parameters', { design: 'Robot', parameters: [{ name: 'w', expr: 'x'.repeat(600) }] }],
-  ];
-  for (const [label, name, args] of inv) check(`refuses ${label}`, /Invalid arguments/.test(txt(await call2(name, args))), txt(await call2(name, args)).slice(0, 140));
-  // per-token limit and automatic pause (30 calls a minute here; 5 strikes pause the token)
-  const tok2 = (await call('POST', '/api/mcp/tokens', { name: 'noisy' })).json;
-  let paused = false, saw429 = 0;
-  for (let i = 0; i < 160 && !paused; i++) {
-    const r = await post({ jsonrpc: '2.0', id: 1, method: 'ping' }, { authorization: `Bearer ${tok2.token}` });
-    if (r.status === 429) saw429++;
-    if (r.status === 403) paused = true;
-  }
-  check('a token over its rate limit is throttled', saw429 >= 1);
-  check('a token that keeps hammering is paused', paused);
-  check('the other token still works', (await post({ jsonrpc: '2.0', id: 1, method: 'ping' }, { authorization: `Bearer ${tok}` })).status !== 403);
-  const listed = (await call('GET', '/api/mcp/tokens')).json.tokens.find((t) => t.id === tok2.id);
-  check('the owner sees it as paused', !!listed?.paused);
-  check('the owner can resume it', (await call('POST', `/api/mcp/tokens/${tok2.id}/resume`, {})).status === 200 && !(await call('GET', '/api/mcp/tokens')).json.tokens.find((t) => t.id === tok2.id).paused);
-
-
   console.log('Sessions and cookies');
   cookie = '';
   const l1 = await call('POST', '/api/login', { username: 'boss', password: 'correct-horse-battery' });
@@ -435,85 +379,6 @@ try {
   let limited = false;
   for (let i = 0; i < 25; i++) if ((await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: 'Bearer nope' + i, 'content-type': 'application/json' }, body: '{}' })).status === 429) limited = true;
   check('repeated bad tokens get rate limited', limited);
-
-  console.log('Static files, compression and the service worker');
-  {
-    const html = (await call('GET', '/')).text, wasm = /rel="preload" href="(\/assets\/replicad_single-[^"]+\.wasm)"/.exec(html)?.[1];
-    check('the page preloads the hashed CAD kernel file', !!wasm, html.slice(0, 200));
-    const get = (u, ae, extra = {}) => new Promise((res, rej) => http.get(base + u, { headers: { 'accept-encoding': ae, ...extra } }, (r) => { const c = []; r.on('data', (d) => c.push(d)); r.on('end', () => res({ status: r.statusCode, headers: r.headers, body: Buffer.concat(c) })); }).on('error', rej));
-    const id = await get(wasm, 'identity'), br = await get(wasm, 'br, gzip'), gz = await get(wasm, 'gzip');
-    check('the kernel file is immutable and varies by encoding', /immutable/.test(br.headers['cache-control']) && /max-age=31536000/.test(br.headers['cache-control']) && /accept-encoding/i.test(br.headers.vary || ''), JSON.stringify(br.headers));
-    check('brotli is used when offered, and is much smaller', br.headers['content-encoding'] === 'br' && br.body.length < id.body.length / 3, `${br.body.length} vs ${id.body.length}`);
-    check('and decodes to exactly the same bytes', Buffer.compare(zlib.brotliDecompressSync(br.body), id.body) === 0);
-    check('gzip is used when brotli is not offered, and decodes to the same bytes', gz.headers['content-encoding'] === 'gzip' && Buffer.compare(zlib.gunzipSync(gz.body), id.body) === 0);
-    check('a client that accepts nothing gets the plain file', !id.headers['content-encoding'] && id.headers['content-type'] === 'application/wasm');
-    const dist = new URL('../dist/assets/', import.meta.url), usesEval = fs.readdirSync(dist).filter((f) => f.endsWith('.js')).filter((f) => /new Function\(/.test(fs.readFileSync(new URL(f, dist), 'utf8')));
-    check('the page CSP allows eval exactly because the built files need it (OpenCascade\'s glue), so the app boots under it', usesEval.length === 0 || /script-src[^;]*'unsafe-eval'/.test((await call('GET', '/')).headers.get('content-security-policy') || ''), usesEval.join());
-    check('and the CSP still has no inline scripts, no off-site connections, no framing', (c => !/script-src[^;]*unsafe-inline/.test(c) && /connect-src 'self' blob:/.test(c) && /frame-ancestors 'none'/.test(c) && /object-src 'none'/.test(c))((await call('GET', '/')).headers.get('content-security-policy') || ''));
-    const sw = await get('/sw.js', 'identity');
-    check('the service worker is never cached by the browser and may control the whole site', /no-cache/.test(sw.headers['cache-control']) && sw.headers['service-worker-allowed'] === '/' && /javascript/.test(sw.headers['content-type']));
-    check('it carries the same CSP as the app (no inline script, no off-site connections)', /connect-src 'self'/.test(sw.headers['content-security-policy'] || '') && !/unsafe-inline/.test(sw.headers['content-security-policy'] || ''));
-    check('API responses are still never stored and not compressed by the static path', /no-store/.test((await get('/api/me', 'br')).headers['cache-control'] || ''));
-    const text = sw.body.toString();
-    check('the worker file has its version and file list filled in', !/__SW_/.test(text) && /const VERSION = '[\w.-]+'/.test(text) && text.includes(wasm));
-
-    // run the worker in a sandbox with a fake browser and ask it about every kind of request
-    const makeWorld = (version) => {
-      const src = text.replace(/const VERSION = '[^']*'/, `const VERSION = '${version}'`);
-      const stores = new Map(), fetched = [], handlers = {}, posted = [];
-      const key = (r) => (typeof r === 'string' ? new URL(r, 'https://app.test').href : r.url);
-      const cacheApi = {
-        open: async (name) => { if (!stores.has(name)) stores.set(name, new Map()); const m = stores.get(name); return { put: async (r, res) => { m.set(key(r), res); }, match: async (r) => m.get(key(r)) }; },
-        keys: async () => [...stores.keys()], delete: async (n) => stores.delete(n),
-        match: async (r, o) => (o?.cacheName ? stores.get(o.cacheName)?.get(key(r)) : [...stores.values()].map((m) => m.get(key(r))).find(Boolean)),
-      };
-      let net = (r) => new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } });
-      const self_ = { location: new URL('https://app.test/sw.js'), addEventListener: (t, f) => { handlers[t] = f; }, skipWaiting: async () => { fetched.push('skipWaiting'); }, clients: { claim: async () => {}, matchAll: async () => [{ postMessage: (m) => posted.push(m) }] } };
-      const ctx = vm.createContext({ self: self_, caches: cacheApi, fetch: async (r) => { fetched.push(key(r)); const res = net(r); Object.defineProperty(res, 'type', { value: 'basic' }); return res; }, Request: class extends Request { constructor(u, i) { super(typeof u === 'string' ? new URL(u, 'https://app.test').href : u, i); } }, Response, URL, Promise, console });
-      vm.runInContext(src, ctx);
-      const event = (url, init = {}, mode = 'cors') => { let p = null; const req = new Request(new URL(url, 'https://app.test').href, init); Object.defineProperty(req, 'mode', { value: mode }); return { ev: { request: req, respondWith: (x) => { p = Promise.resolve(x); }, waitUntil: (x) => { p = Promise.resolve(x); } }, got: () => p }; };
-      return { handlers, stores, fetched, posted, setNet: (f) => { net = f; }, event };
-    };
-    const w = makeWorld('v1');
-    const inst = w.event('/'); await w.handlers.install(inst.ev); await inst.got();
-    const precached = [...w.stores.get('sketchy-v1').keys()];
-    check('install keeps the app page and every build file, bypassing the browser cache', precached.includes('https://app.test/') && precached.some((u) => /\/assets\/.*\.wasm$/.test(u)) && precached.every((u) => !/\/(api|mcp)\//.test(u)), precached.slice(0, 3).join());
-    for (const url of ['/api/projects', '/api/login', '/mcp', '/mcp/x', '/oauth/authorize', '/oauth/token', '/.well-known/oauth-authorization-server', '/addin-sandbox.html', '/addins/index.json', '/addins/openscad/main.js', '/sw.js']) {
-      const t = w.event(url, {}, url === '/oauth/authorize' ? 'navigate' : 'cors'); w.handlers.fetch(t.ev);
-      check(`${url} is left to the network (never answered or kept by the worker)`, t.got() === null);
-    }
-    for (const [label, url, init] of [['a POST', '/assets/a.js', { method: 'POST' }], ['a request with an Authorization header', '/assets/a.js', { headers: { authorization: 'Bearer x' } }], ['a range request', '/assets/a.js', { headers: { range: 'bytes=0-9' } }], ['another origin', 'https://elsewhere.test/assets/a.js', {}], ['a file outside /assets/', '/data.json', {}]]) {
-      const t = w.event(url, init); w.handlers.fetch(t.ev);
-      check(`${label} is not touched`, t.got() === null);
-    }
-    w.fetched.length = 0;
-    let t = w.event('/assets/app-1.js'); w.handlers.fetch(t.ev); const first = await t.got();
-    t = w.event('/assets/app-1.js'); w.handlers.fetch(t.ev); const again = await t.got();
-    check('a build file is fetched once and then served from the kept copy', (await first.text()) === 'ok' && (await again.text()) === 'ok' && w.fetched.filter((u) => u.endsWith('/assets/app-1.js')).length === 1);
-    w.setNet(() => new Response('secret', { status: 200, headers: { 'cache-control': 'no-store' } }));
-    t = w.event('/assets/private.js'); w.handlers.fetch(t.ev); await t.got();
-    w.setNet(() => new Response('cookie', { status: 200, headers: { 'set-cookie': 'a=b' } }));
-    t = w.event('/assets/cookie.js'); w.handlers.fetch(t.ev); await t.got();
-    w.setNet(() => new Response('gone', { status: 404 }));
-    t = w.event('/assets/missing.js'); w.handlers.fetch(t.ev); await t.got();
-    const kept = [...w.stores.get('sketchy-v1').keys()];
-    check('responses that say no-store, set a cookie or are not a plain 200 are never kept', !kept.some((u) => /private|cookie|missing/.test(u)), kept.join());
-    w.setNet(() => new Response('<html>page</html>', { status: 200, headers: { 'content-type': 'text/html' } }));
-    t = w.event('/', {}, 'navigate'); w.handlers.fetch(t.ev); await t.got();
-    w.setNet(() => { throw new TypeError('offline'); });
-    t = w.event('/', {}, 'navigate'); w.handlers.fetch(t.ev); const off = await t.got();
-    check('offline, the page opens from the kept copy', (await off.text()).includes('page'));
-    t = w.event('/api/projects', {}, 'cors'); w.handlers.fetch(t.ev);
-    check('and the API is still not answered from anywhere', t.got() === null);
-    // an update: a new version removes the old kept files and tells open pages
-    const w2 = makeWorld('v2');
-    w2.stores.set('sketchy-v1', new Map([['https://app.test/', new Response('old')]])); w2.stores.set('other-site-cache', new Map());
-    const act = w2.event('/'); await w2.handlers.activate(act.ev); await act.got();
-    check('a new version deletes the old version\'s files and leaves other caches alone', !w2.stores.has('sketchy-v1') && w2.stores.has('other-site-cache'));
-    check('and tells the open page to reload', w2.posted.some((m) => m.type === 'sketchy-updated'));
-    const w3 = makeWorld('v3'); const act3 = w3.event('/'); await w3.handlers.activate(act3.ev); await act3.got();
-    check('a first install does not announce an update', w3.posted.length === 0);
-  }
 
   console.log('Lock-out');
   cookie = '';

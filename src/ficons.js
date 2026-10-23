@@ -105,7 +105,6 @@ const FI = {
   planeangle: `${poly('M4 22L28 22L28 27L4 27Z', '#79c68d', '#3a8a50')}${poly('M6 21L24 6L28 11L10 21Z', '#f2a65a', '#b8691d')}<path d="M10 17A8 8 0 0 1 12 21" fill="none" stroke="${RED}" stroke-width="1.2"/>`,
   planemid: `${poly('M4 6L26 6L28 10L6 10Z', '#79c68d', '#3a8a50')}${poly('M4 22L26 22L28 26L6 26Z', '#79c68d', '#3a8a50')}${poly('M5 14L27 14L29 18L7 18Z', '#f2a65a', '#b8691d')}`,
   planethree: `${poly('M5 20L15 6L28 14L18 27Z', '#f2a65a', '#b8691d')}${pt(5, 20)}${pt(15, 6)}${pt(18, 27)}`,
-  addin: `<path d="M6 12H11V9A3 3 0 1 1 17 9V12H22V17H19A3 3 0 1 0 19 23H22V28H6Z" fill="${B.l}" stroke="${B.s}" stroke-width=".8" stroke-linejoin="round"/><path d="M9 15H11M9 25H11" stroke="${B.t}" stroke-width="1.4" stroke-linecap="round"/>`,
   disabled: `<rect x="5" y="5" width="22" height="22" rx="3" fill="${G.l}" stroke="${G.r}" stroke-width="1"/>`,
 };
 
