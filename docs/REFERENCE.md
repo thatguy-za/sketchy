@@ -111,7 +111,7 @@ The server replays the design with the same modelling kernel the app uses, so ev
 **In the app:**
 
 * **Live changes.** When an assistant changes the design you have open, it updates on screen as it happens, the features it touched pulse in the timeline and carry a small dot (the dot goes away once you edit that feature yourself). If you have unsaved changes or a dialog open, you get the usual "updated elsewhere" bar instead of a surprise reload.
-* **The assistant chip.** While an assistant is changing something, a chip at the top says what it is doing, with a **Stop** button. Stop makes the server refuse every change until you press **Resume** (looking still works, and the assistant is told to stop and ask you). Stop lasts at most 30 minutes.
+* **The assistant chip.** While an assistant is changing something, a chip at the top says what it is doing, with a **Stop** button. When it finishes, the chip stays for about three seconds and says what it did ("Assistant added a feature in Bracket"), because a quick edit is over in milliseconds. Stop makes the server refuse every change until you press **Resume** (looking still works, and the assistant is told to stop and ask you). Stop lasts at most 30 minutes.
 * **Ask the assistant** (the sparkle button at the top right). Write a request, optionally with your current selection (a face, body, edges or features); it waits in a list, and your assistant picks it up with `list_requests` (its instructions say to do that at the start of every conversation, or ask it to "check my Sketchy requests"). Its reply appears under your request. Assistants cannot be pushed to work: they act when they are connected and asked.
 
 

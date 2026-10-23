@@ -14,7 +14,7 @@ const TOOL_WORDS = {
   measure: 'measuring', print_check: 'checking it for printing', export_model: 'exporting', export_stl: 'exporting', compare_versions: 'comparing versions',
 };
 export const toolWords = (t) => TOOL_WORDS[t] || 'working';
-const PAST = { add_feature: 'added a feature', update_feature: 'changed a feature', edit_sketch: 'edited a sketch', delete_feature: 'deleted a feature', move_feature: 'reordered the timeline', set_parameters: 'set parameters', set_appearance: 'changed the appearance', set_units: 'changed the units', undo_last_change: 'undid its last change', save_version: 'saved a version', restore_version: 'restored a version', create_design: 'created a design', duplicate_design: 'copied a design', complete_request: 'answered a request' };
+const PAST = { add_feature: 'added a feature', update_feature: 'changed a feature', edit_sketch: 'edited a sketch', delete_feature: 'deleted a feature', move_feature: 'reordered the timeline', set_parameters: 'set parameters', set_appearance: 'changed the appearance', set_units: 'changed the units', undo_last_change: 'undid its last change', save_version: 'saved a version', restore_version: 'restored a version', create_design: 'created a design', duplicate_design: 'copied a design', complete_request: 'answered a request', render_view: 'took a look' };
 export const toolPast = (t) => PAST[t] || 'changed the design';
 
 /**
@@ -22,7 +22,8 @@ export const toolPast = (t) => PAST[t] || 'changed the design';
  *        currentDesignName(), onFlash(ids) }
  */
 export function createAssistant(ctx) {
-  let es = null, held = false, requests = [], panel = null, chipTimer = null;
+  let es = null, held = false, requests = [], panel = null, chipTimer = null, lastDone = null;
+  const DONE_MS = 2800; // what the assistant just did stays readable this long: with a fast kernel a call is over in a few milliseconds and the chip would only flash
   const busy = new Map(); // key -> { tool, design, write }
   const chip = document.createElement('div');
   chip.id = 'ai-chip'; chip.hidden = true; chip.setAttribute('role', 'status'); chip.setAttribute('aria-live', 'polite');
@@ -42,7 +43,11 @@ export function createAssistant(ctx) {
       chip.hidden = false; chip.className = 'busy';
       chip.innerHTML = `${uicon('sparkle', 14, 1.7)}<span>Assistant is ${esc(toolWords(x.tool))}${x.design ? ` in <b>${esc(x.design)}</b>` : ''}</span><button type="button" class="btn sm" id="ai-stop" title="Stop the assistant: its changes are refused until you press Resume">Stop</button>`;
       chip.querySelector('#ai-stop').onclick = () => hold(true);
-    } else { chip.hidden = true; chip.innerHTML = ''; }
+    } else if (lastDone && Date.now() - lastDone.at < DONE_MS) { // it has just finished: say what it did, for a moment
+      chip.hidden = false; chip.className = 'done';
+      chip.innerHTML = `${uicon('check', 14, 2)}<span>Assistant ${esc(toolPast(lastDone.tool))}${lastDone.design ? ` in <b>${esc(lastDone.design)}</b>` : ''}</span>`;
+      clearTimeout(chipTimer); chipTimer = setTimeout(paintChip, DONE_MS - (Date.now() - lastDone.at) + 30);
+    } else { chip.hidden = true; chip.innerHTML = ''; lastDone = null; }
     const btn = document.querySelector('#btn-ai');
     if (btn) { btn.classList.toggle('has', open() > 0); btn.dataset.count = open() ? String(open()) : ''; btn.title = open() ? `Ask the assistant (${open()} waiting)` : 'Ask the assistant'; }
   }
@@ -60,7 +65,7 @@ export function createAssistant(ctx) {
     if (ev.type === 'activity') {
       const key = ev.tool + '|' + ev.design;
       if (ev.state === 'start') busy.set(key + Math.random(), { ...ev, key });
-      else for (const [k, v] of busy) if (v.key === key) { busy.delete(k); break; }
+      else for (const [k, v] of busy) if (v.key === key) { busy.delete(k); if (v.write || v.tool === 'render_view') lastDone = { tool: v.tool, design: v.design, at: Date.now() }; break; }
       clearTimeout(chipTimer); chipTimer = setTimeout(paintChip, 300); paintChip();
       return;
     }
