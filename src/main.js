@@ -136,7 +136,27 @@ let kernelBytes = { n: 0, total: 0 };
 const kernelEvent = () => window.dispatchEvent(new Event('sketchy-kernel')); // the welcome card and the guided tour show how far the download is
 const HEAVY_MS = 150; // a rebuild slower than this moves the kernel to the worker
 const canWorker = typeof Worker !== 'undefined';
-let kernelHeavy = false, lastRebuildMs = 0, quickRuns = 0;
+let kernelHeavy = false, lastRebuildMs = 0;
+// A rebuild on the page freezes the whole interface for as long as it takes, so a design that is slow to build is built in the worker
+// from the start. Which designs those are is remembered here (by name, in this browser); a design with no history that already has
+// many features goes to the worker too, rather than freezing once to find out.
+const HEAVY_KEY = 'sketchy.heavy', HEAVY_FEATURES = 25;
+const heavyHints = () => { try { const m = JSON.parse(localStorage.getItem(HEAVY_KEY) || '{}'); return m && typeof m === 'object' ? m : {}; } catch { return {}; } };
+function noteHeavy(ms) {
+  if (!doc.name || doc.name === 'Untitled' || !(ms > HEAVY_MS)) return;
+  try {
+    const m = heavyHints(); m[doc.name] = { ms: Math.round(ms), n: doc.features.length, at: Date.now() };
+    const keep = Object.entries(m).sort((a, b) => b[1].at - a[1].at).slice(0, 200);
+    localStorage.setItem(HEAVY_KEY, JSON.stringify(Object.fromEntries(keep)));
+  } catch { /* storage unavailable */ }
+}
+/** Choose where the design just opened is built: the worker when it is known to be slow (or is big), the page otherwise. */
+function applyHeavyHint() {
+  if (!canWorker || !doc) return;
+  const h = heavyHints()[doc.name], n = doc.features.length;
+  kernelHeavy = h ? n >= h.n * 0.5 : n >= HEAVY_FEATURES; // a design that has become much simpler than it was is light again
+  if (kernelHeavy) ensureKernelWorker();
+}
 const kw = { worker: null, ready: false, seq: 0, running: null, pending: null, meshes: new Map(), idle: [], busyTimer: 0 };
 function ensureKernelWorker() {
   if (kw.worker || !canWorker) return;
@@ -163,7 +183,7 @@ function rebuildInWorker(req, done) {
 function sendRebuild(req, resend = false) {
   kw.running = { id: ++kw.seq, req, t0: performance.now() };
   kw.worker.postMessage({ type: 'rebuild', id: kw.running.id, features: req.features, count: req.count, opts: req.opts, resend });
-  clearTimeout(kw.busyTimer); kw.busyTimer = setTimeout(() => showBusy(true), 400);
+  clearTimeout(kw.busyTimer); if (!req.silent) kw.busyTimer = setTimeout(() => showBusy(true), 400); // a warm-up build for the next change is not announced
 }
 function onKernelMessage(e) {
   const m = e.data;
@@ -182,8 +202,7 @@ function onKernelMessage(e) {
     for (const b of res.bodies) { if (b.verts) kw.meshes.set(b.key, { verts: b.verts, tris: b.tris }); else Object.assign(b, kw.meshes.get(b.key)); }
     const keep = new Set(res.bodies.map((b) => b.key)); for (const k of [...kw.meshes.keys()]) if (!keep.has(k)) kw.meshes.delete(k);
     lastRebuildMs = m.ms;
-    quickRuns = m.ms < 40 ? quickRuns + 1 : 0;
-    if (quickRuns >= 6 && !kw.pending) { kernelHeavy = false; quickRuns = 0; kw.worker.postMessage({ type: 'clear' }); kw.meshes = new Map(); } // cheap again: go back to rebuilding on the page
+    noteHeavy(m.ms);
     run.req.done(res);
   }
   if (kw.pending) { const next = kw.pending; kw.pending = null; sendRebuild(next); }
@@ -244,7 +263,10 @@ function refreshNow() {
   try { result = rebuild(req.features, req.count, req.opts); }
   catch (e) { console.error(e); toast('Kernel error: ' + e.message, true); return; }
   lastRebuildMs = performance.now() - t0;
-  if (lastRebuildMs > HEAVY_MS && canWorker) { kernelHeavy = true; clearKernelCache(); ensureKernelWorker(); } // from the next change on, rebuild off the main thread
+  if (lastRebuildMs > HEAVY_MS && canWorker) { // slow: from now on rebuild off the main thread, and remember it for the next time this design is opened
+    kernelHeavy = true; noteHeavy(lastRebuildMs); ensureKernelWorker();
+    rebuildInWorker({ ...req, silent: true }, () => {}); // warm the worker's cache now, quietly, so the next change builds only what it touches
+  }
   applyResult(evalErr);
 }
 /**
@@ -3188,7 +3210,7 @@ function loadProject(txt, rev = 0, seq = rev) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
   doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], template: d.template && typeof d.template === 'object' && Array.isArray(d.template.sliders) ? d.template : undefined, rev, seq };
-  setUnits(doc.units);
+  setUnits(doc.units); applyHeavyHint();
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
   vp.fitted = false; refresh();
@@ -3346,7 +3368,7 @@ function captureTabState() {
   };
 }
 function applyTabState(st) {
-  doc = st.doc; undoStack = st.undoStack; redoStack = st.redoStack; dirty = st.dirty;
+  doc = st.doc; applyHeavyHint(); undoStack = st.undoStack; redoStack = st.redoStack; dirty = st.dirty;
   hiddenBodies.clear(); st.hidden.forEach((h) => hiddenBodies.add(h));
   for (const k of Object.keys(sketchVis)) delete sketchVis[k];
   Object.assign(sketchVis, st.sketchVis);
