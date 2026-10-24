@@ -724,10 +724,11 @@ function renderTimeline() {
     m.onpointerdown = (e) => {
       if (sketch || dialog) return;
       stopPlay();
-      m.setPointerCapture(e.pointerId);
+      e.preventDefault();
       markerDrag = true; m.classList.add('drag');
       let frame = 0;
-      m.onpointermove = (ev) => {
+      // listen on the document, not on the marker: moving the marker in the timeline (remove and insert) makes the browser drop its pointer capture
+      const move = (ev) => {
         const items = [...host.querySelectorAll('.tl-item')];
         let pos = 0;
         items.forEach((it, i) => { const r = it.getBoundingClientRect(); if (ev.clientX > r.left + r.width / 2) pos = i + 1; });
@@ -738,11 +739,11 @@ function renderTimeline() {
         if (!frame) frame = requestAnimationFrame(() => { frame = 0; refresh(); });
       };
       const end = () => {
-        m.onpointermove = m.onpointerup = m.onpointercancel = null;
+        document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end);
         if (frame) { cancelAnimationFrame(frame); frame = 0; }
-        markerDrag = false; refresh();
+        m.classList.remove('drag'); markerDrag = false; refresh();
       };
-      m.onpointerup = end; m.onpointercancel = end;
+      document.addEventListener('pointermove', move); document.addEventListener('pointerup', end); document.addEventListener('pointercancel', end);
     };
     return m;
   };
