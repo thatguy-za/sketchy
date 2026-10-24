@@ -1,6 +1,6 @@
 {
   "name": "sketchy",
-  "version": "0.0.42",
+  "version": "0.0.43",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -9,6 +9,7 @@
     "test:robustness": "node scripts/robustness.mjs",
     "test:templates": "node scripts/templates-test.mjs",
     "test:bin": "node scripts/bin-test.mjs",
+    "test:formats": "node scripts/format-test.mjs",
     "test:docker-files": "node scripts/docker-files-test.mjs",
     "test:security": "node scripts/security-test.mjs",
     "test:mcp-limits": "node scripts/mcp-limits-test.mjs",

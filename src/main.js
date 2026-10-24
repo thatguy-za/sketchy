@@ -15,6 +15,7 @@ const LOGO_MARK = '<svg viewBox="0 0 64 64" width="16" height="16"><rect x="4" y
 import { parseSVG, parseDXF, textShapes } from './import2d.js';
 import { repairSoup, describeRepair } from './meshrepair.js';
 import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
+import { readEmbeddedDesign } from './importers.js';
 import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, edgeRef, planarFace, norm as vnorm } from './edges.js';
 import { acct, call, refreshAccount, ensureSignedIn, oauthConsent, requireLogin, showAuth, signOut, setAccountMenuHandler, setAccountChangeHandler, modal, showAccount, openUserMenu, showAdmin } from './account.js';
@@ -1318,9 +1319,9 @@ function renderDialog() {
   const def = defOf(f);
   const wrap = $('#props-wrap');
   const hint = def.fields.some((x) => x.type === 'profiles') ? 'Click inside a shaded region in the canvas to add or remove profiles. Hold Shift to modify the selection.' : def.label;
-  wrap.innerHTML = `<div class="props"><div class="title"><button class="tmin" title="Collapse">−</button><span>${esc((def.label || f.name).toUpperCase())}</span></div><div class="body"></div>
+  wrap.innerHTML = `<div class="props"><div class="title"><button class="tmin" title="Minimise" aria-label="Minimise">${uicon('minus', 14, 2)}</button><span>${esc((def.label || f.name).toUpperCase())}</span></div><div class="body"></div>
     <div class="foot"><span class="info" title="${esc(hint)}">i</span><button class="btn primary" id="d-ok">OK</button><button class="btn" id="d-cancel">Cancel</button></div></div>`;
-  wrap.querySelector('.tmin').onclick = () => wrap.querySelector('.props').classList.toggle('collapsed');
+  wrap.querySelector('.tmin').onclick = (e) => { const min = wrap.querySelector('.props').classList.toggle('collapsed'); e.currentTarget.innerHTML = uicon(min ? 'expand' : 'minus', 14, 2); e.currentTarget.title = min ? 'Expand' : 'Minimise'; e.currentTarget.setAttribute('aria-label', min ? 'Expand' : 'Minimise'); };
   const body = wrap.querySelector('.body');
   const adv = []; // rows tucked under More options
   if (def.gizmo) {
@@ -2616,13 +2617,13 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 const EXPORT_FORMATS = [
-  ['3mf', '3MF', 'Recommended for 3D printing. Keeps units and colours, and opens in every slicer.'],
+  ['3mf', '3MF', 'Recommended for 3D printing. Keeps units and colours, and opens in every slicer. Can carry the editable design inside, so one file is all you need to keep.'],
   ['stl', 'STL', 'Works everywhere, but has no units or colours.'],
   ['obj', 'OBJ', ''],
   ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
   ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
 ];
-function exportFile(fmt, name, selectedOnly, split = false) {
+function exportFile(fmt, name, selectedOnly, split = false, embed = false) {
   if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: look((doc.appearance || {})[b.id]).color }));
   if (!bodies.length) return toast('Nothing to export.', true);
@@ -2637,8 +2638,9 @@ function exportFile(fmt, name, selectedOnly, split = false) {
     toast(`Exporting ${bodies.length} ${fmt.toUpperCase()} files, one per body`);
     return;
   }
-  download(w(bodies, name), `${name}.${fmt}`);
-  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}`);
+  const withDesign = fmt === '3mf' && embed && !selectedOnly;
+  download(withDesign ? write3MF(bodies, name, projectJSON(name)) : w(bodies, name), `${name}.${fmt}`);
+  toast(`Exported ${bodies.length} body${bodies.length > 1 ? 's' : ''} as ${fmt.toUpperCase()}${withDesign ? ', with the editable design inside' : ''}`);
 }
 /** "_v3" for a saved design, so an exported file says which version it came from. */
 const verSuffix = () => (doc.rev ? `_v${doc.rev}` : '');
@@ -2669,6 +2671,7 @@ function exportDialog() {
       <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
       <div class="ex-check" id="ex-check" aria-live="polite" hidden></div>
       <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
+      <label class="ex-chk" id="ex-embedrow"><input type="checkbox" id="ex-embed" checked><span>Include the editable design <small>(reopen this file in Sketchy to keep editing)</small></span></label>
       <label class="ex-chk" id="ex-splitrow"><input type="checkbox" id="ex-split"><span>Each body as its own file <small id="ex-splitn"></small></span></label>
       <div class="note err-note" id="ex-err" role="alert"></div>
       <div class="modal-foot flush"><button type="button" class="btn" id="ex-c">Cancel</button><button type="submit" class="btn primary">Export</button></div>
@@ -2679,7 +2682,13 @@ function exportDialog() {
     const d = (EXPORT_FORMATS.find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
     de.textContent = d; de.hidden = !d;
     m.el.querySelector('#ex-sel').disabled = proj || !hasSel; m.el.querySelector('#ex-scope').style.opacity = proj || !hasSel ? '.55' : '';
+    syncEmbed();
     runChecks();
+  };
+  const syncEmbed = () => { // the design rides along only in a 3MF of the whole design
+    const row = m.el.querySelector('#ex-embedrow'), box = m.el.querySelector('#ex-embed'), is3 = fmtSel.value === '3mf';
+    const off = m.el.querySelector('#ex-sel').checked || m.el.querySelector('#ex-split').checked;
+    row.hidden = !is3; box.disabled = off; row.style.opacity = off ? '.55' : '';
   };
   let checkRun = 0, cancelCheck = { stop: false };
   const runChecks = async () => {
@@ -2709,6 +2718,7 @@ function exportDialog() {
   const splitBox = m.el.querySelector('#ex-split');
   const inScope = () => result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!(m.el.querySelector('#ex-sel').checked && fmtSel.value !== 'sketchy') || vp.selected.has(b.id)));
   const syncSplit = () => { // only meaningful when more than one body would be exported
+    syncEmbed();
     const k = inScope().length, off = fmtSel.value === 'sketchy' || k < 2;
     splitBox.disabled = off; if (off) splitBox.checked = false;
     m.el.querySelector('#ex-splitrow').style.opacity = off ? '.55' : '';
@@ -2726,10 +2736,22 @@ function exportDialog() {
     const fmt = fmtSel.value;
     try { localStorage.setItem('sketchy.exportFormat', fmt); } catch { /* storage unavailable */ }
     m.close();
-    exportFile(fmt, name, m.el.querySelector('#ex-sel').checked && fmt !== 'sketchy', m.el.querySelector('#ex-split').checked && fmt !== 'sketchy');
+    exportFile(fmt, name, m.el.querySelector('#ex-sel').checked && fmt !== 'sketchy', m.el.querySelector('#ex-split').checked && fmt !== 'sketchy', m.el.querySelector('#ex-embed').checked);
   };
 }
 /** Add one imported piece as a body: try it as it is, and repair it (weld, flip, fill holes) if that doesn't make a solid. */
+/** Open a design from a file: a Sketchy project (.sketchy.json) or a 3MF that carries its design inside. */
+async function openDesignFile(f) {
+  try {
+    let txt;
+    if (/\.3mf$/i.test(f.name)) {
+      txt = await readEmbeddedDesign(await f.arrayBuffer());
+      if (!txt) throw new Error('This 3MF has no Sketchy design inside, so it cannot be edited. Use Insert Model to bring its shapes into a design.');
+    } else txt = await f.text();
+    if (!newTab({ reuseBlank: true })) return;
+    loadProject(txt); renderDocTabs();
+  } catch (x) { toast(x.message, true); }
+}
 /** Rebuild the design now, and wait for it (the page rebuilds in place; a big design rebuilds in the worker). */
 async function rebuildNow() { refreshNow(); if (kernelHeavy && canWorker) await kernelIdle(); }
 async function importPart(part) {
@@ -4137,7 +4159,7 @@ async function boot() {
   set('btn-undo', uicon('undo', 18, 1.5) + caret); set('btn-redo', uicon('redo', 18, 1.5) + caret);
   set('btn-save', uicon('save', 18, 1.5)); set('btn-newtab', uicon('plus', 18, 1.8)); set('btn-ext', uicon('search', 18, 1.8));
  
-  set('pt-collapse', uicon('collapse', 12, 1.6)); set('pt-min', uicon('minus', 12, 2));
+  set('pt-min', uicon('minus', 12, 2));
   set('cube-home', uicon('home', 14, 1.6)); set('cube-menu', uicon('caret', 10, 0));
   $('#viewport').insertAdjacentHTML('beforeend', '<div id="loading">Loading CAD kernel…</div>');
   await initKernel({ locateFile: () => wasmUrl });
@@ -4165,7 +4187,7 @@ async function boot() {
   $('#btn-newtab').onclick = () => newDoc();
   renderDocTabs();
   $('#btn-ext').onclick = openQuickSearch;
-  $('#pt-min').onclick = $('#pt-collapse').onclick = () => $('#browser').classList.toggle('min');
+  $('#pt-min').onclick = () => { const min = $('#browser').classList.toggle('min'); $('#pt-min').innerHTML = uicon(min ? 'expand' : 'minus', 12, 2); $('#pt-min').title = min ? 'Expand' : 'Minimise'; };
   $('#cube-home').onclick = () => vp.home(true);
   document.querySelectorAll('.vc-arrow').forEach((b) => { const [ax, d] = b.dataset.t.split(','); b.onclick = () => vp.turnView(ax, +d); });
   { // roll arrows: two outlined arcs around the cube's top-right corner
@@ -4188,9 +4210,9 @@ async function boot() {
   $('#file-2d').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) import2D(f); };
   $('#file-repair').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importModel(f, { always: true }); };
   $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importModel(f); };
-  $('#file-proj').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) try { const txt = await f.text(); if (!newTab({ reuseBlank: true })) return; loadProject(txt); renderDocTabs(); } catch (x) { toast(x.message, true); } };
+  $('#file-proj').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) openDesignFile(f); };
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
-  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.(stl|obj|3mf|step|stp)$/i.test(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
+  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.3mf$/i.test(f.name)) f.arrayBuffer().then((b) => readEmbeddedDesign(b)).then((d) => (d ? openDesignFile(f) : importModel(f))); else if (f && /\.(stl|obj|step|stp)$/i.test(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
   initA11y();
   const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x3d94ff : 0x1f5fa8); sketchMatActive.color.setHex(d ? 0x2f8cff : 0x0b6bcb); };
   paint(getTheme()); onTheme(paint);

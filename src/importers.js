@@ -2,6 +2,7 @@
 // `soup` is a Float32Array with 9 numbers (three corners) per triangle, in millimetres. The app then repairs and welds it.
 import { parseSTL } from './stl.js';
 import { parseSTEP } from './stepimport.js';
+import { DESIGN_REL } from './exporters.js';
 
 const MM = { micron: 0.001, millimeter: 1, centimeter: 10, meter: 1000, inch: 25.4, foot: 304.8 };
 
@@ -118,6 +119,20 @@ export async function parse3MF(buf) {
   }
   if (!out.length) throw new Error('No meshes found in this 3MF file');
   return out;
+}
+
+/** The Sketchy design stored inside a 3MF written by Sketchy (as text), or null for any other 3MF. */
+export async function readEmbeddedDesign(buf) {
+  let files;
+  try { files = await readZip(buf); } catch { return null; }
+  const td = new TextDecoder();
+  const rels = files.get('_rels/.rels');
+  let target = null;
+  if (rels) for (const m of td.decode(rels).matchAll(/<Relationship\b[^>]*>/g)) if (attr(m[0], 'Type') === DESIGN_REL) target = attr(m[0], 'Target');
+  const part = target && files.get(target.replace(/^\//, ''));
+  if (!part) return null;
+  const txt = td.decode(part);
+  try { return JSON.parse(txt)?.format === 'sketchy' ? txt : null; } catch { return null; }
 }
 
 // ---------------------------------------------------------------- dispatcher

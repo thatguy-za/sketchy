@@ -164,6 +164,7 @@ const U = {
   more: '<circle cx="6" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18" cy="12" r="1.3" fill="currentColor"/>',
   collapse: '<path d="M11 6L5 12L11 18M18 6L12 12L18 18"/>',
   minus: '<path d="M5 12H19"/>',
+  expand: '<path d="M6 9L12 15L18 9"/>',
   upload: '<path d="M12 16V5M7.5 9.5L12 5L16.5 9.5M5 17V20H19V17"/>',
   sparkle: '<path d="M12 3V9M12 15V21M3 12H9M15 12H21M5.5 5.5L9.5 9.5M14.5 14.5L18.5 18.5M18.5 5.5L14.5 9.5M9.5 14.5L5.5 18.5"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7V12L15.5 14"/>',

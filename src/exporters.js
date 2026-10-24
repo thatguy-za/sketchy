@@ -45,8 +45,12 @@ export function zipStore(files) { // files: [{name, data: Uint8Array}]
 
 const hex = (c) => { const v = typeof c === 'number' ? c : parseInt(String(c).replace('#', ''), 16); return Number.isFinite(v) ? '#' + (v & 0xffffff).toString(16).padStart(6, '0').toUpperCase() + 'FF' : null; };
 
-/** 3MF core spec, millimetre units, one object per body, optional per-body colour. */
-export function write3MF(bodies, name = 'Sketchy') {
+export const DESIGN_PART = '/Metadata/sketchy-design.json';
+export const DESIGN_REL = 'https://sketchy.app/schemas/2026/relationships/design';
+
+/** 3MF core spec, millimetre units, one object per body, optional per-body colour. When `design` (the Sketchy design JSON, as text) is given it
+ *  rides along as a package part with its own relationship, as the 3MF/OPC format allows: slicers ignore it, Sketchy reopens it for editing. */
+export function write3MF(bodies, name = 'Sketchy', design = null) {
   const colors = [...new Set(bodies.map((b) => hex(b.color)).filter(Boolean))];
   let m = `<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n<metadata name="Title">${safe(name)}</metadata>\n<metadata name="Application">Sketchy</metadata>\n<resources>\n`;
   if (colors.length) m += `<basematerials id="1">${colors.map((c, i) => `<base name="c${i}" displaycolor="${c}"/>`).join('')}</basematerials>\n`;
@@ -61,12 +65,13 @@ export function write3MF(bodies, name = 'Sketchy') {
     m += '</triangles></mesh></object>\n';
   });
   m += `</resources>\n<build>${ids.map((i) => `<item objectid="${i}"/>`).join('')}</build>\n</model>\n`;
-  const ct = '<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>';
-  const rels = '<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>';
+  const ct = `<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>${design ? '<Default Extension="json" ContentType="application/json"/>' : ''}</Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>${design ? `<Relationship Target="${DESIGN_PART}" Id="rel1" Type="${DESIGN_REL}"/>` : ''}</Relationships>`;
   const z = zipStore([
     { name: '[Content_Types].xml', data: enc.encode(ct) },
     { name: '_rels/.rels', data: enc.encode(rels) },
     { name: '3D/3dmodel.model', data: enc.encode(m) },
+    ...(design ? [{ name: DESIGN_PART.slice(1), data: enc.encode(design) }] : []),
   ]);
   return new Blob([z], { type: 'model/3mf' });
 }

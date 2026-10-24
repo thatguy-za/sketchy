@@ -1223,3 +1223,6 @@ body.touch .row { margin: 10px 0; }
 .dp-fopen small { margin-left: auto; color: var(--muted); font-weight: 400; white-space: nowrap; }
 .dp-crumb .dp-sep svg { width: 12px; height: 12px; }
 .dp-crumb[hidden] { display: none; }
+.props .tmin { display: inline-grid; place-items: center; }
+.props .tmin svg, .panel-title .pt-r svg { display: block; }
+.panel-title .pt-r { cursor: pointer; }
