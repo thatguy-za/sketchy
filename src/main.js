@@ -712,7 +712,9 @@ function fiName(f) {
   return n;
 }
 function stopPlay() { if (playTimer) { clearInterval(playTimer); playTimer = null; } }
+let markerDrag = false; // the marker is being dragged: the timeline keeps its elements until the drag ends, or the one being held would vanish after the first step
 function renderTimeline() {
+  if (markerDrag) return;
   const host = $('#timeline');
   host.innerHTML = '';
   const shownMarker = sketch ? sketch.index : doc.marker;
@@ -723,13 +725,24 @@ function renderTimeline() {
       if (sketch || dialog) return;
       stopPlay();
       m.setPointerCapture(e.pointerId);
+      markerDrag = true; m.classList.add('drag');
+      let frame = 0;
       m.onpointermove = (ev) => {
         const items = [...host.querySelectorAll('.tl-item')];
         let pos = 0;
         items.forEach((it, i) => { const r = it.getBoundingClientRect(); if (ev.clientX > r.left + r.width / 2) pos = i + 1; });
-        if (pos !== doc.marker) { doc.marker = pos; refresh(); }
+        if (pos === doc.marker) return;
+        doc.marker = pos; // move the marker and dim the steps after it right away; the model catches up once per frame
+        items.forEach((it, i) => it.classList.toggle('off', i >= pos));
+        host.insertBefore(m, items[pos] || null);
+        if (!frame) frame = requestAnimationFrame(() => { frame = 0; refresh(); });
       };
-      m.onpointerup = () => { m.onpointermove = null; };
+      const end = () => {
+        m.onpointermove = m.onpointerup = m.onpointercancel = null;
+        if (frame) { cancelAnimationFrame(frame); frame = 0; }
+        markerDrag = false; refresh();
+      };
+      m.onpointerup = end; m.onpointercancel = end;
     };
     return m;
   };

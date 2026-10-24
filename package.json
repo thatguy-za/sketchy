@@ -1,11 +1,12 @@
 {
   "name": "sketchy",
-  "version": "0.0.44",
+  "version": "0.0.45",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "preview:watch": "node scripts/preview-watch.mjs",
     "test:robustness": "node scripts/robustness.mjs",
     "test:templates": "node scripts/templates-test.mjs",
     "test:bin": "node scripts/bin-test.mjs",
