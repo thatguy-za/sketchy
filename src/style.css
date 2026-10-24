@@ -1208,3 +1208,14 @@ body.touch .row { margin: 10px 0; }
 #ai-panel .ai-reply svg { vertical-align: -2px; color: var(--accent); }
 #ai-panel .ai-foot { display: flex; justify-content: flex-end; }
 
+
+/* ---- Designs panel: folder tree ---- */
+.dp-tree { padding: 2px 8px 6px; max-height: 38%; overflow: auto; border-bottom: 1px solid var(--line); flex: none; }
+.dp-trow { display: flex; align-items: center; border-radius: 4px; }
+.dp-trow.on { background: var(--accent-soft); }
+.dp-trow.dropping { background: var(--accent-soft); outline: 2px dashed var(--accent); }
+.dp-ttwist { width: 18px; flex: none; border: 0; background: none; padding: 0; color: inherit; display: inline-grid; place-items: center; }
+.dp-tname { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 5px 6px; font: inherit; text-align: left; color: inherit; border-radius: 4px; }
+.dp-trow:not(.on) .dp-tname:hover { background: var(--ov-08); }
+.dp-tname small { margin-left: auto; color: var(--muted); }
+.dp-tname:focus-visible, .dp-ttwist:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
