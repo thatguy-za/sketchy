@@ -1209,13 +1209,17 @@ body.touch .row { margin: 10px 0; }
 #ai-panel .ai-foot { display: flex; justify-content: flex-end; }
 
 
-/* ---- Designs panel: folder tree ---- */
-.dp-tree { padding: 2px 8px 6px; max-height: 38%; overflow: auto; border-bottom: 1px solid var(--line); flex: none; }
-.dp-trow { display: flex; align-items: center; border-radius: 4px; }
-.dp-trow.on { background: var(--accent-soft); }
-.dp-trow.dropping { background: var(--accent-soft); outline: 2px dashed var(--accent); }
-.dp-ttwist { width: 18px; flex: none; border: 0; background: none; padding: 0; color: inherit; display: inline-grid; place-items: center; }
-.dp-tname { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 5px 6px; font: inherit; text-align: left; color: inherit; border-radius: 4px; }
-.dp-trow:not(.on) .dp-tname:hover { background: var(--ov-08); }
-.dp-tname small { margin-left: auto; color: var(--muted); }
-.dp-tname:focus-visible, .dp-ttwist:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* ---- Designs panel: folders open in place, with a path along the top ---- */
+.dp-crumb { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 4px 8px 8px; font-weight: 600; flex: none; }
+.dp-seg { display: inline-flex; align-items: center; border: 0; background: none; padding: 4px 6px; border-radius: 4px; font: inherit; color: inherit; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-seg:hover:not(.here) { background: var(--ov-08); }
+.dp-seg.here { cursor: default; }
+.dp-seg.dropping { background: var(--accent-soft); outline: 2px dashed var(--accent); }
+.dp-seg:focus-visible, .dp-fopen:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dp-sep { color: var(--muted); display: inline-grid; transform: rotate(-90deg); }
+.dp-frow { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 4px; flex: none; }
+.dp-frow.dropping { background: var(--accent-soft); outline: 2px dashed var(--accent); }
+.dp-fopen { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 12px 10px; font: inherit; font-weight: 600; text-align: left; color: inherit; }
+.dp-fopen:hover { background: var(--ov-08); }
+.dp-fopen small { margin-left: auto; color: var(--muted); font-weight: 400; white-space: nowrap; }
+.dp-crumb .dp-sep svg { width: 12px; height: 12px; }

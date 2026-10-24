@@ -3896,7 +3896,7 @@ async function renderDataPanel() {
   const host = $('#data-panel');
   host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-openfile" title="Open a project file from your computer" aria-label="Open a project file from your computer">${uicon('upload', 16)}</button><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
     <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16, 1.8)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
-    <div class="dp-tree" id="dp-tree" role="tree" aria-label="Folders"></div>
+    <nav class="dp-crumb" id="dp-crumb" aria-label="Folder path"></nav>
     <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
     <div class="dp-actions"><button class="btn primary" id="dp-new">New design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New folder</button></div>
     <button class="dp-binlink" id="dp-bin" type="button" title="Deleted designs wait here and can be restored">${uicon('trash', 15)}<span>Recycle bin</span><em id="dp-bincount"></em></button>
@@ -3923,7 +3923,6 @@ async function renderDataPanel() {
     if (!r.ok) { grid.innerHTML = `<div class="dp-empty">${esc(r.data?.error || 'Could not load designs.')}</div>`; return; }
     const folders = fr.ok ? fr.data.folders : [];
     $('#dp-count').textContent = `${r.data.length} design${r.data.length === 1 ? '' : 's'}`;
-    $('#dp-newfolder').onclick = () => newFolder('');
     const collapsed = new Set(JSON.parse(localStorage.getItem('sketchy.folders.collapsed') || '[]'));
     const saveCollapsed = () => { try { localStorage.setItem('sketchy.folders.collapsed', JSON.stringify([...collapsed])); } catch { /* storage unavailable */ } };
     const newFolder = async (parent) => {
@@ -3939,10 +3938,11 @@ async function renderDataPanel() {
       if (name === doc.name) doc.folder = folder;
       renderDataPanel();
     };
-    let sel = null; // null = all designs, '' = not in a folder, otherwise a folder path
-    try { const v = localStorage.getItem('sketchy.folders.selected'); if (v !== null && v !== '\u0000') sel = v === '\u0001' ? '' : JSON.parse(v); } catch { sel = null; }
-    if (sel && !folders.includes(sel)) sel = null;
-    const setSel = (v) => { sel = v; try { localStorage.setItem('sketchy.folders.selected', v === null ? '\u0000' : v === '' ? '\u0001' : JSON.stringify(v)); } catch { /* storage unavailable */ } draw(); };
+    let cwd = ''; // the folder being shown ('' = the top level)
+    try { cwd = JSON.parse(localStorage.getItem('sketchy.folders.cwd') || '""'); } catch { cwd = ''; }
+    if (typeof cwd !== 'string' || (cwd && !folders.includes(cwd))) cwd = '';
+    const setCwd = (v) => { cwd = v; try { localStorage.setItem('sketchy.folders.cwd', JSON.stringify(v)); } catch { /* storage unavailable */ } draw(); };
+    $('#dp-newfolder').onclick = () => newFolder(cwd);
     const drop = (el, path) => {
       el.ondragover = (e) => { if ([...e.dataTransfer.types].includes('text/x-sketchy-design')) { e.preventDefault(); el.classList.add('dropping'); } };
       el.ondragleave = () => el.classList.remove('dropping');
@@ -3957,7 +3957,7 @@ async function renderDataPanel() {
         const rr = await call('PATCH', '/folders', { from: path, to: parent + nm });
         if (!rr.ok) return toast(rr.data?.error || 'Could not rename the folder.', true);
         if ((doc.folder || '') === path || (doc.folder || '').startsWith(path + '/')) doc.folder = parent + nm + (doc.folder || '').slice(path.length);
-        if (sel === path || (sel || '').startsWith(path + '/')) sel = parent + nm + sel.slice(path.length);
+        if (cwd === path || cwd.startsWith(path + '/')) cwd = parent + nm + cwd.slice(path.length);
         renderDataPanel();
       } },
       { label: 'Move to folder…', uicon: 'folder', run: async () => {
@@ -3966,45 +3966,32 @@ async function renderDataPanel() {
         const to = (dest ? dest + '/' : '') + path.split('/').pop();
         const rr = await call('PATCH', '/folders', { from: path, to });
         if (!rr.ok) return toast(rr.data?.error || 'Could not move the folder.', true);
-        if (sel === path || (sel || '').startsWith(path + '/')) sel = to + sel.slice(path.length);
+        if (cwd === path || cwd.startsWith(path + '/')) cwd = to + cwd.slice(path.length);
         renderDataPanel();
       } },
       { label: 'Delete folder', uicon: 'trash', run: async () => {
         if (!(await confirmBox({ title: 'Delete folder', message: `Delete the folder "${path}"? It must be empty of designs.`, ok: 'Delete', danger: true }))) return;
         const rr = await call('DELETE', '/folders?path=' + encodeURIComponent(path));
         if (!rr.ok) return toast(rr.data?.error || 'Could not delete the folder.', true);
-        if (sel === path) sel = null;
+        if (cwd === path || cwd.startsWith(path + '/')) cwd = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
         renderDataPanel();
       } },
     ]);
-    const drawTree = () => {
-      const tree = $('#dp-tree'); tree.innerHTML = '';
-      if (!folders.length) { tree.hidden = true; return; }
-      tree.hidden = false;
-      const count = (path) => r.data.filter((x) => x.folder === path || (x.folder || '').startsWith(path + '/')).length;
-      const row = (label, n, o) => {
-        const el = document.createElement('div');
-        el.className = 'dp-trow' + (o.on ? ' on' : ''); el.setAttribute('role', 'treeitem'); el.setAttribute('aria-selected', String(!!o.on));
-        el.style.paddingLeft = (o.depth || 0) * 14 + 'px';
-        el.innerHTML = `${o.kids ? `<button type="button" class="dp-ttwist" tabindex="-1" aria-label="${o.closed ? 'Expand' : 'Collapse'} ${esc(label)}"><span class="dp-chev${o.closed ? ' closed' : ''}">${uicon('caret', 12)}</span></button>` : '<span class="dp-ttwist"></span>'}<button type="button" class="dp-tname" title="${esc(o.path ?? label)}">${uicon(o.icon || 'folder', 15)}<span class="dp-fname">${esc(label)}</span><small>${n}</small></button>`;
-        el.querySelector('.dp-tname').onclick = o.pick;
-        if (o.kids) el.querySelector('.dp-ttwist').onclick = o.toggle;
-        if (o.menu) { el.oncontextmenu = (e) => { e.preventDefault(); o.menu(e.clientX, e.clientY); }; }
-        if (o.drop !== undefined) drop(el, o.drop);
-        tree.appendChild(el);
+    const drawCrumb = () => {
+      const bar = $('#dp-crumb'); bar.innerHTML = '';
+      const seg = (label, path, last, home) => {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'dp-seg' + (last ? ' here' : '');
+        b.innerHTML = home ? uicon('home', 18) : esc(label); b.title = home ? 'All designs' : path; b.setAttribute('aria-label', home ? 'All designs' : label);
+        if (last) b.setAttribute('aria-current', 'page'); else b.onclick = () => setCwd(path);
+        drop(b, path); bar.appendChild(b);
       };
-      row('All designs', r.data.length, { on: sel === null, icon: 'file', pick: () => setSel(null) });
-      const hidden = (path) => { const parts = path.split('/'); for (let i = 1; i < parts.length; i++) if (collapsed.has(parts.slice(0, i).join('/'))) return true; return false; };
-      for (const path of [...folders].sort((a, b) => a.localeCompare(b))) {
-        if (hidden(path)) continue;
-        const closed = collapsed.has(path), kids = folders.some((f) => f.startsWith(path + '/'));
-        row(path.split('/').pop(), count(path), { path, depth: path.split('/').length - 1, on: sel === path, kids, closed, drop: path, menu: (x, y) => folderMenu(path, x, y), pick: () => setSel(path), toggle: () => { closed ? collapsed.delete(path) : collapsed.add(path); saveCollapsed(); drawTree(); } });
-      }
-      row('Not in a folder', r.data.filter((x) => !x.folder).length, { on: sel === '', icon: 'file', drop: '', pick: () => setSel('') });
+      const parts = cwd ? cwd.split('/') : [];
+      seg('', '', !parts.length, true);
+      parts.forEach((nm, i) => { bar.insertAdjacentHTML('beforeend', `<span class="dp-sep" aria-hidden="true">${uicon('caret', 12)}</span>`); seg(nm, parts.slice(0, i + 1).join('/'), i === parts.length - 1); });
     };
     const q = $('#dp-q'), draw = () => {
       grid.innerHTML = '';
-      drawTree();
+      drawCrumb();
       const term = q.value.trim().toLowerCase();
       if (!r.data.length && !folders.length) { grid.innerHTML = '<div class="dp-empty">No designs yet. Use <b>Save</b> (Ctrl+S) to store the current model in your profile.</div>'; return; }
       const designCard = (pr, showPath) => {
@@ -4047,9 +4034,20 @@ async function renderDataPanel() {
         for (const pr of items) grid.appendChild(designCard(pr, true));
         return;
       }
-      const items = r.data.filter((x) => sel === null || (x.folder || '') === sel).sort((a, b) => b.modified - a.modified);
-      if (!items.length) grid.innerHTML = `<div class="dp-empty">${sel === null ? 'No designs yet.' : sel === '' ? 'Every design is in a folder.' : 'This folder is empty. Drag designs onto it in the list above, or choose Save and pick it.'}</div>`;
-      for (const pr of items) grid.appendChild(designCard(pr, sel === null));
+      const kids = folders.filter((f) => (f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '') === cwd).sort((a, b) => a.localeCompare(b));
+      for (const path of kids) {
+        const total = r.data.filter((x) => x.folder === path || (x.folder || '').startsWith(path + '/')).length, name = path.split('/').pop();
+        const row = document.createElement('div'); row.className = 'dp-frow';
+        row.innerHTML = `<button type="button" class="dp-fopen" aria-label="Open folder ${esc(name)}">${uicon('folder', 28, 1.4)}<span class="dp-fname">${esc(name)}</span><small>${total} design${total === 1 ? '' : 's'}</small></button>
+          <button type="button" class="dp-more" title="Folder actions" aria-haspopup="menu" aria-label="Actions for folder ${esc(name)}">${uicon('more', 16)}</button>`;
+        row.querySelector('.dp-fopen').onclick = () => setCwd(path);
+        row.querySelector('.dp-more').onclick = (e) => { e.stopPropagation(); const b = e.currentTarget.getBoundingClientRect(); folderMenu(path, b.left, b.bottom + 2); };
+        row.oncontextmenu = (e) => { e.preventDefault(); folderMenu(path, e.clientX, e.clientY); };
+        drop(row, path); grid.appendChild(row);
+      }
+      const items = r.data.filter((x) => (x.folder || '') === cwd).sort((a, b) => b.modified - a.modified);
+      for (const pr of items) grid.appendChild(designCard(pr, false));
+      if (!kids.length && !items.length) grid.insertAdjacentHTML('beforeend', `<div class="dp-empty">${cwd ? 'This folder is empty. Drag designs onto its name above, or choose Save and pick it.' : 'No designs yet.'}</div>`);
     };
     q.oninput = draw; draw();
   } else {
