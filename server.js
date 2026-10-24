@@ -559,6 +559,14 @@ function strikeToken(id, kind, ip) {
   if (ent.strikes.length >= MCP_STRIKES) { ent.paused = { at: now, reason: kind }; ent.strikes = []; log('mcp_token_paused', ip, `user=${ent.user} token=${id.slice(0, 8)} reason=${kind}`); }
   saveMcp();
 }
+/** The assistant's name for the activity pill: Claude, ChatGPT or Gemini when the connection says so, otherwise the name it was given. */
+const assistantName = (n) => {
+  const s = String(n || '').replace(/\s*\((connected app)\)\s*$/i, '').trim();
+  if (/claude|anthropic/i.test(s)) return 'Claude';
+  if (/chatgpt|openai|gpt/i.test(s)) return 'ChatGPT';
+  if (/gemini/i.test(s)) return 'Gemini';
+  return s.replace(/[<>&"]/g, '').slice(0, 30);
+};
 async function mcpEndpoint(req, res, url) {
   const origin = req.headers.origin;
   if (origin) { // a browser page is calling: only origins the admin listed may, and they get CORS headers
@@ -587,7 +595,7 @@ async function mcpEndpoint(req, res, url) {
   if (wait) { strikeToken(who.id, 'rate_limited', ip); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }
   const body = await readJSONBody(req, 4e6);
   if (!body) return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
-  const out = await mcpHandle(who.user, body, { strike: (kind) => strikeToken(who.id, kind, ip) });
+  const out = await mcpHandle(who.user, body, { strike: (kind) => strikeToken(who.id, kind, ip), client: assistantName(who.ent.name) });
   if (out === null) { res.statusCode = 202; return res.end(); }
   return send(res, 200, out);
 }

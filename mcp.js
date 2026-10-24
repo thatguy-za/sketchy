@@ -27,7 +27,7 @@ export function createMcp(d) {
       if (!live?.design) return fail('No design is open in Sketchy right now, so "@current" means nothing. Use list_designs and the design\'s name.');
       args = { ...args, design: live.design };
     }
-    const note = (state) => { try { d.activity?.(user, { state, tool: tool.name, design: args.design || '', write: !!tool.write }); } catch { /* the app being unreachable must not break a tool */ } };
+    const note = (state) => { try { d.activity?.(user, { state, tool: tool.name, design: args.design || '', write: !!tool.write, client: ctx.client || '' }); } catch { /* the app being unreachable must not break a tool */ } };
     if (tool.write && d.held?.(user)) return fail('The person using Sketchy pressed Stop, so changes are paused. Do not retry. Tell them what you were about to do and ask them to press Resume in Sketchy (or tell you to carry on). Looking (get_design, render_view, find_faces) still works.');
     if (!LOCAL.has(tool.name) || tool.write) note('start');
     try {

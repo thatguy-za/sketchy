@@ -52,7 +52,7 @@ volumes:
 
 Connect Claude, ChatGPT or any MCP-capable assistant to Sketchy through our built-in MCP server, then describe what you want ("a 60×30×8 mm bracket with two 10 mm holes") and let it build the model in your account. It can create designs, add and edit features, set parameters, check the result and export an STL, and every change is saved as a version you can roll back.
 
-1. Click your initial (top right) → **Account** → **AI assistants** → **Create token**.
+1. Click your initial (top right) → **Account** → **AI assistants**, open the guide for your assistant and follow the steps. Each one signs in to your Sketchy account itself, so there is no token to copy.
 2. Open **Set up your assistant** on the same page and follow the step-by-step guide for Claude, ChatGPT or another assistant (each is a collapsed section).
 
 Web assistants like ChatGPT need Sketchy at a public `https` address: [set up HTTPS](docs/HTTPS.md) with Caddy or a Cloudflare Tunnel in a few minutes. See the [reference](docs/REFERENCE.md#ai-assistants-mcp) for the full tool list.

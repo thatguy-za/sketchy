@@ -200,6 +200,9 @@ held = false;
 activity.length = 0;
 await ask('tools/call', { name: 'add_feature', arguments: { design: 'T1', kind: 'box', params: { sx: 4, sy: 4, sz: 4, pos: [100, 0, 0] } } });
 check('a change reports start and end activity for the app', activity.some((a) => a.state === 'start' && a.tool === 'add_feature' && a.write) && activity.some((a) => a.state === 'end'), JSON.stringify(activity));
+activity.length = 0;
+await rpc('u', { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'add_feature', arguments: { design: 'T1', kind: 'box', params: { sx: 4, sy: 4, sz: 4, pos: [120, 0, 0] } } } }, { client: 'Claude' });
+check('the activity says which assistant is working', activity.length >= 2 && activity.every((a) => a.client === 'Claude'), JSON.stringify(activity));
 check('every write tool is blocked by Stop and every read tool is not', TOOLS.filter((t) => t.write).length > 8 && TOOLS.filter((t) => t.ro).every((t) => !t.write));
 
 console.log(`\n${passed} passed, ${failed} failed`);

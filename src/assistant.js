@@ -22,7 +22,7 @@ export const toolPast = (t) => PAST[t] || 'changed the design';
  *        currentDesignName(), onFlash(ids) }
  */
 export function createAssistant(ctx) {
-  let es = null, held = false, requests = [], panel = null, chipTimer = null, lastDone = null;
+  let lastClient = '', es = null, held = false, requests = [], panel = null, chipTimer = null, lastDone = null;
   const DONE_MS = 2800; // what the assistant just did stays readable this long: with a fast kernel a call is over in a few milliseconds and the chip would only flash
   const busy = new Map(); // key -> { tool, design, write }
   const chip = document.createElement('div');
@@ -36,16 +36,16 @@ export function createAssistant(ctx) {
     const b = [...busy.values()].filter((x) => x.write || x.tool === 'render_view');
     if (held) {
       chip.hidden = false; chip.className = 'held';
-      chip.innerHTML = `${uicon('lock', 14, 1.7)}<span>Assistant paused</span><button type="button" class="btn sm" id="ai-resume">Resume</button>`;
+      chip.innerHTML = `${uicon('lock', 14, 1.7)}<span>${esc(lastClient || 'Assistant')} paused</span><button type="button" class="btn sm" id="ai-resume">Resume</button>`;
       chip.querySelector('#ai-resume').onclick = () => hold(false);
     } else if (b.length) {
       const x = b[b.length - 1];
       chip.hidden = false; chip.className = 'busy';
-      chip.innerHTML = `${uicon('sparkle', 14, 1.7)}<span>Assistant is ${esc(toolWords(x.tool))}${x.design ? ` in <b>${esc(x.design)}</b>` : ''}</span><button type="button" class="btn sm" id="ai-stop" title="Stop the assistant: its changes are refused until you press Resume">Stop</button>`;
+      chip.innerHTML = `${uicon('sparkle', 14, 1.7)}<span>${esc(x.client || 'The assistant')} is ${esc(toolWords(x.tool))}${x.design ? ` in <b>${esc(x.design)}</b>` : ''}</span><button type="button" class="btn sm" id="ai-stop" title="Stop the assistant: its changes are refused until you press Resume">Stop</button>`;
       chip.querySelector('#ai-stop').onclick = () => hold(true);
     } else if (lastDone && Date.now() - lastDone.at < DONE_MS) { // it has just finished: say what it did, for a moment
       chip.hidden = false; chip.className = 'done';
-      chip.innerHTML = `${uicon('check', 14, 2)}<span>Assistant ${esc(toolPast(lastDone.tool))}${lastDone.design ? ` in <b>${esc(lastDone.design)}</b>` : ''}</span>`;
+      chip.innerHTML = `${uicon('check', 14, 2)}<span>${esc(lastDone.client || 'The assistant')} ${esc(toolPast(lastDone.tool))}${lastDone.design ? ` in <b>${esc(lastDone.design)}</b>` : ''}</span>`;
       clearTimeout(chipTimer); chipTimer = setTimeout(paintChip, DONE_MS - (Date.now() - lastDone.at) + 30);
     } else { chip.hidden = true; chip.innerHTML = ''; lastDone = null; }
     const btn = document.querySelector('#btn-ai');
@@ -63,9 +63,10 @@ export function createAssistant(ctx) {
     if (ev.type === 'hold') { held = !!ev.on; paintChip(); return; }
     if (ev.type === 'requests') { loadRequests(); return; }
     if (ev.type === 'activity') {
+      if (ev.client) lastClient = ev.client;
       const key = ev.tool + '|' + ev.design;
       if (ev.state === 'start') busy.set(key + Math.random(), { ...ev, key });
-      else for (const [k, v] of busy) if (v.key === key) { busy.delete(k); if (v.write || v.tool === 'render_view') lastDone = { tool: v.tool, design: v.design, at: Date.now() }; break; }
+      else for (const [k, v] of busy) if (v.key === key) { busy.delete(k); if (v.write || v.tool === 'render_view') lastDone = { tool: v.tool, design: v.design, client: v.client, at: Date.now() }; break; }
       clearTimeout(chipTimer); chipTimer = setTimeout(paintChip, 300); paintChip();
       return;
     }

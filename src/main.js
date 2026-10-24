@@ -324,8 +324,15 @@ function updateEdgeView() {
   if (dialog || sketch || measure) { vp.showEdges(dialog ? LOSTCHAINS() : [], null); return; }
   const chains = resolveSelEdges();
   vp.showEdges(chains, edgeHover?.chain || null);
-  if (chains.length) $('#hud').innerHTML = `<b>${chains.length} edge${chains.length > 1 ? 's' : ''} selected</b> — press F to fillet · use Chamfer in MODIFY · Esc to clear`;
-  else if (/edges? selected/.test($('#hud').textContent)) $('#hud').innerHTML = '';
+  if (/edges? selected/.test($('#hud').textContent)) $('#hud').innerHTML = ''; // older builds wrote the selection here; it now lives in the status line
+  renderStatus();
+}
+/** Length of an edge chain in millimetres (a closed one includes the closing segment). */
+function chainLength(ch) {
+  const P = ch.pts; let len = 0;
+  for (let i = 1; i < P.length; i++) len += Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1], P[i][2] - P[i - 1][2]);
+  if (ch.closed && P.length > 2) len += Math.hypot(P[0][0] - P.at(-1)[0], P[0][1] - P.at(-1)[1], P[0][2] - P.at(-1)[2]);
+  return len;
 }
 function toggleSelEdge(en, additive) {
   const ref = edgeRef(en.body, en.chain);
@@ -496,6 +503,14 @@ function renderStatus() {
     const g = faceGap(selFace, fb);
     $('#statusbar').textContent = g.parallel ? `Distance between faces: ${dispStr(g.d, 3)} ${getUnits()}` : `Angle between faces: ${g.ang.toFixed(2)}°`;
     return;
+  }
+  if (selEdges.length && !dialog && !sketch && !measure) {
+    const chains = resolveSelEdges();
+    if (chains.length) {
+      const total = chains.reduce((a, c) => a + chainLength(c), 0), u = getUnits();
+      $('#statusbar').textContent = chains.length === 1 ? `1 edge selected · length ${dispStr(total, 2)} ${u}` : `${chains.length} edges selected · total length ${dispStr(total, 2)} ${u}`;
+      return;
+    }
   }
   const n = result.bodies.length;
   const tris = result.bodies.reduce((a, b) => a + b.tris.length / 3, 0);
@@ -2491,7 +2506,7 @@ const BG = createBeginner({
   canConnect: () => !!(acct.server && acct.user), connectAssistant: () => connectAssistant(),
   run: (id) => runCommand(id), renderRibbon: () => renderRibbon(), afterSetup: () => { renderRibbon(); if (BG.customizerOpen()) BG.customizer(); },
 });
-/** The AI assistants page of the Account window: the server address, tokens and a step-by-step guide for each assistant. */
+/** The AI assistants page of the Account window: the server address, the connected assistants and a step-by-step guide for each assistant. */
 function connectAssistant() {
   if (!acct.server || !acct.user) return toast('Sign in to a Sketchy server to connect an assistant.', true);
   if (!acct.mcp) return toast('The administrator has turned assistant access off on this server.', true);
