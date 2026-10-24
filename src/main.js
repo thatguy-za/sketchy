@@ -1191,7 +1191,7 @@ function startFeature(key, overrides = {}) {
   const pre = snapshot();
   const params = { ...def.make(c), ...overrides };
   if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
-  if (key === 'combine') params.tool = result.bodies.find((b) => b.id !== params.target)?.id || '';
+  if (key === 'combine') { const o = result.bodies.find((b) => b.id !== params.target)?.id; params.tool = o ? [o] : []; }
   if (selFace?.curved && !selEdges.length && ['fillet', 'chamfer', 'presspull', 'hole', 'shell', 'draft'].includes(key)) return toast('That tool needs a flat face (or edges). A curved face can be given an appearance.', true);
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
     params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
@@ -1433,8 +1433,8 @@ function renderDialog() {
       ctl.innerHTML = `<div class="profrow"><div class="selbtn on"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 3l12 11.5-5.2.7 3 5.6-2.6 1.4-3-5.7-4.2 3.2z" fill="#fff" stroke="#333" stroke-width="1.4" stroke-linejoin="round"/></svg><span>${items.length ? `${chosen} selected` : 'No closed profiles'}</span></div><button type="button" class="xclear" title="Reset to the default selection">×</button></div>`;
       ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
     } else if (fld.type === 'bodies') {
-      const avail = bodiesBefore(idx);
-      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${val.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
+      const avail = bodiesBefore(idx), chosen = [].concat(val || []);
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${chosen.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
       ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'surfaces') {
       const avail = result.surfSnaps?.[idx] || result.surfaces.map((q) => ({ id: q.id, name: q.name }));
@@ -1455,6 +1455,8 @@ function renderDialog() {
       ctl.querySelector('#p3-clear').onclick = () => { set([]); renderDialog(); };
       ctl.querySelectorAll('input[data-k]').forEach((inp) => (inp.onchange = () => { const k = +inp.dataset.k, a = +inp.dataset.a, n = [...pts]; n[k] = [...n[k]]; n[k][a] = (+inp.value || 0) * f2; set(n); }));
       ctl.querySelectorAll('.p3-del').forEach((b2) => (b2.onclick = () => { set(pts.filter((_, k) => k !== +b2.dataset.k)); renderDialog(); }));
+    } else if (fld.type === 'text') {
+      const i = document.createElement('input'); i.type = 'text'; i.setAttribute('aria-label', fld.label); i.autocomplete = 'off'; i.spellcheck = false; i.value = val ?? ''; i.onchange = () => set(i.value); ctl.appendChild(i);
     } else if (fld.type === 'bool') {
       const c = document.createElement('input'); c.type = 'checkbox'; c.setAttribute('aria-label', fld.label); c.checked = !!val; c.onchange = () => { set(c.checked); if (['thread', 'through', 'internal'].includes(fld.key)) rerender(); }; ctl.appendChild(c);
     } else if (fld.type === 'sketchlist') {
@@ -1582,7 +1584,7 @@ function bodyFieldPick(e) {
     renderDialog(); return;
   }
   const bfld = defOf(f).fields.find((x) => x.type === 'bodies');
-  if (bfld && h) { const cur = f.params[bfld.key] || []; updateParam(dialog.index, bfld.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); renderDialog(); return; }
+  if (bfld && h) { const cur = [].concat(f.params[bfld.key] || []); updateParam(dialog.index, bfld.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); renderDialog(); return; }
   const flds = defOf(f).fields.filter((x) => x.type === 'body' && (!x.show || x.show(f.params)));
   if (!flds.length) return;
   if (!h) return;

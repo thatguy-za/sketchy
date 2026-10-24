@@ -16,8 +16,8 @@ Detailed notes on how things work. New here? Start with the [README](../README.m
 | Fillet · Chamfer | On picked edges or faces. Fillet can have a **variable radius** (start and end radius, optionally swapped), and **Whole loop** extends the pick along the connected edges that run around the same face |
 | **Shell** | Hollow a body to a wall thickness (inside, outside or centred), optionally opening picked faces |
 | **Scale** · **Split Body** | Uniform / non-uniform scale; split by plane or by another body |
-| Combine · Move/Copy · Mirror · Remove | Click bodies in the viewport to fill body fields |
-| **Pattern** | Linear, circular, **along a sketch path** or **on a face** (grid on the picked plane) |
+| Combine · Move/Copy · Mirror · Remove | Click bodies in the viewport to fill body fields. **Combine** takes several tool bodies at once; **Move** can go point to point; **Mirror** works about an origin plane or any construction plane |
+| **Pattern** | Linear, circular, **along a sketch path** or **on a face** (grid on the picked plane). Linear and circular patterns can use distance between or total distance, spread **symmetrically** about the original, and **skip** numbered instances |
 | **Text · Insert SVG · Insert DXF** | Sketch tools: text uses real Roboto outlines (counters become holes); SVG (paths, shapes, transforms, curves flattened) and DXF (LINE/ARC/CIRCLE/LWPOLYLINE/POLYLINE, touching segments joined, `$INSUNITS` honoured) are scaled to mm and centred. Also drag a `.svg`/`.dxf` onto the viewport |
 | **Interference** · **Drive Joints** · **As-built Joint** | Lists overlapping body pairs with volume; sliders move revolute/slider/cylindrical/planar joints; as-built keeps both bodies where they are |
 | **Units** | File → Document units (see the menu for the list). Geometry stays in mm; fields, measure and properties convert |

@@ -473,5 +473,24 @@ scenario('Curved faces', () => {
   check('a rounded corner is curved and does not swallow the flat faces beside it', cr && cr.tris.every((t) => !planarFace(rm.V, rm.T, t)));
 });
 
+console.log('Move, pattern, combine and mirror options');
+{
+  const box = (id, x, sz = 10) => prim(id, 'box', { sx: sz, sy: sz, sz, pos: [x, 0, 0] });
+  const ev = (fs) => evaluate(doc(fs)), bb = (r, id) => bodyOf(r, id).bbox ?? bodyOf(r, id).bounds;
+  const mv = ev([box('a', 0), { id: 'm', type: 'move', name: 'm', params: { body: 'a', mode: 'points', from: [1, 1, 1], to: [6, 1, 1], t: [0, 0, 0], r: [0, 0, 0], s: [1, 1, 1], copy: false } }]);
+  check('move point to point shifts by to − from', close(bb(mv, 'a').min[0], 0) && close(bb(mv, 'a').max[0], 10), JSON.stringify(bb(mv, 'a')));
+  const pat = (p) => bodyOf(ev([box('a', 0), { id: 'p', type: 'pattern', name: 'p', params: { body: 'a', kind: 'linear', count: 4, spacing: [30, 0, 0], axis: 'Z', angle: 360, ...p } }]), 'a');
+  check('pattern: distance between is the old behaviour', close(pat({}).volume, 4000) && close(bb({ result: { bodies: [pat({})] } }, 'a').max[0], 95, 0.5));
+  check('pattern: total distance fits the copies into the spacing', close(bb({ result: { bodies: [pat({ extent: 'extent' })] } }, 'a').max[0], 35, 0.5));
+  check('pattern: symmetric centres the copies on the original', close(bb({ result: { bodies: [pat({ symmetric: true })] } }, 'a').min[0], -50, 0.5));
+  check('pattern: skipped instances are left out', close(pat({ skip: '2' }).volume, 3000) && close(pat({ skip: '2, 3' }).volume, 2000));
+  const cb = (tool) => bodyOf(ev([box('a', 0, 20), box('b', 5), box('c', -5, 4), { id: 'c1', type: 'combine', name: 'c', params: { target: 'a', tool, op: 'cut', keepTool: false } }]), 'a');
+  check('combine: several tool bodies are cut in one step', close(cb(['b', 'c']).volume, 6936, 1), cb(['b', 'c']).volume);
+  check('combine: a design saved with one tool body still opens', close(cb('b').volume, 7000, 1));
+  const mi = (plane) => ev([box('a', 10), { id: 'pl', type: 'plane', name: 'pl', params: { mode: 'offset', base: 'YZ', offset: 5 } }, { id: 'mi', type: 'mirror', name: 'mi', params: { body: 'a', plane, offset: 0, join: false } }]);
+  check('mirror about a construction plane', close(bb(mi('pl'), 'mi').min[0], -5) && close(bb(mi('pl'), 'mi').max[0], 5), JSON.stringify(bb(mi('pl'), 'mi')));
+  check('mirror about an origin plane still works', close(bb(mi('YZ'), 'mi').min[0], -15));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

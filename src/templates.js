@@ -8,7 +8,7 @@ const S = (name, label, min, max, step, unit = 'mm', hint = '') => ({ name, labe
 let ids;
 const feat = (type, name, params, exprs = {}, id) => ({ id: id || `${type[0]}${ids.n++}`, type, name, params, ...(Object.keys(exprs).length ? { exprs } : {}) });
 const prim = (id, name, shape, params, exprs) => feat('primitive', name, { shape, pos: [0, 0, 0], op: 'new', ...params }, exprs, id);
-const combine = (name, target, tool, op) => feat('combine', name, { target, tool: Array.isArray(tool) ? tool[0] : tool, op, keepTool: false }); // one tool body: that is what Combine takes here
+const combine = (name, target, tool, op) => feat('combine', name, { target, tool: [].concat(tool), op, keepTool: false });
 const move = (name, body, r, t, exprs) => feat('move', name, { body, t: t || [0, 0, 0], r: r || [0, 0, 0], s: [1, 1, 1], copy: false, mode: 'free', from: [0, 0, 0], to: [0, 0, 0] }, exprs);
 
 /** The numbers a template shares: print settings, then its own. */

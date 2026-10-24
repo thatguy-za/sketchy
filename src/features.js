@@ -128,18 +128,22 @@ export const FEATURES = {
   },
   move: {
     label: 'Move / Copy', icon: 'move', type: 'move', gizmo: true,
-    make: (ctx) => ({ body: ctx.selected || '', t: [0, 0, 0], r: [0, 0, 0], s: [1, 1, 1], copy: false }),
+    make: (ctx) => ({ body: ctx.selected || '', t: [0, 0, 0], r: [0, 0, 0], s: [1, 1, 1], copy: false, mode: 'free', from: [0, 0, 0], to: [0, 0, 0] }),
     fields: [
-      { key: 'body', label: 'Body', type: 'body' }, { key: 't', label: 'Move', type: 'vec3' },
+      { key: 'body', label: 'Body', type: 'body' },
+      { key: 'mode', label: 'Move by', type: 'select', options: [['free', 'Distance in X, Y, Z'], ['points', 'Point to point']] },
+      { key: 't', label: 'Move', type: 'vec3', show: (p) => p.mode !== 'points' },
+      { key: 'from', label: 'From point', type: 'point', show: (p) => p.mode === 'points' },
+      { key: 'to', label: 'To point', type: 'point', show: (p) => p.mode === 'points' },
       { key: 'r', label: 'Rotate (°)', type: 'vec3' }, { key: 's', label: 'Scale', type: 'vec3', min: 0.001, step: 0.05 },
       { key: 'copy', label: 'Create copy', type: 'bool' },
     ],
   },
   combine: {
     label: 'Combine', icon: 'combine', type: 'combine',
-    make: (ctx) => ({ target: ctx.selected || '', tool: '', op: 'join', keepTool: false }),
+    make: (ctx) => ({ target: ctx.selected || '', tool: [], op: 'join', keepTool: false }),
     fields: [
-      { key: 'target', label: 'Target body', type: 'body' }, { key: 'tool', label: 'Tool body', type: 'body' },
+      { key: 'target', label: 'Target body', type: 'body' }, { key: 'tool', label: 'Tool bodies', type: 'bodies' },
       { key: 'op', label: 'Operation', type: 'select', options: [['join', 'Join'], ['cut', 'Cut'], ['intersect', 'Intersect']] },
       { key: 'keepTool', label: 'Keep tool', type: 'bool' },
     ],
@@ -148,13 +152,13 @@ export const FEATURES = {
     label: 'Mirror', icon: 'mirror', type: 'mirror',
     make: (ctx) => ({ body: ctx.selected || '', plane: 'YZ', offset: 0, join: false }),
     fields: [
-      { key: 'body', label: 'Body', type: 'body' }, { key: 'plane', label: 'Mirror plane', type: 'select', options: PLANE_OPTS },
+      { key: 'body', label: 'Body', type: 'body' }, { key: 'plane', label: 'Mirror plane', type: 'planeref' },
       { key: 'offset', label: 'Offset', type: 'num' }, { key: 'join', label: 'Join with original', type: 'bool' },
     ],
   },
   pattern: {
     label: 'Pattern', icon: 'pattern', type: 'pattern',
-    make: (ctx) => ({ body: ctx.selected || '', kind: 'linear', count: 3, spacing: [30, 0, 0], axis: 'Z', angle: 360, path: ctx.sketches.at(-1) || '', face: null, countU: 3, countV: 2, spacingU: 20, spacingV: 20 }),
+    make: (ctx) => ({ body: ctx.selected || '', kind: 'linear', count: 3, spacing: [30, 0, 0], axis: 'Z', angle: 360, path: ctx.sketches.at(-1) || '', face: null, countU: 3, countV: 2, spacingU: 20, spacingV: 20, extent: 'spacing', symmetric: false, skip: '' }),
     fields: [
       { key: 'body', label: 'Body', type: 'body' },
       { key: 'kind', label: 'Type', type: 'select', options: [['linear', 'Linear'], ['circular', 'Circular'], ['path', 'Along a path'], ['face', 'On a face']] },
@@ -168,6 +172,9 @@ export const FEATURES = {
       { key: 'spacing', label: 'Spacing', type: 'vec3', show: (p) => p.kind === 'linear' },
       { key: 'axis', label: 'Axis', type: 'select', options: [['X', 'X'], ['Y', 'Y'], ['Z', 'Z']], show: (p) => p.kind === 'circular' },
       { key: 'angle', label: 'Total angle', type: 'num', unit: 'deg', show: (p) => p.kind === 'circular' },
+      { key: 'extent', label: 'Spacing means', type: 'select', options: [['spacing', 'Distance between'], ['extent', 'Total distance']], show: (p) => p.kind === 'linear' },
+      { key: 'symmetric', label: 'Symmetric (both sides of the original)', type: 'bool', show: (p) => p.kind === 'linear' || (p.kind === 'circular' && p.angle < 360) },
+      { key: 'skip', label: 'Skip instances (numbers, e.g. 2, 4)', type: 'text', show: (p) => p.kind !== 'face' && p.kind !== 'path' },
     ],
   },
   fillet: {

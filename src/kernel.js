@@ -1037,23 +1037,31 @@ export function rebuild(features, count, opts = {}) {
           let m = t(b.m.translate(c.map((v) => -v)));
           m = t(m.scale(p.s));
           m = t(m.rotate(p.r));
-          m = t(m.translate(c.map((v, k) => v + p.t[k])));
+          const d = p.mode === 'points' ? [0, 1, 2].map((k) => (+p.to?.[k] || 0) - (+p.from?.[k] || 0)) : p.t;
+          m = t(m.translate(c.map((v, k) => v + d[k])));
           if (p.copy) addBody(f.id, m, f.name); else b.m = m;
           break;
         }
         case 'combine': {
-          const a = getBody(p.target), b = getBody(p.tool);
-          if (a === b) throw new Error('Target and tool must differ');
-          a.m = t(p.op === 'join' ? a.m.add(b.m) : p.op === 'cut' ? a.m.subtract(b.m) : a.m.intersect(b.m));
-          if (!p.keepTool) live.delete(p.tool);
+          const a = getBody(p.target), given = [].concat(p.tool || [], p.tools || []).filter(Boolean), ids = [...new Set(given)];
+          if (given.includes(p.target)) throw new Error('Target and tool must differ');
+          if (!ids.length) throw new Error('Choose at least one tool body');
+          for (const id of ids) { const b = getBody(id); a.m = t(p.op === 'join' ? a.m.add(b.m) : p.op === 'cut' ? a.m.subtract(b.m) : a.m.intersect(b.m)); }
+          if (!p.keepTool) for (const id of ids) live.delete(id);
           break;
         }
         case 'mirror': {
           const b = getBody(p.body);
-          const n = PLANES[p.plane].n;
-          let m = t(b.m.translate(n.map((c) => -c * p.offset)));
+          let n, o;
+          if (PLANES[p.plane]) { n = PLANES[p.plane].n; o = n.map((c) => c * (+p.offset || 0)); }
+          else {
+            const pf = features.find((x) => x.id === p.plane && x.type === 'plane');
+            if (!pf || pf.params.error || !pf.params.normal) throw new Error('The mirror plane no longer exists or could not be built');
+            n = pf.params.normal; o = pf.params.origin.map((c, k) => c + n[k] * (+p.offset || 0));
+          }
+          let m = t(b.m.translate(o.map((c) => -c)));
           m = t(m.mirror(n));
-          m = t(m.translate(n.map((c) => c * p.offset)));
+          m = t(m.translate(o));
           if (p.join) b.m = t(b.m.add(m)); else addBody(f.id, m, f.name);
           break;
         }
@@ -1096,17 +1104,24 @@ export function rebuild(features, count, opts = {}) {
             b.m = acc;
             break;
           }
-          for (let k = 1; k < p.count; k++) {
+          const cnt = Math.max(1, p.count | 0), skip = new Set(String(p.skip ?? '').split(/[\s,;]+/).map(Number).filter((v) => Number.isInteger(v) && v >= 1 && v <= cnt));
+          const full = p.kind === 'circular' && p.angle >= 360, sym = !!p.symmetric && !full && cnt > 1;
+          let first = null;
+          for (let k = 0; k < cnt; k++) {
+            if (skip.has(k + 1)) continue;
+            const st = sym ? k - (cnt - 1) / 2 : k;
             let m;
-            if (p.kind === 'linear') m = t(b.m.translate(p.spacing.map((v) => v * k)));
+            if (st === 0) m = b.m;
+            else if (p.kind === 'linear') m = t(b.m.translate(p.spacing.map((v) => (v / (p.extent === 'extent' && cnt > 1 ? cnt - 1 : 1)) * st)));
             else {
               const r = [0, 0, 0];
-              r['XYZ'.indexOf(p.axis)] = (p.angle / (p.angle >= 360 ? p.count : Math.max(1, p.count - 1))) * k;
+              r['XYZ'.indexOf(p.axis)] = (p.angle / (full ? cnt : Math.max(1, cnt - 1))) * st;
               m = t(b.m.rotate(r));
             }
-            acc = t(acc.add(m));
+            first = first ? t(first.add(m)) : m;
           }
-          b.m = acc;
+          if (!first) throw new Error('Every instance is skipped. Leave at least one.');
+          b.m = first;
           break;
         }
         case 'fillet':

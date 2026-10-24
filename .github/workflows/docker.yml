@@ -39,6 +39,21 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'release' }}
             type=raw,value=manual-${{ github.sha }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
+      # Before anything is published, build the amd64 image into the runner and start it. An image that does not start (a file left out of the
+      # image, a crash at start-up) must never become "latest": this step fails and the push below does not run.
+      - name: Build an image to check
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: sketchy:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start it and check that it works
+        run: scripts/docker-smoke.sh sketchy:smoke
+
       - uses: docker/build-push-action@v6
         with:
           context: .
