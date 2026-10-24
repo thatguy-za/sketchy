@@ -1164,9 +1164,8 @@ body.touch .row { margin: 10px 0; }
 .modal-foot.stack .btn { flex: 1 1 0; }
 .modal-foot.stack .btn.primary { flex: 1 1 100%; }
 
-.dp-binlink { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 14px; border: 0; border-top: 1px solid var(--line-soft); background: none; color: var(--muted); text-align: left; font-size: var(--fs-md); flex: none; }
-.dp-binlink:hover { background: var(--ov-08); color: var(--text); }
-.dp-binlink em { margin-left: auto; font-style: normal; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--chip); text-align: center; font-size: var(--fs-xs); }
+.dp-top .dp-binlink { position: relative; }
+.dp-binlink em { position: absolute; top: -3px; right: -4px; font-style: normal; min-width: 15px; padding: 0 4px; border-radius: 8px; background: var(--chip); color: var(--text); border: 1px solid var(--line); text-align: center; font-size: 10px; line-height: 15px; }
 .dp-binlink em:empty { display: none; }
 
 /* ---- the assistant, as part of the app */
@@ -1219,7 +1218,8 @@ body.touch .row { margin: 10px 0; }
 .dp-sep { color: var(--muted); display: inline-grid; transform: rotate(-90deg); }
 .dp-frow { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 4px; flex: none; }
 .dp-frow.dropping { background: var(--accent-soft); outline: 2px dashed var(--accent); }
-.dp-fopen { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 12px 10px; font: inherit; font-weight: 600; text-align: left; color: inherit; }
+.dp-fopen { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 6px 10px; font: inherit; font-weight: 600; text-align: left; color: inherit; }
 .dp-fopen:hover { background: var(--ov-08); }
 .dp-fopen small { margin-left: auto; color: var(--muted); font-weight: 400; white-space: nowrap; }
 .dp-crumb .dp-sep svg { width: 12px; height: 12px; }
+.dp-crumb[hidden] { display: none; }

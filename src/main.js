@@ -3845,12 +3845,11 @@ async function openSavedDesign(pr) {
 /** The recycle bin: deleted designs wait here (30 days by default), with their versions, until they are restored or deleted for good. */
 async function renderBin() {
   const host = $('#data-panel');
-  host.innerHTML = `<div class="dp-top"><button id="bin-back" title="Back to designs" aria-label="Back to designs">${uicon('prev', 14)}</button><span class="count">Recycle bin</span><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
+  host.innerHTML = `<div class="dp-top"><button id="bin-back" title="Back to designs" aria-label="Back to designs">${uicon('prev', 14)}</button><span class="count">Recycle bin</span></div>
     <div class="dp-grid" id="bin-list"><div class="dp-empty">Loading…</div></div>
     <div class="dp-actions"><button class="btn" id="bin-empty" disabled>Empty the bin</button></div>
     <div class="dp-version" id="bin-note"></div>`;
   $('#bin-back').onclick = () => renderDataPanel();
-  $('#dp-close').onclick = () => toggleDataPanel(false);
   const r = await call('GET', '/bin');
   const list = $('#bin-list');
   if (!list) return; // the panel was closed meanwhile
@@ -3894,16 +3893,12 @@ async function renderBin() {
 }
 async function renderDataPanel() {
   const host = $('#data-panel');
-  host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button id="dp-openfile" title="Open a project file from your computer" aria-label="Open a project file from your computer">${uicon('upload', 16)}</button><button id="dp-refresh" title="Refresh">${uicon('refresh', 16)}</button><button id="dp-close" title="Close">${uicon('close', 16)}</button></div>
+  host.innerHTML = `<div class="dp-top"><span class="count" id="dp-count"></span><button class="dp-binlink" id="dp-bin" type="button" title="Recycle bin: deleted designs wait here and can be restored" aria-label="Recycle bin">${uicon('trash', 16)}<em id="dp-bincount"></em></button></div>
     <div class="dp-tabs"><span class="dp-searchicon">${uicon('search', 16, 1.8)}</span><input id="dp-q" class="dp-search" type="search" placeholder="Search designs" autocomplete="off" spellcheck="false"></div>
     <nav class="dp-crumb" id="dp-crumb" aria-label="Folder path"></nav>
     <div class="dp-grid" id="dp-grid"><div class="dp-empty">Loading…</div></div>
     <div class="dp-actions"><button class="btn primary" id="dp-new">New design</button><button class="btn" id="dp-newfolder">${uicon('folder', 15)} New folder</button></div>
-    <button class="dp-binlink" id="dp-bin" type="button" title="Deleted designs wait here and can be restored">${uicon('trash', 15)}<span>Recycle bin</span><em id="dp-bincount"></em></button>
     <div class="dp-version">Sketchy v${typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''}</div>`;
-  $('#dp-close').onclick = () => toggleDataPanel(false);
-  $('#dp-refresh').onclick = renderDataPanel;
-  $('#dp-openfile').onclick = () => $('#file-proj').click();
   $('#dp-new').onclick = () => { newDoc(); };
   $('#dp-bin').onclick = () => renderBin();
   call('GET', '/bin').then((b) => { const n = b.ok ? b.data.items.length : 0; const c = $('#dp-bincount'); if (c) c.textContent = n ? String(n) : ''; }); // how many are waiting
@@ -3979,6 +3974,7 @@ async function renderDataPanel() {
     ]);
     const drawCrumb = () => {
       const bar = $('#dp-crumb'); bar.innerHTML = '';
+      bar.hidden = !cwd; if (!cwd) return;
       const seg = (label, path, last, home) => {
         const b = document.createElement('button'); b.type = 'button'; b.className = 'dp-seg' + (last ? ' here' : '');
         b.innerHTML = home ? uicon('home', 18) : esc(label); b.title = home ? 'All designs' : path; b.setAttribute('aria-label', home ? 'All designs' : label);
@@ -4038,7 +4034,7 @@ async function renderDataPanel() {
       for (const path of kids) {
         const total = r.data.filter((x) => x.folder === path || (x.folder || '').startsWith(path + '/')).length, name = path.split('/').pop();
         const row = document.createElement('div'); row.className = 'dp-frow';
-        row.innerHTML = `<button type="button" class="dp-fopen" aria-label="Open folder ${esc(name)}">${uicon('folder', 28, 1.4)}<span class="dp-fname">${esc(name)}</span><small>${total} design${total === 1 ? '' : 's'}</small></button>
+        row.innerHTML = `<button type="button" class="dp-fopen" aria-label="Open folder ${esc(name)}">${uicon('folder', 22, 1.5)}<span class="dp-fname">${esc(name)}</span><small>${total} design${total === 1 ? '' : 's'}</small></button>
           <button type="button" class="dp-more" title="Folder actions" aria-haspopup="menu" aria-label="Actions for folder ${esc(name)}">${uicon('more', 16)}</button>`;
         row.querySelector('.dp-fopen').onclick = () => setCwd(path);
         row.querySelector('.dp-more').onclick = (e) => { e.stopPropagation(); const b = e.currentTarget.getBoundingClientRect(); folderMenu(path, b.left, b.bottom + 2); };
