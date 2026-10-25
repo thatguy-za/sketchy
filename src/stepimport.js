@@ -165,14 +165,17 @@ class Step {
     const parts = x.type === 'COMPLEX' ? x.parts : { [x.type]: x.args };
     const main = parts.B_SPLINE_CURVE_WITH_KNOTS || (x.type === 'B_SPLINE_CURVE_WITH_KNOTS' ? x.args : null);
     if (!main) return null;
-    const base = parts.B_SPLINE_CURVE || main; // [degree, control points, curve form, closed, self-intersect]
+    // A complex entity lists each part separately: B_SPLINE_CURVE(degree, points, form, closed, self-intersect) and
+    // B_SPLINE_CURVE_WITH_KNOTS(mults, knots, spec). A simple one has everything in one list, led by the name:
+    // (name, degree, points, form, closed, self-intersect, mults, knots, spec).
+    const simple = x.type !== 'COMPLEX';
+    const base = simple ? main.slice(1) : parts.B_SPLINE_CURVE;
+    if (!base || !Array.isArray(base[1])) return null;
     const degree = base[0], cps = base[1].map((r) => this.point(r));
-    let knots;
-    const km = main.length >= 2 ? main : null; // [mults, knots, spec] (complex) or full arg list (simple)
-    const mults = x.type === 'COMPLEX' ? main[0] : main[7], kv = x.type === 'COMPLEX' ? main[1] : main[8];
-    knots = []; mults.forEach((m, i) => { for (let k = 0; k < m; k++) knots.push(kv[i]); });
+    const mults = simple ? main[6] : main[0], kv = simple ? main[7] : main[1];
+    if (!Array.isArray(mults) || !Array.isArray(kv)) return null;
+    const knots = []; mults.forEach((m, i) => { for (let k = 0; k < m; k++) knots.push(kv[i]); });
     const w = parts.RATIONAL_B_SPLINE_CURVE ? parts.RATIONAL_B_SPLINE_CURVE[0] : null;
-    void km;
     return { degree, cps, knots, w };
   }
 
@@ -315,7 +318,7 @@ const wrapTo = (a, ref) => a - TAU * Math.round((a - ref) / TAU);
 /** Surface description: param(p) -> [u,v] in a roughly metric space, point(u,v) -> 3D, normal(p) -> outward, spacing. */
 function makeSurface(step, ref) {
   const x = step.get(ref);
-  if (!x) return null;
+  if (!x || x.type === 'COMPLEX') return null; // a complex entity (a B-spline surface, say) has parts, not an argument list
   const t = x.type;
   if (t === 'PLANE') { const f = step.frame(x.args[1]); return { kind: 'plane', f }; }
   const f = step.frame(x.args[1]);
