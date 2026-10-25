@@ -415,6 +415,7 @@ export async function showAdmin(startTab = 'registration') {
         <h3>Who can use this server</h3>
         <label class="chk"><input type="checkbox" id="ad-reg"> Allow new people to register</label>
         <div class="hint">Off by default. When it is off, add people yourself on the Users tab.</div>
+        <label class="chk"><input type="checkbox" id="ad-addins"> Allow people to install their own add-ins</label>
         <label class="chk"><input type="checkbox" id="ad-mcp"> Allow AI assistants to connect (MCP)</label>
         <div class="hint">Each assistant signs in to the person's own account, so it only reaches that person's designs.</div>
         <h3 class="mh3">Storage</h3>
@@ -457,11 +458,13 @@ export async function showAdmin(startTab = 'registration') {
   const msg = $m('#ad-msg'), msgReg = $m('#ad-msg-reg'), msgSec = $m('#ad-msg-sec'), host = $m('#ad-table');
   const st = await call('GET', '/admin/settings');
   // ---- registration
-  const reg = $m('#ad-reg'), mcp = $m('#ad-mcp');
+  const reg = $m('#ad-reg'), mcp = $m('#ad-mcp'), addins = $m('#ad-addins');
   reg.checked = !!st.data?.allowRegistration;
   reg.onchange = async () => { await call('PUT', '/admin/settings', { allowRegistration: reg.checked }); msgReg.textContent = 'Saved.'; await refreshAccount(); };
   mcp.checked = st.data?.allowMcp !== false;
   mcp.onchange = async () => { await call('PUT', '/admin/settings', { allowMcp: mcp.checked }); msgReg.textContent = 'Saved.'; };
+  addins.checked = st.data?.allowAddins !== false;
+  addins.onchange = async () => { await call('PUT', '/admin/settings', { allowAddins: addins.checked }); msgReg.textContent = 'Saved.'; };
   // ---- security
   const lim = { max: $m('#ad-max'), win: $m('#ad-win'), lock: $m('#ad-lockmin') };
   lim.max.value = st.data?.maxFailedLogins ?? 5; lim.win.value = st.data?.failWindowMinutes ?? 15; lim.lock.value = st.data?.lockoutMinutes ?? 15;

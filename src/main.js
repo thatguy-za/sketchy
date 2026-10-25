@@ -2,10 +2,13 @@ import './style.css';
 import * as THREE from 'three';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { icon } from './icons.js';
-import { initKernel, rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference, compareBodies } from './kernel.js';
+import { initKernel, kernelModule, rebuild, clearKernelCache, resolvePlanes, shapeToPolygon, encodeFloats, profilesOf, planeFrame, findFaceTri, interference, compareBodies } from './kernel.js';
 import { FEATURES, defOf, LAST, fieldKind } from './features.js';
 import { writeSTL } from './stl.js';
 import { readModelFile } from './importers.js';
+import runtimeSource from './addin-runtime.js?raw';
+import { createAddinManager } from './addins-ui.js';
+import { buildTree } from './csg-service.js';
 import wasmUrl from 'manifold-3d/manifold.wasm?url';
 import { evaluate as evaluateDoc } from './headless.js';
 import { initA11y } from './a11y.js';
@@ -37,6 +40,7 @@ import { CON_GLYPH, CON_LABEL, definedState } from './sketchcons.js';
 import { CMD, WORKSPACE_TABS, TOOLBAR, SKETCH_TOOLBAR } from './commands.js';
 
 const $ = (s) => document.querySelector(s);
+let addins = null; // the add-in manager (src/addins-ui.js)
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const PRINTERS = {
@@ -525,6 +529,7 @@ const CUSTOM = {
   derive: () => showInsertDesign(false), cfg2: () => showInsertDesign(true),
   canvas: () => pickCanvasImage(),
   cfg1: () => showConfigurations(), cfg3: (ev) => showConfigMenu(ev?.currentTarget),
+  addins: () => (addins ? addins.showDialog() : toast('Add-ins are still loading. Try again in a moment.', true)),
   importstl: () => $('#file-stl').click(),
   repairimport: () => $('#file-repair').click(),
   measure: () => startMeasure('dist'), angle: () => startMeasure('angle'), edgelen: () => startMeasure('edge'), faces: () => startMeasure('faces'),
@@ -555,6 +560,7 @@ function runCommand(id, ev) {
   if (selFace?.curved && (id === 'extrude' || id === 'sketch')) return toast('A sketch or Press/Pull needs a flat face. Pick a flat face, or use a plane.', true);
   if (selFace && id === 'extrude') { lastCmd = id; return startFeature('presspull'); }
   if (selFace && id === 'sketch') { lastCmd = id; return sketchOnSelectedFace(); }
+  if (c.addinCommand) { lastCmd = id; return runAddinCommand(c); }
   if (c.feature) { lastCmd = id; return startFeature(c.feature, c.preset); }
   CUSTOM[id]?.(ev);
   if (!['select', 'finishsketch', 'cancelpick'].includes(id)) lastCmd = id;
@@ -2630,7 +2636,19 @@ const EXPORT_FORMATS = [
   ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
   ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
 ];
+function exportFormats() { return [...EXPORT_FORMATS, ...(addins ? addins.exporters().map((e) => [e.value, e.label, e.description, e.extension]) : [])]; }
+async function exportViaAddin(fmt, name, selectedOnly) {
+  const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id)));
+  if (!bodies.length) return toast('Nothing to export.', true);
+  try {
+    const out = await addins.runExporter(fmt, { name, units: getUnits(), parameters: (doc.params || []).map((p) => ({ name: p.name, expr: p.expr })), bodies: bodies.map((b) => ({ id: b.id, name: b.name, color: look((doc.appearance || {})[b.id]).color, verts: b.verts, tris: b.tris })) });
+    const ext = (out.name.match(/\.[A-Za-z0-9]+$/) || [''])[0];
+    download(new Blob([out.text !== undefined ? out.text : out.bytes], { type: out.mime || 'application/octet-stream' }), `${name}${ext}`);
+    toast(`Exported "${name}${ext}"`);
+  } catch (e) { toast(`Export failed: ${e.message}`, true); }
+}
 function exportFile(fmt, name, selectedOnly, split = false, embed = false) {
+  if (fmt.startsWith('addin:')) return exportViaAddin(fmt, name, selectedOnly);
   if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: look((doc.appearance || {})[b.id]).color }));
   if (!bodies.length) return toast('Nothing to export.', true);
@@ -2663,7 +2681,7 @@ function exportDialog() {
   BG.noteExport();
   if (kernelBusy()) return toast('Still rebuilding the design. Try again in a moment.', true);
   let last = '3mf'; try { last = localStorage.getItem('sketchy.exportFormat') || '3mf'; } catch { /* storage unavailable */ }
-  if (!EXPORT_FORMATS.some((f) => f[0] === last)) last = '3mf';
+  if (!exportFormats().some((f) => f[0] === last)) last = '3mf';
   const hasSel = vp.selected.size > 0;
   /** The design's name, then the body's name when only one body of several is exported, then the version: "Bracket_Lid_v3". */
   const nameFor = (selectedOnly, split = false) => {
@@ -2674,7 +2692,7 @@ function exportDialog() {
   const m = modal(`<div class="modal-title">Export</div>
     <form class="modal-body ex">
       <label>File name<input id="ex-name" maxlength="80" autocomplete="off" spellcheck="false" value="${esc(nm)}"></label>
-      <label>Format<select id="ex-fmt" name="fmt">${EXPORT_FORMATS.map(([v, l]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + v})</option>`).join('')}</select></label>
+      <label>Format<select id="ex-fmt" name="fmt">${exportFormats().map(([v, l, , ext]) => `<option value="${v}" ${v === last ? 'selected' : ''}>${esc(l)} (${v === 'sketchy' ? '.sketchy.json' : '.' + (ext || v)})</option>`).join('')}</select></label>
       <div class="ex-desc" id="ex-desc" aria-live="polite" hidden></div>
       <div class="ex-check" id="ex-check" aria-live="polite" hidden></div>
       <label class="ex-chk" id="ex-scope"><input type="checkbox" id="ex-sel" ${hasSel ? 'checked' : 'disabled'}><span>Selected bodies only${hasSel ? '' : ' <small>(select bodies first)</small>'}</span></label>
@@ -2686,7 +2704,7 @@ function exportDialog() {
   const form = m.el.querySelector('form'), fmtSel = m.el.querySelector('#ex-fmt');
   const sync = () => {
     const f = fmtSel.value, proj = f === 'sketchy';
-    const d = (EXPORT_FORMATS.find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
+    const d = (exportFormats().find((x) => x[0] === f) || [])[2] || '', de = m.el.querySelector('#ex-desc');
     de.textContent = d; de.hidden = !d;
     m.el.querySelector('#ex-sel').disabled = proj || !hasSel; m.el.querySelector('#ex-scope').style.opacity = proj || !hasSel ? '.55' : '';
     syncEmbed();
@@ -2699,7 +2717,7 @@ function exportDialog() {
   };
   let checkRun = 0, cancelCheck = { stop: false };
   const runChecks = async () => {
-    const host = m.el.querySelector('#ex-check'), proj = ['sketchy', 'step', 'glb'].includes(fmtSel.value);
+    const host = m.el.querySelector('#ex-check'), proj = ['sketchy', 'step', 'glb'].includes(fmtSel.value) || fmtSel.value.startsWith('addin:');
     cancelCheck.stop = true; const mine = ++checkRun; cancelCheck = { stop: false };
     host.hidden = proj;
     if (proj) return;
@@ -2726,7 +2744,7 @@ function exportDialog() {
   const inScope = () => result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!(m.el.querySelector('#ex-sel').checked && fmtSel.value !== 'sketchy') || vp.selected.has(b.id)));
   const syncSplit = () => { // only meaningful when more than one body would be exported
     syncEmbed();
-    const k = inScope().length, off = fmtSel.value === 'sketchy' || k < 2;
+    const k = inScope().length, off = fmtSel.value === 'sketchy' || fmtSel.value.startsWith('addin:') || k < 2;
     splitBox.disabled = off; if (off) splitBox.checked = false;
     m.el.querySelector('#ex-splitrow').style.opacity = off ? '.55' : '';
     m.el.querySelector('#ex-splitn').textContent = off ? '' : `(${k} files)`;
@@ -2848,8 +2866,16 @@ async function importModel(file, { always = false } = {}) {
   const prog = importProgress(file.name);
   try {
     await tick();
-    const parts = await readModelFile(file);
+    const parts = await readImport(file);
     if (prog.cancelled) return toast('Import cancelled.');
+    const big = parts.reduce((a, p) => a + p.soup.length / 9, 0);
+    let keep = 0; // percent of triangles a Reduce step keeps after a very dense model (0: import as it is)
+    if (big > IMPORT_WARN) {
+      prog.set('Waiting for your choice…');
+      const choice = await askLargeImport(parts.length > 1 ? `${file.name} (${parts.length} parts)` : parts[0].name, big);
+      if (!choice) return toast('Import cancelled.');
+      keep = choice.keep;
+    }
     let tris = 0, made = 0; const notes = new Set(), errs = [];
     for (const part of parts) {
       if (prog.cancelled) { errs.push(`${part.name}: cancelled`); continue; }
@@ -4260,7 +4286,7 @@ async function boot() {
   $('#file-stl').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importModel(f); };
   $('#file-proj').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) openDesignFile(f); };
   $('#viewport').addEventListener('dragover', (e) => e.preventDefault());
-  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.3mf$/i.test(f.name)) f.arrayBuffer().then((b) => readEmbeddedDesign(b)).then((d) => (d ? openDesignFile(f) : importModel(f))); else if (f && /\.(stl|obj|step|stp)$/i.test(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
+  $('#viewport').addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.3mf$/i.test(f.name)) f.arrayBuffer().then((b) => readEmbeddedDesign(b)).then((d) => (d ? openDesignFile(f) : importModel(f))); else if (f && isImportName(f.name)) importModel(f); else if (f && /\.(svg|dxf)$/i.test(f.name)) import2D(f); });
   initA11y();
   const paint = (t) => { const d = t === 'dark'; vp.applyTheme(d); sketchMat.color.setHex(d ? 0x3d94ff : 0x1f5fa8); sketchMatActive.color.setHex(d ? 0x2f8cff : 0x0b6bcb); };
   paint(getTheme()); onTheme(paint);
@@ -4274,11 +4300,78 @@ async function boot() {
   if (localStorage.getItem('sketchy.data') === '1') toggleDataPanel(true);
   setAccountChangeHandler(() => { if (dataOpen) renderDataPanel(); });
   startRemotePolling();
+  setupAddins();
   setupAssistant();
   refresh();
   window.__sketchy = { kernelState: () => ({ heavy: kernelHeavy, busy: kernelBusy(), lastMs: lastRebuildMs, worker: !!kw.worker }), setHeavy: (v) => { kernelHeavy = v; if (v) { clearKernelCache(); ensureKernelWorker(); } refresh(); }, moveFeature, setSuppressed, dependentsOf, renameFeature, treeMenu, profilesOf, profilesFor, get doc() { return doc; }, get result() { return result; }, vp, startFeature, rebuild, refresh, runCommand, openMarking };
   openLastOrCreate().then(checkDrafts); // not awaited: the New design dialog must not hold up the rest of start-up
 }
+// ------------------------------------------------------------------ add-ins (src/addins.js, src/addins-ui.js)
+const BASE_IMPORT_EXT = ['stl', 'obj', '3mf', 'step', 'stp'];
+const isImportName = (name) => { const ext = (/\.([a-z0-9]+)$/i.exec(name)?.[1] || '').toLowerCase(); return BASE_IMPORT_EXT.includes(ext) || !!addins?.importerFor(ext); };
+/** Read a model file: with an add-in when one handles that file type, otherwise with the built-in readers. */
+async function readImport(file) {
+  const ext = (/\.([a-z0-9]+)$/i.exec(file.name)?.[1] || '').toLowerCase();
+  const ref = !BASE_IMPORT_EXT.includes(ext) && addins?.importerFor(ext);
+  if (!ref) return readModelFile(file);
+  try { return await addins.readFile(file, ref); }
+  catch (e) { throw new Error(e.message === 'cancelled' ? 'Import cancelled.' : `${ref.addin.manifest.name}: ${e.message}`); }
+}
+async function runAddinCommand(c) {
+  try { await addins.runCommand(c.addinCommand); } catch (e) { toast(`${c.label}: ${e.message}`, true); }
+}
+/** A form an add-in asked for: resolves the values, or null if cancelled. */
+function addinForm(spec) {
+  return new Promise((resolve) => {
+    const rows = spec.fields.map((f) => `<label class="adf-row"><span>${esc(f.label)}</span>${f.type === 'bool' ? `<input type="checkbox" name="${esc(f.name)}" ${f.value ? 'checked' : ''}>` : f.type === 'select' ? `<select name="${esc(f.name)}">${(f.options || []).map(([v, l]) => `<option value="${esc(v)}" ${String(f.value) === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : `<input name="${esc(f.name)}" type="${f.type === 'number' ? 'number' : 'text'}" ${f.type === 'number' ? 'step="any"' : 'maxlength="200"'} value="${esc(f.value)}">`}</label>`).join('');
+    const m = modal(`<div class="modal-title">${esc(spec.title)}</div><form class="modal-body">${spec.intro ? `<p class="rp-lead">${esc(spec.intro)}</p>` : ''}<div class="adf-form">${rows}</div><div class="modal-foot flush"><button type="button" class="btn" id="ad-c">Cancel</button><button type="submit" class="btn primary">${esc(spec.ok)}</button></div></form>`, () => resolve(null));
+    const form = m.el.querySelector('form');
+    m.el.querySelector('#ad-c').onclick = () => m.close();
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const out = {};
+      for (const f of spec.fields) { const el = form.elements[f.name]; out[f.name] = f.type === 'bool' ? el.checked : f.type === 'number' ? (Number.isFinite(parseFloat(el.value)) ? parseFloat(el.value) : f.value) : el.value; }
+      resolve(out); m.closeSilently?.() ?? m.close();
+    };
+    setTimeout(() => form.querySelector('input,select')?.focus(), 0);
+  });
+}
+function setupAddins() {
+  addins = createAddinManager({
+    runtime: runtimeSource,
+    onChange: () => {
+      // contributed commands appear in the ADD-INS group's menu
+      const ids = [];
+      for (const c of addins.commands()) { const id = `addin:${c.ref}`; CMD[id] = { label: c.label, icon: 'addin', desc: `${c.description ? c.description + ' ' : ''}(Add-in: ${c.addin})`, addinCommand: c.ref }; ids.push(id); }
+      const g = TOOLBAR.UTILITIES.find((x) => x.label === 'ADD-INS'); if (g) g.menu = ids.length ? ['addins', '|', ...ids] : [];
+      const accept = [...BASE_IMPORT_EXT, ...addins.importExtensions()].map((x) => '.' + x).join(',');
+      $('#file-stl').accept = accept; $('#file-repair').accept = accept;
+      if (!dialog && !sketch) renderRibbon();
+    },
+    hooks: {
+      toast, menu: showMenu,
+      confirm: (message, o = {}) => confirmBox({ title: o.title || 'Add-in', message, ok: o.ok || 'OK', danger: !!o.danger }),
+      form: addinForm,
+      pickFile: (o) => new Promise((resolve) => {
+        const inp = document.createElement('input'); inp.type = 'file'; if (o.accept) inp.accept = o.accept;
+        inp.onchange = async () => { const f = inp.files[0]; resolve(f ? { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) } : null); };
+        inp.oncancel = () => resolve(null); inp.click();
+      }),
+      readDocument: async (o) => ({ name: doc.name, units: getUnits(), parameters: (doc.params || []).map((p) => ({ name: p.name, expr: p.expr })), bodies: result.bodies.map((b) => ({ id: b.id, name: b.name, color: look((doc.appearance || {})[b.id]).color, ...(o.meshes ? { verts: b.verts, tris: b.tris } : {}) })) }),
+      addBody: async ({ name, verts, tris }) => {
+        const n = tris.length / 3, soup = new Float32Array(n * 9);
+        for (let t = 0; t < n; t++) for (let k = 0; k < 3; k++) soup.set(verts.subarray(tris[t * 3 + k] * 3, tris[t * 3 + k] * 3 + 3), t * 9 + k * 3);
+        const r = await importPart({ name, soup });
+        if (r.err) throw new Error(r.err);
+        return { id: r.id };
+      },
+      buildGeometry: async (tree) => { await tick(); return buildTree(kernelModule(), tree); },
+      saveFile: async ({ name, bytes, mime }) => { download(new Blob([bytes], { type: mime }), name); return true; },
+    },
+  });
+  addins.startup().catch(() => {});
+}
+
 /** The assistant as part of the app: live changes, the Stop chip and the request box (see assistant.js). */
 const LIVE_VIEWS = { iso: [1, -1, 0.8], iso_back: [-1, 1, 0.8], front: [0, -1, 0], back: [0, 1, 0], left: [-1, 0, 0], right: [1, 0, 0], top: [0, 0, 1], bottom: [0, 0, -1] };
 let liveT = null, liveLast = '';

@@ -74,6 +74,7 @@ export const CMD = {
   appearance: C('Appearance', 'insertmesh', { desc: 'Gives a body, or a selected flat face, a material (colour, shine, transparency and density for the mass), a custom colour and/or a texture.' }),
   render: C('Render View', 'sectionan', { desc: 'Shows the model with reflections, soft shadows and no grid. Toggle it off to go back to the working view.' }),
   saveimage: C('Save Image', 'exportfile', { desc: 'Saves the current view as a PNG at a chosen size, optionally transparent.' }),
+  addins: C('Scripts and Add-Ins', 'addin', { desc: 'Install, run and manage add-ins: small sandboxed JavaScript packages that add file formats (such as OpenSCAD) and commands.' }),
   export: C('Export', 'exportfile', { desc: 'Saves the design as STL, 3MF, OBJ, STEP or a Sketchy project file.' }),
   // --- sketch tools ---
   sk_line: C('Line', 'line', { sk: 'line', key: 'L' }),
@@ -174,6 +175,7 @@ export const TOOLBAR = {
     { label: 'EXPORT', show: ['export'], menu: [], big: true },
     { label: 'RENDER', show: ['render', 'saveimage'], menu: [] },
     { label: 'PRINTER', show: ['printsetup', 'printer', 'buildvol', 'printcheck'], menu: [] },
+    { label: 'ADD-INS', show: ['addins'], menu: [], big: true },
   ],
 };
 

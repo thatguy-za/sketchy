@@ -67,6 +67,7 @@ const FI = {
   edge: `<path d="M5 27L27 5" stroke="${ORANGE}" stroke-width="2.4"/><path d="M5 22V30H13M27 10V2H19" fill="none" stroke="${INK}" stroke-width="1.2" opacity=".6"/>`,
   faces: `${poly('M3 24L14 19V8L3 13Z', G.l, G.s)}${poly('M17 19L28 24V13L17 8Z', B.l, B.s)}`,
   threed: `<path d="M8 12V6H24V12M8 22H5V12H27V22H24M8 18H24V27H8Z" fill="${G.t}" stroke="${INK}" stroke-width="1.3" stroke-linejoin="round"/><rect x="21" y="15" width="3" height="2" fill="${GREEN}"/>`,
+  addin: `<path d="M6 12H11V9A3 3 0 1 1 17 9V12H22V17H19A3 3 0 1 0 19 23H22V28H6Z" fill="${B.l}" stroke="${B.s}" stroke-width=".8" stroke-linejoin="round"/><path d="M9 15H11M9 25H11" stroke="${B.t}" stroke-width="1.4" stroke-linecap="round"/>`,
   exportfile: `<path d="M4 18V26H28V18" fill="none" stroke="${INK}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><path d="M16 21V5M10 11L16 5L22 11" fill="none" stroke="#2f7fe0" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>`,
   printer: `<path d="M8 12V6H24V12M8 22H5V12H27V22H24M8 18H24V27H8Z" fill="${G.t}" stroke="${INK}" stroke-width="1.3" stroke-linejoin="round"/>`,
   table: `<rect x="3" y="5" width="26" height="20" fill="#fff" stroke="${G.s}" stroke-width="1.2"/><rect x="3" y="5" width="26" height="5" fill="#e3e6ea" stroke="${G.s}" stroke-width="1.2"/><path d="M12 10V25M20 10V25M3 15H29M3 20H29" stroke="${G.r}" stroke-width="1"/><path d="M22 22H30M26 18V26" stroke="#2f7fe0" stroke-width="2.2"/>`,

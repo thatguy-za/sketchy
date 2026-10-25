@@ -133,6 +133,12 @@ class Step {
     const same = a[4] !== '.F.';
     const pts = this.sampleCurve(a[3], v1, v2, same);
     pts[0] = v1; pts[pts.length - 1] = v2; // ends are exactly the vertices
+    // Points closer together than the importer's weld distance (0.0001 mm) would merge and leave a collapsed triangle behind, so a
+    // curve that bunches its samples up (where its parameter stalls) gets them thinned here, once, for both faces that share the edge.
+    const tol = 2e-4 / (this.scale || 1), kept = [pts[0]];
+    for (let i = 1; i < pts.length - 1; i++) if (len(sub(pts[i], kept[kept.length - 1])) > tol) kept.push(pts[i]);
+    if (kept.length > 1 && len(sub(v2, kept[kept.length - 1])) <= tol) kept.pop();
+    if (kept.length >= 1 && pts.length > 2) { kept.push(pts[pts.length - 1]); pts.length = 0; pts.push(...kept); }
     this.cache.set(id, pts);
     return pts;
   }
@@ -227,16 +233,20 @@ function sampleBSpline(c, p1, p2, same) {
   const lo = c.knots[c.degree], hi = c.knots[c.knots.length - 1 - c.degree], N = 400;
   const pts = []; for (let i = 0; i <= N; i++) pts.push(bsplineEval(c, lo + ((hi - lo) * i) / N - (i === N ? 1e-12 : 0)));
   const nearest = (p) => { let b = 0, bd = Infinity; pts.forEach((q, i) => { const d = len(sub(q, p)); if (d < bd) { bd = d; b = i; } }); return b; };
-  let i1 = nearest(p1), i2 = nearest(p2);
-  const closed = len(sub(p1, p2)) < 1e-9;
+  const i1 = nearest(p1), i2 = nearest(p2), closed = len(sub(p1, p2)) < 1e-9;
+  // Two faces share an edge and walk it in opposite directions. Both must end up with the same points, so the stretch is cut out
+  // and thinned along the curve's own direction, and only then turned around if the face goes the other way.
+  const a = same ? i1 : i2, b = same ? i2 : i1;
   let seg;
-  if (closed) seg = same ? pts.slice(i1).concat(pts.slice(1, i1 + 1)) : pts.slice(0, i1 + 1).reverse().concat(pts.slice(i1 + 1).reverse());
-  else if (same) seg = i1 <= i2 ? pts.slice(i1, i2 + 1) : pts.slice(i1).concat(pts.slice(1, i2 + 1));
-  else seg = i1 >= i2 ? pts.slice(i2, i1 + 1).reverse() : pts.slice(0, i1 + 1).reverse().concat(pts.slice(i2).reverse().slice(1));
-  // keep about one point per half degree of turning, at most 120
+  if (closed) seg = pts.slice(i1).concat(pts.slice(1, i1 + 1));
+  else seg = a <= b ? pts.slice(a, b + 1) : pts.slice(a).concat(pts.slice(1, b + 1));
   const step = Math.max(1, Math.floor(seg.length / 120));
-  const out = seg.filter((_, i) => i % step === 0 || i === seg.length - 1);
-  return out.length >= 2 ? out : [p1, p2];
+  let out = seg.filter((_, i) => i % step === 0 || i === seg.length - 1);
+  if (!closed && !same) out = out.reverse();
+  else if (closed && !same) out = out.reverse();
+  if (out.length < 2) return [p1, p2];
+  out[0] = p1; out[out.length - 1] = p2; // the ends are the vertices themselves, so neighbouring faces meet exactly
+  return out;
 }
 
 // ---------------------------------------------------------------- triangulation helpers
@@ -313,12 +323,128 @@ function delaunayRegion(outer, holes, spacing) {
   return { pts, tris: keep };
 }
 
+// ---------------------------------------------------------------- B-spline surfaces
+/** A tensor-product (rational) B-spline surface, read from any of the STEP forms. Control points run [u][v]. */
+function readBSplineSurface(step, ref) {
+  const x = step.get(ref);
+  if (!x) return null;
+  let base, kn, wts = null, simple = false;
+  if (x.type === 'COMPLEX') {
+    base = x.parts.B_SPLINE_SURFACE; kn = x.parts.B_SPLINE_SURFACE_WITH_KNOTS; wts = x.parts.RATIONAL_B_SPLINE_SURFACE?.[0] || null;
+  } else if (/^(B_SPLINE_SURFACE_WITH_KNOTS|UNIFORM_SURFACE|QUASI_UNIFORM_SURFACE|BEZIER_SURFACE)$/.test(x.type)) {
+    simple = true; base = x.args.slice(1); // (name, u degree, v degree, control points, form, u closed, v closed, self-intersect, [u mults, v mults, u knots, v knots, spec])
+    if (x.type === 'B_SPLINE_SURFACE_WITH_KNOTS') kn = x.args.slice(8);
+  } else return null;
+  if (!base || !Array.isArray(base[2]) || !base[2].every(Array.isArray)) return null;
+  const [du, dv] = base, rows = base[2];
+  if (!(du >= 1 && dv >= 1) || !rows.length || !rows[0].length) return null;
+  const nu = rows.length, nv = rows[0].length;
+  const cps = rows.map((r) => r.map((q) => step.point(q)));
+  if (cps.some((r) => r.length !== nv || r.some((q) => !q))) return null;
+  const clamped = (n, p) => [...Array(p + 1).fill(0), ...Array.from({ length: n - p - 1 }, (_, i) => i + 1), ...Array(p + 1).fill(n - p)];
+  const expand = (m, k) => { const o = []; m.forEach((c, i) => { for (let t = 0; t < c; t++) o.push(k[i]); }); return o; };
+  let U, V;
+  if (kn && Array.isArray(kn[0]) && Array.isArray(kn[1]) && Array.isArray(kn[2]) && Array.isArray(kn[3])) { U = expand(kn[0], kn[2]); V = expand(kn[1], kn[3]); }
+  else if (!simple || x.type === 'BEZIER_SURFACE' || x.type === 'QUASI_UNIFORM_SURFACE') { U = clamped(nu, du); V = clamped(nv, dv); }
+  else { U = Array.from({ length: nu + du + 1 }, (_, i) => i); V = Array.from({ length: nv + dv + 1 }, (_, i) => i); }
+  if (U.length !== nu + du + 1 || V.length !== nv + dv + 1) return null;
+  const w = wts && wts.length === nu && wts.every((r) => Array.isArray(r) && r.length === nv) ? wts : null;
+  const S = { du, dv, nu, nv, cps, w, U, V, u0: U[du], u1: U[nu], v0: V[dv], v1: V[nv] };
+  if (!(S.u1 > S.u0 && S.v1 > S.v0)) return null;
+  const mid = (S.v0 + S.v1) / 2, midU = (S.u0 + S.u1) / 2, size = bsurfSize(S) || 1;
+  S.uClosed = len(sub(bsurfEval(S, S.u0, mid), bsurfEval(S, S.u1, mid))) < 1e-6 * size;
+  S.vClosed = len(sub(bsurfEval(S, midU, S.v0), bsurfEval(S, midU, S.v1))) < 1e-6 * size;
+  return S;
+}
+const bsurfSize = (S) => { let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity]; for (const r of S.cps) for (const q of r) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], q[k]); hi[k] = Math.max(hi[k], q[k]); } return len(sub(hi, lo)); };
+/** The p + 1 basis functions that are not zero at u (Cox-de Boor), and the first index they apply to. */
+function basisAt(n, p, u, K) {
+  let s = p;
+  if (u >= K[n + 1]) s = n; else if (u > K[p]) { let lo = p, hi = n + 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (u >= K[m]) lo = m; else hi = m; } s = lo; }
+  const N = [1], L = [], R = [];
+  for (let j = 1; j <= p; j++) {
+    L[j] = u - K[s + 1 - j]; R[j] = K[s + j] - u;
+    let saved = 0;
+    for (let r = 0; r < j; r++) { const den = R[r + 1] + L[j - r], t = den ? N[r] / den : 0; N[r] = saved + R[r + 1] * t; saved = L[j - r] * t; }
+    N[j] = saved;
+  }
+  return { first: s - p, N };
+}
+function bsurfEval(S, u, v) {
+  const a = basisAt(S.nu - 1, S.du, Math.min(S.u1, Math.max(S.u0, u)), S.U), b = basisAt(S.nv - 1, S.dv, Math.min(S.v1, Math.max(S.v0, v)), S.V);
+  let x = 0, y = 0, z = 0, ws = 0;
+  for (let i = 0; i <= S.du; i++) for (let j = 0; j <= S.dv; j++) {
+    const I = a.first + i, J = b.first + j, q = S.cps[I][J], f = a.N[i] * b.N[j] * (S.w ? S.w[I][J] : 1);
+    x += f * q[0]; y += f * q[1]; z += f * q[2]; ws += f;
+  }
+  return ws ? [x / ws, y / ws, z / ws] : [x, y, z];
+}
+/** Closest point on the surface: the nearest of a grid of samples, then a few Gauss-Newton steps. Returns [u, v]. */
+function bsurfProjector(S) {
+  const gu = Math.min(48, Math.max(10, S.nu * 3)), gv = Math.min(48, Math.max(10, S.nv * 3));
+  const grid = [];
+  for (let i = 0; i <= gu; i++) for (let j = 0; j <= gv; j++) { const u = S.u0 + ((S.u1 - S.u0) * i) / gu, v = S.v0 + ((S.v1 - S.v0) * j) / gv; grid.push({ u, v, p: bsurfEval(S, u, v) }); }
+  const hu = (S.u1 - S.u0) * 1e-5, hv = (S.v1 - S.v0) * 1e-5, wrap = (t, lo, hi, closed) => (closed ? lo + ((((t - lo) % (hi - lo)) + (hi - lo)) % (hi - lo)) : Math.min(hi, Math.max(lo, t)));
+  const partials = (u, v) => {
+    const uu = Math.min(S.u1 - hu, Math.max(S.u0 + hu, u)), vv = Math.min(S.v1 - hv, Math.max(S.v0 + hv, v));
+    return { Su: scl(sub(bsurfEval(S, uu + hu, vv), bsurfEval(S, uu - hu, vv)), 1 / (2 * hu)), Sv: scl(sub(bsurfEval(S, uu, vv + hv), bsurfEval(S, uu, vv - hv)), 1 / (2 * hv)) };
+  };
+  const project = (P, hint) => {
+    let best = hint ? { u: hint[0], v: hint[1] } : null, bd = Infinity;
+    if (best) bd = len(sub(bsurfEval(S, best.u, best.v), P));
+    for (const g of grid) { const d = len(sub(g.p, P)); if (d < bd) { bd = d; best = g; } }
+    let u = best.u, v = best.v;
+    for (let it = 0; it < 14; it++) {
+      const d = sub(P, bsurfEval(S, u, v)), { Su, Sv } = partials(u, v);
+      const a = dot(Su, Su), b = dot(Su, Sv), c = dot(Sv, Sv), det = a * c - b * b;
+      if (Math.abs(det) < 1e-18) break;
+      const du = (c * dot(Su, d) - b * dot(Sv, d)) / det, dv = (a * dot(Sv, d) - b * dot(Su, d)) / det;
+      const nu = wrap(u + du, S.u0, S.u1, S.uClosed), nv = wrap(v + dv, S.v0, S.v1, S.vClosed);
+      const moved = Math.abs(nu - u) / (S.u1 - S.u0) + Math.abs(nv - v) / (S.v1 - S.v0);
+      u = nu; v = nv;
+      if (moved < 1e-9) break;
+    }
+    return [u, v];
+  };
+  return { project, partials, wrap: (u, v) => [wrap(u, S.u0, S.u1, S.uClosed), wrap(v, S.v0, S.v1, S.vClosed)], grid: { gu, gv } };
+}
+/** Triangulate a face on a B-spline surface: loops go to (u, v), the interior is meshed in a chart of roughly true proportions. */
+function triangulateBSpline(step, S, loops, same, out) {
+  const pr = bsurfProjector(S), Pu = S.u1 - S.u0, Pv = S.v1 - S.v0;
+  const uvLoop = (l) => { let prev = null; return l.pts.map((p) => { const q = pr.project(p, prev); if (prev) { if (S.uClosed) q[0] -= Pu * Math.round((q[0] - prev[0]) / Pu); if (S.vClosed) q[1] -= Pv * Math.round((q[1] - prev[1]) / Pv); } prev = q; return q; }); };
+  const outer = loops[0], ouv = uvLoop(outer), huv = loops.slice(1).map(uvLoop);
+  const cen = (h) => [h.reduce((s, p) => s + p[0], 0) / h.length, h.reduce((s, p) => s + p[1], 0) / h.length], oc = cen(ouv);
+  const shifted = huv.map((h) => { const c = cen(h), du = S.uClosed ? Pu * Math.round((oc[0] - c[0]) / Pu) : 0, dv = S.vClosed ? Pv * Math.round((oc[1] - c[1]) / Pv) : 0; return h.map((p) => [p[0] + du, p[1] + dv]); });
+  // how long a step in u or in v is, on average, so the chart is not stretched
+  const K = 12;
+  let lu = 0, lv = 0;
+  for (let k = 0; k < K; k++) {
+    const t = (k + 0.5) / K;
+    let pu = bsurfEval(S, S.u0, S.v0 + Pv * t), pv = bsurfEval(S, S.u0 + Pu * t, S.v0);
+    for (let i = 1; i <= 24; i++) { const a = bsurfEval(S, S.u0 + (Pu * i) / 24, S.v0 + Pv * t), b = bsurfEval(S, S.u0 + Pu * t, S.v0 + (Pv * i) / 24); lu += len(sub(a, pu)); lv += len(sub(b, pv)); pu = a; pv = b; }
+  }
+  const sU = Math.max(lu / K / Pu, 1e-9), sV = Math.max(lv / K / Pv, 1e-9);
+  const chart = (q) => [q[0] * sU, q[1] * sV], outerC = ouv.map(chart), holesC = shifted.map((h) => h.map(chart));
+  const w = Math.max(...outerC.map((p) => p[0])) - Math.min(...outerC.map((p) => p[0])), h = Math.max(...outerC.map((p) => p[1])) - Math.min(...outerC.map((p) => p[1]));
+  const spacing = Math.max(w, h) / Math.min(40, Math.max(8, 3 * Math.max(S.nu, S.nv)));
+  const bpts = [...outer.pts, ...loops.slice(1).flatMap((l) => l.pts)], unchart = (c) => pr.wrap(c[0] / sU, c[1] / sV);
+  let dl = delaunayRegion(outerC, holesC, spacing), P, uvs, tris;
+  if (dl) { P = dl.pts.map((c, i) => (i < bpts.length ? bpts[i] : bsurfEval(S, ...unchart(c)))); uvs = dl.pts.map((c) => unchart(c)); tris = dl.tris; }
+  else { tris = earcut2D(outerC, holesC); P = bpts; uvs = [...outerC, ...holesC.flat()].map((c) => unchart(c)); step.notes.add('some curved faces were approximated coarsely'); }
+  const chartPts = dl ? dl.pts : [...outerC, ...holesC.flat()];
+  for (const [i, j, k] of tris) emitByChart(out, P, chartPts, i, j, k, same); // u to the right and v up is counter-clockwise: the side Su x Sv points to
+  return out;
+}
+
 // ---------------------------------------------------------------- surfaces
 const wrapTo = (a, ref) => a - TAU * Math.round((a - ref) / TAU);
 /** Surface description: param(p) -> [u,v] in a roughly metric space, point(u,v) -> 3D, normal(p) -> outward, spacing. */
 function makeSurface(step, ref) {
   const x = step.get(ref);
-  if (!x || x.type === 'COMPLEX') return null; // a complex entity (a B-spline surface, say) has parts, not an argument list
+  if (!x) return null;
+  const bs = readBSplineSurface(step, ref);
+  if (bs) return { kind: 'bspline', S: bs };
+  if (x.type === 'COMPLEX') return null; // a complex entity has parts, not an argument list
   const t = x.type;
   if (t === 'PLANE') { const f = step.frame(x.args[1]); return { kind: 'plane', f }; }
   const f = step.frame(x.args[1]);
@@ -342,6 +468,18 @@ function makeSurface(step, ref) {
   return null;
 }
 
+/**
+ * Add a triangle whose corners are flat2 (the chart: u to the right, v up, so counter-clockwise is the +normal side) and P (3D).
+ * The winding comes from the chart, not from the triangle's own 3D normal, because that normal is vanishing for the slivers along
+ * a nearly straight edge and its sign there is noise, which leaves a sliver facing the wrong way and the shell not closed.
+ */
+function emitByChart(out, P, flat2, i, j, k, same, winding = 0) {
+  if (i === j || j === k || i === k) return;
+  const a = flat2[i], b = flat2[j], c = flat2[k], ar = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  const ccw = winding ? winding > 0 : ar >= 0; // winding: the triangulator's own, when all its triangles are known to run the same way
+  const pos = ccw === same;
+  out.push(...(pos ? [...P[i], ...P[j], ...P[k]] : [...P[i], ...P[k], ...P[j]]));
+}
 /** Triangulate one face; returns an array of 9-number triangles (outward-facing) or null when unsupported. */
 function triangulateFace(step, faceEnt) {
   const a = faceEnt.args; // ADVANCED_FACE(name, bounds, surface, same_sense)
@@ -361,16 +499,19 @@ function triangulateFace(step, faceEnt) {
   // outer loop: marked as such, otherwise the largest
   const sorted = [...loops].sort((x, y) => (y.outer ? 1 : 0) - (x.outer ? 1 : 0));
   if (surf.kind === 'plane') {
-    const f = surf.f, nrm = same ? f.z : scl(f.z, -1);
+    const f = surf.f;
     const to2 = (l) => l.pts.map((p) => { const d = sub(p, f.o); return [dot(d, f.x), dot(d, f.y)]; });
     let outerIdx = sorted.findIndex((l) => l.outer);
     if (outerIdx < 0) outerIdx = sorted.reduce((b, l, i) => (Math.abs(area2(to2(l))) > Math.abs(area2(to2(sorted[b]))) ? i : b), 0);
     const outer = sorted[outerIdx], holes = sorted.filter((_, i) => i !== outerIdx);
     const flat = [outer, ...holes], flatPts = flat.flatMap((l) => l.pts);
-    const tri = earcut2D(to2(outer), holes.map(to2));
-    for (const [i, j, k] of tri) addTri(flatPts[i], flatPts[j], flatPts[k], nrm);
+    const o2 = to2(outer), h2 = holes.map(to2), flat2 = [...o2, ...h2.flat()], tri = earcut2D(o2, h2);
+    const signed = ([i, j, k]) => { const a = flat2[i], b = flat2[j], c = flat2[k]; return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]); };
+    const wind = tri.reduce((a, t) => a + signed(t), 0) >= 0 ? 1 : -1; // earcut's triangles all run the same way, even the slivers whose area is zero
+    for (const [i, j, k] of tri) emitByChart(out, flatPts, flat2, i, j, k, same, wind);
     return out;
   }
+  if (surf.kind === 'bspline') return triangulateBSpline(step, surf.S, sorted, same, out);
   // curved faces: flatten the face into a 2D chart, triangulate there (Delaunay plus interior points for surfaces that
   // curve in both directions), and map the points back onto the surface
   const outer = sorted[0];
@@ -411,10 +552,14 @@ function triangulateFace(step, faceEnt) {
   let P3, tris;
   const nBoundary = outerC.length + holesC.reduce((n, h) => n + h.length, 0);
   const mapBack = (c) => { const q = unchart(c); return surf.point(q[0], q[1]); };
-  if (dl) { P3 = dl.pts.map((c, i) => (closeThroughApex && i === outerC.length - 1 ? surf.point(0, surf.apexH) : mapBack(c))); tris = dl.tris; }
+  // The boundary keeps the edges' own points: an edge's curve is only as close to the surface as the file's tolerance, and a
+  // neighbouring face uses those same points, so moving them onto the surface here would open a crack between the two.
+  const b3 = [...outer.pts, ...(closeThroughApex ? [outer.pts[0], null] : []), ...sorted.slice(1).flatMap((l) => l.pts)];
+  const bound = (c, i) => (i < b3.length ? (b3[i] ?? surf.point(0, surf.apexH)) : mapBack(c));
+  if (dl) { P3 = dl.pts.map((c, i) => bound(c, i)); tris = dl.tris; }
   else {
     tris = earcut2D(outerC, holesC);
-    P3 = [...outerC, ...holesC.flat()].map((c, i) => (closeThroughApex && i === outerC.length - 1 ? surf.point(0, surf.apexH) : mapBack(c)));
+    P3 = [...outerC, ...holesC.flat()].map((c, i) => bound(c, i));
     step.notes.add('some curved faces were approximated coarsely');
   }
   void nBoundary; void loopsUV; void surfEnt;

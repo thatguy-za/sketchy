@@ -306,6 +306,34 @@ try {
   check('a resource address cannot climb out of the designs', /error/i.test(await rr.text()));
   const img = await callA('render_view', { design: 'Robot', width: 200, height: 150 });
   check('render_view returns an image to an assistant', img.result?.content?.some((c) => c.type === 'image'));
+  console.log('Add-ins');
+  for (const [m, u] of [['GET', '/api/addins'], ['PUT', '/api/addins/demo'], ['DELETE', '/api/addins/demo']]) {
+    const r = await fetch(base + u, { method: m, headers: { 'x-sketchy': '1', 'content-type': 'application/json' }, body: m === 'PUT' ? '{}' : undefined });
+    check(`${m} ${u} needs a signed-in person`, r.status === 401, String(r.status));
+  }
+  const pkg = (over = {}, files = { 'main.js': 'export function activate(){}' }) => ({ manifest: { id: 'demo', name: 'Demo', version: '1.0.0', permissions: [], ...over }, files });
+  check('a valid add-in installs', (await call('PUT', '/api/addins/demo', pkg())).status === 200);
+  const lst = await call('GET', '/api/addins');
+  check('the list has the manifest only', lst.json.addins.some((a) => a.manifest.id === 'demo') && !JSON.stringify(lst.json).includes('activate'));
+  check('the package can be fetched back by its owner', (await call('GET', '/api/addins/demo')).json.files['main.js'].includes('activate'));
+  check('an install without the custom header is refused (CSRF)', (await fetch(base + '/api/addins/demo', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(pkg()) })).status === 403);
+  check('the id in the address must match the manifest', (await call('PUT', '/api/addins/other', pkg())).status === 400);
+  for (const bad of ['../../users', 'A', 'x', 'UPPER', '..%2F..%2Fusers']) check(`an add-in id of "${bad}" is refused`, [400, 404].includes((await call('GET', '/api/addins/' + bad)).status));
+  check('an unknown permission is refused', (await call('PUT', '/api/addins/demo', pkg({ permissions: ['network'] }))).status === 400);
+  check('a file path that climbs out is refused', (await call('PUT', '/api/addins/demo', pkg({}, { 'main.js': 'x', '../evil.js': 'y' }))).status === 400);
+  check('a binary-looking file type is refused', (await call('PUT', '/api/addins/demo', pkg({}, { 'main.js': 'x', 'payload.exe': 'y' }))).status === 400);
+  check('a missing main file is refused', (await call('PUT', '/api/addins/demo', pkg({ main: 'start.js' }))).status === 400);
+  check('an oversized file is refused', (await call('PUT', '/api/addins/demo', pkg({}, { 'main.js': 'x'.repeat(2e6) }))).status === 400);
+  check('an exporter without document.read is refused', (await call('PUT', '/api/addins/demo', pkg({ contributes: { exporters: [{ id: 'e', label: 'E', extension: 'txt' }] } }))).status === 400);
+  const sb = await fetch(base + '/addin-sandbox.html');
+  const csp = sb.headers.get('content-security-policy') || '';
+  check('the sandbox page allows no network and only its own hashed script', /connect-src 'none'/.test(csp) && /script-src 'sha256-/.test(csp) && !/unsafe-inline|unsafe-eval/.test(csp) && /frame-ancestors 'self'/.test(csp), csp);
+  check('and carries no X-Frame-Options that would block it', !sb.headers.get('x-frame-options'));
+  check('the rest of the app still refuses to be framed', (await fetch(base + '/')).headers.get('x-frame-options') === 'DENY');
+  await call('PUT', '/api/admin/settings', { allowAddins: false });
+  check('with add-ins switched off, installing is refused', (await call('PUT', '/api/addins/demo', pkg())).status === 403);
+  check('but existing ones can still be listed and removed', (await call('GET', '/api/addins')).json.enabled === false && (await call('DELETE', '/api/addins/demo')).status === 200);
+  await call('PUT', '/api/admin/settings', { allowAddins: true });
   console.log('Sessions and cookies');
   cookie = '';
   const l1 = await call('POST', '/api/login', { username: 'boss', password: 'correct-horse-battery' });

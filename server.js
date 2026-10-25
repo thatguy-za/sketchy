@@ -8,6 +8,7 @@ import { validateDesign } from './design-validate.js';
 import { createMcp } from './mcp.js';
 import { createPool } from './mcp-pool.js';
 import { createOAuth } from './oauth.js';
+import { validatePackage, LIMITS as ADDIN_LIMITS, ID_RE as ADDIN_ID } from './addin-validate.js';
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -533,6 +534,7 @@ const mcpFile = path.join(dataDir, 'mcp-tokens.json');
 let mcpTokens = nullMap(await readJSON(mcpFile, {})); // id -> {hash, user, name, created, lastUsed}
 const saveMcp = () => writeJSON(mcpFile, mcpTokens);
 if (settings.allowMcp === undefined) settings.allowMcp = process.env.ALLOW_MCP !== 'false';
+if (settings.allowAddins === undefined) settings.allowAddins = process.env.ALLOW_ADDINS !== 'false'; // may people install their own add-ins? (the ones shipped with Sketchy are always there)
 const mcpPool = createPool({ storage: mcpStorage, size: Math.max(1, +process.env.MCP_WORKERS || 2), timeoutMs: (+process.env.MCP_TIMEOUT_SECONDS || 20) * 1000, memoryMb: +process.env.MCP_WORKER_MEMORY_MB || 512 });
 const mcpHandle = createMcp({ storage: mcpStorage, pool: mcpPool, device: 'Claude / ChatGPT (MCP)', activity: (u, ev) => emit(u, { type: 'activity', ...ev }), held: isHeld });
 // Tokens are only accepted in the Authorization header: a token in a URL ends up in proxy logs, browser history and referrers.
@@ -614,7 +616,7 @@ async function api(req, res, url) {
       const tok = tokenOf(req), ss = sessions[sha(tok)];
       if (ss && ss.exp - Date.now() < SESSION_MS - DAY && ss.exp < ss.created + SESSION_MAX_MS) setSession(req, res, user, tok, ss);
     }
-    return send(res, 200, { user, admin: !!(user && users[user].admin), created: user ? users[user].created : 0, registration: settings.allowRegistration, mcp: settings.allowMcp, setup: !Object.keys(users).length });
+    return send(res, 200, { user, admin: !!(user && users[user].admin), created: user ? users[user].created : 0, registration: settings.allowRegistration, mcp: settings.allowMcp, addins: settings.allowAddins, setup: !Object.keys(users).length });
   }
 
   if (p === '/api/register' || p === '/api/login') {
@@ -801,6 +803,7 @@ async function api(req, res, url) {
         const b = await readJSONBody(req, 1024);
         if (typeof b?.allowRegistration === 'boolean') settings.allowRegistration = b.allowRegistration;
         if (typeof b?.allowMcp === 'boolean') settings.allowMcp = b.allowMcp;
+        if (typeof b?.allowAddins === 'boolean') settings.allowAddins = b.allowAddins;
         if (typeof b?.breachCheck === 'boolean') settings.breachCheck = b.breachCheck;
         if (b && 'idleMinutes' in b) { const n = Number(b.idleMinutes); if (!Number.isFinite(n) || (n !== 0 && (n < 0.02 || n > 525600))) return send(res, 400, { error: 'Idle time must be 0 (never sign out) or a number of minutes up to 525600.' }); settings.idleMinutes = n; }
         if (b && 'defaultQuotaMb' in b) { const n = Number(b.defaultQuotaMb); if (!Number.isInteger(n) || n < 0 || n > 1e7) return send(res, 400, { error: 'Storage must be a whole number of megabytes from 0 (no limit) to 10000000.' }); settings.defaultQuotaMb = n; usageCache.clear(); }
@@ -929,6 +932,39 @@ async function api(req, res, url) {
     const beat = setInterval(() => { try { res.write(': \n\n'); } catch { /* closed */ } }, 25e3);
     req.on('close', () => { clearInterval(beat); set.delete(res); if (!set.size) streams.delete(user); });
     return;
+  }
+
+  // ---- add-ins the person installed (each is a manifest plus a few text files; they run sandboxed in the browser)
+  if (p === '/api/addins' || p.startsWith('/api/addins/')) {
+    const dir = path.join(dataDir, 'addins', users[user].id);
+    if (p === '/api/addins') {
+      if (req.method !== 'GET') return send(res, 405, {});
+      const names = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.json'));
+      const list = (await Promise.all(names.map(async (f) => { const o = await readJSON(path.join(dir, f), null); return o?.manifest ? { manifest: o.manifest, installed: o.installed || 0, bytes: JSON.stringify(o.files || {}).length } : null; }))).filter(Boolean);
+      return send(res, 200, { enabled: settings.allowAddins, addins: list });
+    }
+    const id = decodeURIComponent(p.slice('/api/addins/'.length));
+    if (!ADDIN_ID.test(id)) return send(res, 400, { error: 'Invalid add-in id.' });
+    const file = path.join(dir, id + '.json');
+    if (req.method === 'GET') { const o = await readJSON(file, null); return o ? send(res, 200, { manifest: o.manifest, files: o.files }) : send(res, 404, { error: 'Not found' }); }
+    if (req.method === 'DELETE') { await fs.rm(file, { force: true }); log('addin_removed', ip, `user=${user} id=${id}`); return send(res, 200, {}); }
+    if (req.method === 'PUT') {
+      if (!settings.allowAddins) return send(res, 403, { error: 'Installing add-ins is turned off on this server.' });
+      const wait = rate('addin:' + user, 20, 60e3);
+      if (wait) { res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many installs. Slow down.' }); }
+      const b = await readJSONBody(req, ADDIN_LIMITS.totalBytes * 2 + 65536);
+      if (!b || typeof b !== 'object') return send(res, 400, { error: 'Bad request' });
+      const bad = validatePackage(b.manifest, b.files);
+      if (bad) return send(res, 400, { error: bad });
+      if (b.manifest.id !== id) return send(res, 400, { error: 'The add-in id in the address and in the manifest differ.' });
+      const have = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.json') && f !== id + '.json');
+      if (have.length >= ADDIN_LIMITS.perUser) return send(res, 400, { error: `You can have up to ${ADDIN_LIMITS.perUser} add-ins. Remove one first.` });
+      await fs.mkdir(dir, { recursive: true });
+      await writeJSON(file, { manifest: b.manifest, files: b.files, installed: Date.now() });
+      log('addin_installed', ip, `user=${user} id=${id} v=${String(b.manifest.version).slice(0, 20)}`);
+      return send(res, 200, { id });
+    }
+    return send(res, 405, {});
   }
   // ---- what the person is looking at, so an assistant can work on the same thing
   if (p === '/api/live' && req.method === 'PUT') {
@@ -1172,6 +1208,13 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const isMcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'), isOauth = url.pathname.startsWith('/.well-known/oauth-') || url.pathname === '/oauth/register' || url.pathname === '/oauth/token', isApi = url.pathname.startsWith('/api/') || isOauth;
     harden(req, res, isMcp || isApi);
+    if (url.pathname === '/addin-sandbox.html') { // the add-in sandbox page: framed by this app only, may run its one inline script and start workers, allowed nothing else (no network)
+      const html = await fs.readFile(path.join(root, 'addin-sandbox.html'), 'utf8').catch(() => '');
+      const inline = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '';
+      const hash = crypto.createHash('sha256').update(inline).digest('base64'); // 'self' does not work in a frame with no origin, so the page's own script is allowed by its hash
+      res.setHeader('content-security-policy', `default-src 'none'; script-src 'sha256-${hash}' blob:; worker-src blob:; connect-src 'none'; img-src 'none'; style-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
+      res.removeHeader('x-frame-options'); res.removeHeader('cross-origin-opener-policy'); res.removeHeader('permissions-policy'); res.setHeader('cross-origin-resource-policy', 'cross-origin'); // frame-ancestors above decides who may frame it (X-Frame-Options SAMEORIGIN would block a frame that has no origin)
+    }
     if (!hostOk(req)) { log('bad_host', clientIp(req), String(req.headers.host || '').slice(0, 60)); res.setHeader('content-type', 'text/plain'); res.statusCode = 421; return res.end('This address is not one this server answers to. Set PUBLIC_URL or ALLOWED_HOSTS to the address you use.'); }
     const ip = clientIp(req), wait = rate((isMcp ? 'mcp:' : isApi ? 'api:' : 'static:') + ip, isMcp ? 600 : isApi ? 1500 : 900, 60e3);
     if (wait) { log('rate_limited', ip, url.pathname.slice(0, 40)); res.setHeader('retry-after', String(wait)); return send(res, 429, { error: 'Too many requests. Slow down.' }); }

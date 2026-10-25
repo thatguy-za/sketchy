@@ -6,6 +6,8 @@ import { repairSoup } from './meshrepair.js';
 import { ringMesh, surfaceMesh, loftRings, sweepRings, helixRings, smoothPath, axisFrame, sub, add, scl, dot, len, unit, cross } from './solids.js';
 
 let K;
+/** The loaded manifold-3d module (for the add-in geometry service). */
+export const kernelModule = () => K;
 /** Browser: pass { locateFile } pointing at the bundled wasm. Node (the MCP server): no options needed. */
 export async function initKernel(opts = {}) {
   K = await Module(opts);
