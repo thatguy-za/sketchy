@@ -837,11 +837,16 @@ export function rebuild(features, count, opts = {}) {
   };
   const overlaps = (a, b, pad = 1e-3) => a.min.every((v, k) => v <= b.max[k] + pad && a.max[k] >= b.min[k] - pad);
   const names = (list) => list.map((b) => `"${b.name}"`).join(', ');
-  const applyOp = (f, solid, op, target) => {
-    if (opts.previewId && opts.previewId === f.id) {
-      const me = solid.getMesh();
-      preview = { op, verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts) };
-    }
+  const setPreview = (solid, op) => {
+    if (!(opts.previewId && opts.previewId === f0cur.id)) return;
+    const me = solid.getMesh();
+    preview = { op, verts: new Float32Array(me.vertProperties.filter((_, k) => k % me.numProp < 3)), tris: new Uint32Array(me.triVerts) };
+  };
+  let f0cur = null;
+  /** `reverse` (optional) returns the same tool on the other side of its profile plane: a cut that misses every body in the drawn direction is tried that way. */
+  const applyOp = (f, solid, op, target, reverse) => {
+    f0cur = f;
+    setPreview(solid, op);
     if (op === 'auto') {
       let best = null, bv = 0;
       for (const b of live.values()) { const v = t(b.m.intersect(solid)).volume(); if (v > bv) { bv = v; best = b; } }
@@ -861,15 +866,23 @@ export function rebuild(features, count, opts = {}) {
     const picked = (f.params?.targets || []).filter((id) => live.has(id)); // objects to cut: several bodies chosen in the dialog
     if (op === 'cut') {
       const ids = picked.length ? picked : !target || target === 'all' ? [...live.keys()] : [target];
-      const hit = [];
-      for (const id of ids) {
-        const b = getBody(id), before = b.m.volume();
-        b.m = t(b.m.subtract(solid));
-        if (Math.abs(before - (b.m.isEmpty() ? 0 : b.m.volume())) > 1e-9 * Math.max(before, 1)) hit.push(b);
-        if (b.m.isEmpty()) live.delete(id);
+      let hit = [], turned = false;
+      const run = (tool) => {
+        hit = [];
+        for (const id of ids) {
+          const b = getBody(id), before = b.m.volume(), cutM = t(b.m.subtract(tool));
+          if (Math.abs(before - (cutM.isEmpty() ? 0 : cutM.volume())) > 1e-9 * Math.max(before, 1)) { b.m = cutM; hit.push(b); }
+        }
+      };
+      run(solid);
+      if (!hit.length && reverse) { // a cut that points away from the part (a sketch on a face faces outwards): cut into it instead
+        const other = reverse();
+        run(other);
+        if (hit.length) { turned = true; setPreview(other, op); }
       }
+      for (const id of ids) if (live.get(id)?.m.isEmpty()) live.delete(id);
       const all = ids.map((id) => live.get(id) || { name: 'a removed body' });
-      notes[f.id] = { op: 'cut', bodies: hit.map((b) => b.id), text: hit.length ? `Cuts from ${names(hit)}` : `Cuts from ${!target || target === 'all' ? 'all bodies' : names(all)}` };
+      notes[f.id] = { op: 'cut', bodies: hit.map((b) => b.id), text: hit.length ? `Cuts from ${names(hit)}${turned ? ' (turned round to cut into it)' : ''}` : `Cuts from ${!target || target === 'all' ? 'all bodies' : names(all)}` };
       if (!hit.length) warnings[f.id] = [{ text: 'The cut does not touch any body, so nothing was removed. Move or extend it so it overlaps the body.' }];
     } else if (op === 'intersect' && picked.length > 1) {
       for (const id of picked) { const b = getBody(id); b.m = t(b.m.intersect(solid)); }
@@ -959,7 +972,8 @@ export function rebuild(features, count, opts = {}) {
           }
           const fr = planeFrame(sk.params);
           let dist = p.distance || 0;
-          const dirSign = p.extent && p.extent !== 'distance' ? (p.flip ? -1 : 1) : dist < 0 ? -1 : 1;
+          const dirSign = (p.extent && p.extent !== 'distance' ? 1 : dist < 0 ? -1 : 1) * (p.flip ? -1 : 1);
+          if (!p.extent || p.extent === 'distance') dist = dirSign * Math.abs(dist);
           if (p.extent === 'all') dist = dirSign * BIGDIST;
           else if (p.extent === 'object') {
             const ob = getBody(p.toBody);
@@ -1002,7 +1016,7 @@ export function rebuild(features, count, opts = {}) {
             m = t(m.add(m2));
           }
           if (p.start === 'offset' && p.startOffset) m = t(m.translate([0, 0, p.startOffset])); // begin the extrusion off the profile plane
-          applyOp(f, toPlane(m, sk.params, t), p.op, p.target);
+          applyOp(f, toPlane(m, sk.params, t), p.op, p.target, () => toPlane(t(m.mirror([0, 0, 1])), sk.params, t));
           break;
         }
         case 'revolve': {

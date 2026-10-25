@@ -3021,16 +3021,17 @@ async function saveVersion() {
   const m = modal(`<div class="modal-title">Save</div>
     <form class="modal-body sv-form" autocomplete="off">
       ${named ? '' : '<p class="p0">Choose a name next, then this becomes the first version.</p>'}
-      <label class="sv-row"><span>Version description</span><input name="note" maxlength="200" value="User saved" aria-label="Version description" spellcheck="true"></label>
-      <div class="sv-row"><span>Version</span><input class="sv-ver" value="V${(named ? doc.rev || 0 : 0) + 1}" readonly tabindex="-1" aria-label="The number this version will get"></div>
+      <label class="sv-row"><span>Notes</span><input name="note" maxlength="200" value="User saved" aria-label="Notes for this version" spellcheck="true"></label>
+      <div class="sv-row"><span>${named && doc.rev ? 'Make a version' : 'Version'}</span><span class="sv-mk">${named && doc.rev ? '<input type="checkbox" name="mk" checked aria-label="Make a version: untick to save without a new version number">' : ''}<input class="sv-ver" value="V${(named ? doc.rev || 0 : 0) + 1}" readonly tabindex="-1" aria-label="The number this version will get"></span></div>
       <div class="modal-foot flush"><button type="submit" class="btn primary">OK</button><button type="button" class="btn" id="sv-cancel">Cancel</button></div>
     </form>`);
   const form = m.el.querySelector('form');
   m.el.querySelector('#sv-cancel').onclick = () => m.close();
   setTimeout(() => { form.note.focus(); form.note.select(); }, 80);
-  form.onsubmit = async (e) => { e.preventDefault(); const note = form.note.value.trim(); m.close(); await save(false, note); };
+  if (form.mk) form.mk.onchange = () => { form.note.disabled = !form.mk.checked; form.querySelector('.sv-ver').style.visibility = form.mk.checked ? '' : 'hidden'; };
+  form.onsubmit = async (e) => { e.preventDefault(); const note = form.note.value.trim(), ver = !form.mk || form.mk.checked; m.close(); await save(false, note, '', ver); };
 }
-async function save(as, note = '', milestone = '') {
+async function save(as, note = '', milestone = '', asVersion = true) {
   let name = doc.name, folder = doc.folder || '';
   if (acct.server && !(await requireLogin())) return;
   if (acct.server && (as || name === 'Untitled')) { // in-app Save dialog: name + folder
@@ -3042,12 +3043,12 @@ async function save(as, note = '', milestone = '') {
     if (!n) return; name = n;
   }
   if (acct.server) {
-    doc.saves = (doc.saves || 0) + 1;
+    if (asVersion) doc.saves = (doc.saves || 0) + 1;
     const expect = name === doc.name ? doc.seq || 0 : 0; // a new name should not already exist
-    let r = await putDesign(name, expect, folder, false, note, milestone);
+    let r = await putDesign(name, expect, folder, !asVersion, note, milestone);
     if (r.status === 409) {
       const choice = await conflictDialog(r.data, name);
-      if (choice === 'overwrite') r = await putDesign(name, '*', folder, false, note, milestone);
+      if (choice === 'overwrite') r = await putDesign(name, '*', folder, !asVersion, note, milestone);
       else if (choice === 'copy') {
         const pick = await saveDialog({ name: `${name} (copy)`, folder, title: 'Save a copy', okLabel: 'Save copy' });
         if (!pick || pick.name === 'Untitled') return;
@@ -3059,7 +3060,7 @@ async function save(as, note = '', milestone = '') {
     }
     if (!r.ok) return toast('Save failed: ' + (r.data?.error || r.status), true);
     doc.rev = r.data.rev; doc.seq = r.data.seq; doc.conflict = false; delete doc.viewingRev; renderDocTabs(); bannerRev = doc.seq; hideBanner(); doc.folder = folder; rememberLast(name);
-    toast(`Saved "${name}" as V${doc.rev}${folder ? ` in ${folder}` : ''}`);
+    toast(`Saved "${name}"${asVersion ? ` as V${doc.rev}` : ''}${folder ? ` in ${folder}` : ''}`);
     if ($('#data-panel').classList.contains('open')) renderDataPanel();
   } else download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`);
   doc.name = name; $('#doc-name').textContent = name;

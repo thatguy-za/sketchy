@@ -96,7 +96,7 @@ export const FEATURES = {
       { key: 'extent', label: 'Extent type', type: 'select', icon: 'ext', options: EXTENT_OPTS },
       { key: 'distance', label: 'Distance', type: 'num', show: (p) => p.extent === 'distance' },
       { key: 'toBody', label: 'To object', type: 'body', show: (p) => p.extent === 'object' },
-      { key: 'flip', label: 'Flip direction', type: 'bool', show: (p) => p.extent !== 'distance' },
+      { key: 'flip', label: 'Flip direction', type: 'bool', show: (p) => p.direction !== 'symmetric' && p.direction !== 'two' },
       { key: 'extent2', label: 'Side 2 extent', type: 'select', options: [['distance', 'Distance'], ['all', 'All']], show: (p) => p.extent === 'distance' && p.direction === 'two' },
       { key: 'distance2', label: 'Side 2 distance', type: 'num', show: (p) => p.extent === 'distance' && p.direction === 'two' && p.extent2 !== 'all' },
       { key: 'taper2', label: 'Side 2 taper', type: 'num', unit: 'deg', step: 0.5, show: (p) => p.extent === 'distance' && p.direction === 'two' && p.extent2 !== 'all' },
