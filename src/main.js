@@ -1226,7 +1226,11 @@ function startFeature(key, overrides = {}) {
   const pre = snapshot();
   const params = { ...def.make(c), ...overrides };
   if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
-  if (key === 'combine') { const o = result.bodies.find((b) => b.id !== params.target)?.id; params.tool = o ? [o] : []; }
+  if (key === 'combine') { // bodies already selected: the first is the target and the rest are the tools; otherwise the next body is offered as the tool
+    const picked = [...vp.selected].filter((id) => result.bodies.some((b) => b.id === id));
+    if (picked.length >= 2) { params.target = picked[0]; params.tool = picked.slice(1); }
+    else { const o = result.bodies.find((b) => b.id !== params.target)?.id; params.tool = o ? [o] : []; }
+  }
   if (selFace?.curved && !selEdges.length && ['fillet', 'chamfer', 'presspull', 'hole', 'shell', 'draft'].includes(key)) return toast('That tool needs a flat face (or edges). A curved face can be given an appearance.', true);
   if ((key === 'fillet' || key === 'chamfer') && (selEdges.length || selFace)) {
     params.edges = selEdges.length ? selEdges.map((e) => ({ ...e })) : edgesOfFace(selFace);
@@ -1907,6 +1911,55 @@ function remapSketchCons(si, delta) {
   if (cons.length !== (curSketch().params.cons || []).length || delta) setSketchCons(cons);
 }
 // ---- project / include: copy model edges onto the sketch plane
+/**
+ * What the model offers to snap to while sketching: the edges of bodies that lie in the sketch plane (the outline of the face being
+ * drawn on, the holes in it, arcs). Corners, the middle of each side, the centre of a circle or arc and its quadrant points are
+ * points; the edges themselves are lines to snap onto. Kept until the result, the plane or the hidden bodies change.
+ */
+let refMemo = { result: null, key: '', val: { points: [], lines: [] } };
+function sketchReference() {
+  if (!sketch) return refMemo.val;
+  const fr = planeFrame(resolvedMap[curSketch().id] || curSketch().params);
+  const key = JSON.stringify([fr.o, fr.x, fr.y]) + '|' + [...hiddenBodies].sort().join('|');
+  if (refMemo.result === result && refMemo.key === key) return refMemo.val;
+  const points = [], lines = [], seen = new Set(), tol = 0.02;
+  const add = (p, kind) => { const k = kind + p[0].toFixed(3) + ',' + p[1].toFixed(3); if (!seen.has(k)) { seen.add(k); points.push({ p, kind }); } };
+  const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  for (const { chain } of edgeEntries()) {
+    const P = chain.pts;
+    if (!P || P.length < 2) continue;
+    const uv = [];
+    let flat = true;
+    for (const q of P) { const d = [q[0] - fr.o[0], q[1] - fr.o[1], q[2] - fr.o[2]]; if (Math.abs(dot3(d, fr.n)) > tol) { flat = false; break; } uv.push([dot3(d, fr.x), dot3(d, fr.y)]); }
+    if (!flat) continue;
+    lines.push({ uv, closed: !!chain.closed });
+    const n = uv.length, first = uv[0], last = uv[n - 1];
+    // a circle (closed) or an arc (open): the centre and, for a full circle, the four quadrant points
+    const fit = (a, b, c) => { // circumcentre of three points, or null when they are in a line
+      const d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+      if (Math.abs(d) < 1e-9) return null;
+      const ux = ((a[0] ** 2 + a[1] ** 2) * (b[1] - c[1]) + (b[0] ** 2 + b[1] ** 2) * (c[1] - a[1]) + (c[0] ** 2 + c[1] ** 2) * (a[1] - b[1])) / d;
+      const uy = ((a[0] ** 2 + a[1] ** 2) * (c[0] - b[0]) + (b[0] ** 2 + b[1] ** 2) * (a[0] - c[0]) + (c[0] ** 2 + c[1] ** 2) * (b[0] - a[0])) / d;
+      return { c: [ux, uy], r: Math.hypot(a[0] - ux, a[1] - uy) };
+    };
+    const cf = n >= 5 ? fit(first, uv[n >> 1], uv[Math.floor(n * 0.75)] || last) : null;
+    const round = cf && cf.r > 1e-6 && uv.every((q) => Math.abs(Math.hypot(q[0] - cf.c[0], q[1] - cf.c[1]) - cf.r) < 0.01 * cf.r + 1e-3);
+    if (round) {
+      add(cf.c, 'Center');
+      if (chain.closed) for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) add([cf.c[0] + dx * cf.r, cf.c[1] + dy * cf.r], 'Quadrant');
+    }
+    if (!chain.closed) {
+      add(first, 'Endpoint'); add(last, 'Endpoint');
+      let total = 0; const cum = [0];
+      for (let i = 1; i < n; i++) { total += Math.hypot(uv[i][0] - uv[i - 1][0], uv[i][1] - uv[i - 1][1]); cum.push(total); }
+      let k = 1; while (k < n - 1 && cum[k] < total / 2) k++;
+      const t = cum[k] > cum[k - 1] ? (total / 2 - cum[k - 1]) / (cum[k] - cum[k - 1]) : 0;
+      add([uv[k - 1][0] + (uv[k][0] - uv[k - 1][0]) * t, uv[k - 1][1] + (uv[k][1] - uv[k - 1][1]) * t], 'Midpoint');
+    } else if (!round) add(first, 'Endpoint');
+  }
+  refMemo = { result, key, val: { points, lines } };
+  return refMemo.val;
+}
 function projectHover(e) {
   const en = vp.pickEdge(e, edgeEntries());
   if ((en?.chain || null) !== (edgeHover?.chain || null)) { edgeHover = en; updateEdgeView(); }
@@ -4218,7 +4271,7 @@ function bindKeys() {
     if (e.key === 'Delete' || e.key === 'Backspace') { if (vp.selected.size) deleteSelection(); else if (selSet.size) deleteFeatures([...selSet]); return; }
     if (mod) return;
     if (e.key === 'F2') { e.preventDefault(); if (vp.selected.size) renameBodyOrFeature([...vp.selected][0]); else if (selFeature) renameFeature(selFeature, timelineAnchor(selFeature)); return; }
-    const map = { e: 'extrude', q: 'presspull', f: 'fillet', m: 'move', h: 'hole', j: 'joint', i: 'measure' };
+    const map = { e: 'extrude', q: 'presspull', f: 'fillet', m: 'move', h: 'hole', j: 'joint', i: 'measure', c: 'combine' };
     if (map[key]) runCommand(map[key]);
     else if (key === 's') { e.preventDefault(); openQuickSearch(); }
   });
@@ -4245,7 +4298,7 @@ async function boot() {
   $('#loading')?.remove();
   SU = createSketchUI({
     vp, THREE, sketch: () => sketch, params: () => resolvedMap[curSketch().id] || curSketch().params,
-    setShapes: (sh) => setSketchShapes(sh), remapCons: (si, delta) => remapSketchCons(si, delta), projectHover: (e) => projectHover(e), projectPick: (e, all) => projectPick(e, all), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
+    setShapes: (sh) => setSketchShapes(sh), remapCons: (si, delta) => remapSketchCons(si, delta), reference: () => sketchReference(), projectHover: (e) => projectHover(e), projectPick: (e, all) => projectPick(e, all), renderPanel: () => renderSketchPanel(), redrawSketch: () => drawSketches(),
     cons: () => curSketch().params.cons || [], setCons: (c) => setSketchCons(c),
     toast: (m) => toast(m), askPattern: (k, o) => askPattern(k, o), evalExpr: (t, kind = 'len') => evalExpr(t, paramScope, kind), setTool: (t) => setSketchTool(t), rebuildGrid: (st) => buildSketchGrid(st),
   });

@@ -140,12 +140,12 @@ export const FEATURES = {
     ],
   },
   combine: {
-    label: 'Combine', icon: 'combine', type: 'combine',
+    label: 'Combine', icon: 'combine', type: 'combine', needsBodies: 2,
     make: (ctx) => ({ target: ctx.selected || '', tool: [], op: 'join', keepTool: false }),
     fields: [
       { key: 'target', label: 'Target body', type: 'body' }, { key: 'tool', label: 'Tool bodies', type: 'bodies' },
-      { key: 'op', label: 'Operation', type: 'select', options: [['join', 'Join'], ['cut', 'Cut'], ['intersect', 'Intersect']] },
-      { key: 'keepTool', label: 'Keep tool', type: 'bool' },
+      { key: 'op', label: 'Operation', type: 'ops', options: [['join', 'Join'], ['cut', 'Cut'], ['intersect', 'Intersect']] },
+      { key: 'keepTool', label: 'Keep tools', type: 'bool' },
     ],
   },
   mirror: {

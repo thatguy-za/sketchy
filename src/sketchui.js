@@ -106,6 +106,7 @@ export function createSketchUI(app) {
       }
     });
     for (const p of S().pts || []) out.push({ p, kind: 'Endpoint' });
+    for (const c of app.reference?.().points || []) out.push(c); // corners, side midpoints and circle centres of the face being drawn on
     return out;
   }
 
@@ -117,6 +118,18 @@ export function createSketchUI(app) {
     for (const c of cands) { const q = scr(c.p); const d = Math.hypot(q.x - px.x, q.y - px.y); if (d < bd) { bd = d; best = c; } }
     if (best) return { pt: best.p.slice(), kind: best.kind };
     const ppm = ppmAt(raw);
+    // onto an edge of the face being drawn on (its sides, the rim of a hole)
+    let onEdge = null, ed = 8 / ppm;
+    for (const ln of app.reference?.().lines || []) {
+      const U = ln.uv, last = ln.closed ? U.length : U.length - 1;
+      for (let i = 0; i < last; i++) {
+        const a = U[i], b = U[(i + 1) % U.length], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+        if (L2 < 1e-18) continue;
+        const t = Math.max(0, Math.min(1, ((raw[0] - a[0]) * dx + (raw[1] - a[1]) * dy) / L2)), q = [a[0] + dx * t, a[1] + dy * t], d = Math.hypot(q[0] - raw[0], q[1] - raw[1]);
+        if (d < ed) { ed = d; onEdge = q; }
+      }
+    }
+    if (onEdge) return { pt: onEdge, kind: 'On edge' };
     let gu = null, gv = null, bu = 6 / ppm, bv = 6 / ppm;
     for (const c of cands) {
       if (Math.abs(c.p[0] - raw[0]) < bu) { bu = Math.abs(c.p[0] - raw[0]); gu = c.p; }
@@ -290,6 +303,11 @@ export function createSketchUI(app) {
         const sh = drawnShape(s.tool, s.pts, cur, typed);
         if (sh) vp.overlay.add(line3(shapeToPolygon(sh), (vp.dark ? 0xe6e8eb : 0x2d3138), true));
       }
+    }
+    // the dot at the pointer: where a click would land (snapped), always, with whichever tool is active
+    if (cur) {
+      const z = 1 / ppmAt(cur), ring = (r) => Array.from({ length: 14 }, (_, i) => [cur[0] + Math.cos((i / 14) * 6.283) * r * z, cur[1] + Math.sin((i / 14) * 6.283) * r * z]);
+      vp.overlay.add(line3(ring(3.2), 0x0b6bcb, true)); vp.overlay.add(line3(ring(1.4), 0x0b6bcb, true));
     }
     // inference markers + guides
     if (lastInfer && cur) {
@@ -530,18 +548,19 @@ export function createSketchUI(app) {
   function handlesOf(sh) {
     if (sh.t === 'slot') {
       const dx = sh.x2 - sh.x1, dy = sh.y2 - sh.y1, L = Math.hypot(dx, dy) || 1;
-      return [{ id: 'a', p: [sh.x1, sh.y1] }, { id: 'b', p: [sh.x2, sh.y2] }, { id: 'w', p: [(sh.x1 + sh.x2) / 2 - (dy / L) * (sh.w / 2), (sh.y1 + sh.y2) / 2 + (dx / L) * (sh.w / 2)] }];
+      return [{ id: 'ctr', p: [(sh.x1 + sh.x2) / 2, (sh.y1 + sh.y2) / 2] }, { id: 'a', p: [sh.x1, sh.y1] }, { id: 'b', p: [sh.x2, sh.y2] }, { id: 'w', p: [(sh.x1 + sh.x2) / 2 - (dy / L) * (sh.w / 2), (sh.y1 + sh.y2) / 2 + (dx / L) * (sh.w / 2)] }];
     }
-    if (sh.t === 'ellipse') return [{ id: 'rx', p: [sh.cx + sh.rx, sh.cy] }, { id: 'ry', p: [sh.cx, sh.cy + sh.ry] }];
+    if (sh.t === 'ellipse') return [{ id: 'ctr', p: [sh.cx, sh.cy] }, { id: 'rx', p: [sh.cx + sh.rx, sh.cy] }, { id: 'ry', p: [sh.cx, sh.cy + sh.ry] }];
     if (sh.t === 'rect' || sh.t === 'rrect') {
       const { x, y, w, h } = sh;
       return [
+        { id: 'ctr', p: [x + w / 2, y + h / 2] },
         { id: 'c0', p: [x, y] }, { id: 'c1', p: [x + w, y] }, { id: 'c2', p: [x + w, y + h] }, { id: 'c3', p: [x, y + h] },
         { id: 'e0', p: [x + w / 2, y] }, { id: 'e1', p: [x + w, y + h / 2] }, { id: 'e2', p: [x + w / 2, y + h] }, { id: 'e3', p: [x, y + h / 2] },
       ];
     }
-    if (sh.t === 'circle') return [{ id: 'r', p: [sh.cx + sh.r, sh.cy] }];
-    if (sh.t === 'ngon') { const a = sh.rot * D2R; return [{ id: 'v', p: [sh.cx + sh.r * Math.cos(a), sh.cy + sh.r * Math.sin(a)] }]; }
+    if (sh.t === 'circle') return [{ id: 'ctr', p: [sh.cx, sh.cy] }, { id: 'r', p: [sh.cx + sh.r, sh.cy] }];
+    if (sh.t === 'ngon') { const a = sh.rot * D2R; return [{ id: 'ctr', p: [sh.cx, sh.cy] }, { id: 'v', p: [sh.cx + sh.r * Math.cos(a), sh.cy + sh.r * Math.sin(a)] }]; }
     if (sh.t === 'path') return sh.pts.map((p, i) => ({ id: 'p' + i, p }));
     if (sh.t === 'point') return [{ id: 'p', p: [sh.x, sh.y] }];
     return [];
@@ -934,9 +953,11 @@ export function createSketchUI(app) {
     const px = evPx(ev);
 
     if (s.tool === 'select') {
+      if (kind === 'down' && drag?.sticky) { drag = null; lastInfer = null; canvas.style.cursor = ''; app.renderPanel(); redraw(); return; } // M: a click puts the shape down
       if (kind === 'down') {
         const h = hitHandle(px);
         if (h && app.cons().some((c) => c.t === 'fix' && c.a?.s === s.sel)) { app.toast?.('That shape is fixed. Use the Fix tool on it again to unlock it.'); return; }
+        if (h && h.id === 'ctr') { drag = { type: 'move', idx: s.sel, start: raw, orig: shapes()[s.sel], anchor: h.p }; return; } // the centre dot drags the whole shape
         if (h) { drag = { type: 'handle', id: h.id, idx: s.sel }; return; }
         const i = hitShape(px);
         if (i >= 0 && app.cons().some((c) => c.t === 'fix' && c.a?.s === i && c.a.k === undefined)) { s.sel = i; app.toast?.('That shape is fixed. Use the Fix tool on it again to unlock it.'); app.redrawSketch(); app.renderPanel(); redraw(); return; }
@@ -954,6 +975,7 @@ export function createSketchUI(app) {
             app.setShapes(shapes().map((o, i) => (i === drag.idx ? applyHandle(o, drag.id, sn.pt) : o)));
             status(sn, sn.pt);
           } else {
+            if (drag.start == null) drag.start = raw; // M: the shape moves from wherever the pointer was when M was pressed
             const want = [drag.anchor[0] + raw[0] - drag.start[0], drag.anchor[1] + raw[1] - drag.start[1]];
             const sn = snapPoint(ev, want, drag.idx);
             lastInfer = sn; s.cursor = sn.pt;
@@ -970,7 +992,7 @@ export function createSketchUI(app) {
         s.cursor = sn.pt; status(sn, sn.pt);
         return;
       }
-      if (kind === 'up') { if (drag) { drag = null; lastInfer = null; app.renderPanel(); redraw(); } return; }
+      if (kind === 'up') { if (drag && !drag.sticky) { drag = null; lastInfer = null; app.renderPanel(); redraw(); } return; }
       return;
     }
 
@@ -1062,6 +1084,20 @@ export function createSketchUI(app) {
   function dblclick() { const s = S(); if (s && (s.tool === 'line' || s.tool === 'path') && s.pts) { s.pts.pop(); finishPath(); } else if (s?.tool === 'spline' && s.pts) { s.pts.pop(); finishSpline(false); } }
 
   // ------------------------------------------------------------ keyboard
+  /** M: pick up the selected shape (or the one under the pointer); it follows the pointer and a click puts it down, Esc puts it back. */
+  function startMove() {
+    const s = S();
+    if (s.tool !== 'select') app.setTool('select');
+    const i = s.sel >= 0 ? s.sel : s.hover;
+    const sh = i >= 0 ? shapes()[i] : null;
+    if (!sh) { app.toast?.('Select a shape first, then press M to move it.'); return; }
+    if (app.cons().some((c) => c.t === 'fix' && c.a?.s === i && c.a.k === undefined)) { app.toast?.('That shape is fixed. Use the Fix tool on it again to unlock it.'); return; }
+    s.sel = i; app.redrawSketch(); app.renderPanel();
+    const ctr = handlesOf(sh).find((h) => h.id === 'ctr');
+    drag = { type: 'move', sticky: true, idx: i, start: null, orig: sh, anchor: ctr ? ctr.p : anchorOf(sh) };
+    canvas.style.cursor = 'move';
+    app.toast?.('Move: click to put it down, Esc to put it back.');
+  }
   function key(e) {
     const s = S();
     if (!s || s.picking) return false;
@@ -1075,6 +1111,11 @@ export function createSketchUI(app) {
       if (e.key === 'Escape' && s.pat.sel.length) { s.pat = { sel: [] }; redraw(); return true; }
     }
     if (s.tool === 'spline' && e.key === 'Enter' && s.pts?.length) { finishSpline(false); return true; }
+    if (e.key === 'Escape' && drag?.sticky) { // cancel a move that M started: the shape goes back
+      const d = drag; drag = null; lastInfer = null;
+      app.setShapes(shapes().map((o, i) => (i === d.idx ? d.orig : o))); app.renderPanel(); redraw(); return true;
+    }
+    if ((e.key === 'm' || e.key === 'M') && !e.metaKey && !e.ctrlKey && !e.altKey && !s.pts?.length) { startMove(); return true; }
     if (e.key === 'Escape') {
       if (s.pts?.length) { cancelShape(); return true; }
       if (s.tool !== 'select') { app.setTool('select'); return true; }

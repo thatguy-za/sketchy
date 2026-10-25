@@ -45,7 +45,7 @@ export const CMD = {
   shell: C('Shell', 'shell', { feature: 'shell' }),
   scale: C('Scale', 'scale', { feature: 'scale' }),
   split: C('Split Body', 'split', { feature: 'split' }),
-  combine: C('Combine', 'combine', { feature: 'combine' }),
+  combine: C('Combine', 'combine', { feature: 'combine', key: 'C', desc: 'Joins bodies into one, cuts the tool bodies out of the target, or keeps only where they overlap. Select the target body first, then the tools (or pick them in the dialog).' }),
   move: C('Move/Copy', 'move', { feature: 'move', key: 'M' }),
   remove: C('Delete', 'remove', { feature: 'remove', key: 'Del' }),
   parameters: C('Change Parameters', 'params'),

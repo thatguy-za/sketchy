@@ -66,7 +66,7 @@ The UI uses a conventional parametric-CAD layout: application bar with design ta
 * **Selection tools** (Select menu) — *Click* (default; drag orbits). *Window*: drag a rectangle, left to right selects bodies fully inside, right to left any body it touches. *Freeform*: drag a loop around bodies. *Paint*: drag across bodies. `Shift`/`Ctrl` adds to the selection, `Esc` returns to click selection. They select whole bodies (body priority).
 * **Two Views** (Viewports menu, bottom bar) — Horizontal (stacked) or Vertical (side by side). Each view orbits, pans and zooms on its own; the one under the pointer is outlined and is the one the ViewCube and view tools act on. Sketching and the move gizmo temporarily use one full view.
 
-Shortcuts: `F2` rename · `Enter` accepts a dialog · `S` command search · `E` extrude · `Q` press pull · `F` fillet · `M` move/copy · `H` hole · `J` joint · `I` measure · `L`/`R`/`C` line/rectangle/circle in a sketch · `Del` delete · `Ctrl+Z / Ctrl+Shift+Z` undo/redo · `Ctrl+S` save · `Ctrl+N` new · `Esc` cancel.
+Shortcuts: `F2` rename · `Enter` accepts a dialog · `S` command search · `E` extrude · `Q` press pull · `F` fillet · `M` move/copy · `H` hole · `J` joint · `I` measure · `C` combine · `L`/`R`/`C` line/rectangle/circle while sketching · `Del` delete · `Ctrl+Z / Ctrl+Shift+Z` undo/redo · `Ctrl+S` save · `Ctrl+N` new · `Esc` cancel.
 
 ### Editing experience
 
