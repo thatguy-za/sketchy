@@ -77,6 +77,47 @@ export function write3MF(bodies, name = 'Sketchy', design = null) {
 }
 
 /**
+ * glTF 2.0 binary (.glb): one node and mesh per body with its base colour. glTF is Y-up and in metres, so a point (x, y, z) in millimetres
+ * becomes (x, z, -y) / 1000; that turn keeps the triangles facing the same way. No normals are written: viewers shade each triangle flat.
+ */
+export function writeGLB(bodies, name = 'Sketchy') {
+  const parts = bodies.filter((b) => b.verts.length && b.tris.length);
+  const bin = [], views = [], accessors = [], meshes = [], nodes = [], materials = [];
+  let off = 0;
+  const push = (u8) => { const at = off; bin.push(u8); off += u8.length; const pad = (4 - (off % 4)) % 4; if (pad) { bin.push(new Uint8Array(pad)); off += pad; } return at; };
+  const matOf = new Map();
+  parts.forEach((b, n) => {
+    const nv = b.verts.length / 3, pos = new Float32Array(nv * 3), lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < nv; i++) {
+      const x = b.verts[i * 3] / 1000, y = b.verts[i * 3 + 2] / 1000, z = -b.verts[i * 3 + 1] / 1000;
+      pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = z;
+      for (const [k, v] of [x, y, z].entries()) { if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
+    }
+    const idx = Uint32Array.from(b.tris);
+    const pv = views.push({ buffer: 0, byteOffset: push(new Uint8Array(pos.buffer)), byteLength: pos.byteLength, target: 34962 }) - 1;
+    const iv = views.push({ buffer: 0, byteOffset: push(new Uint8Array(idx.buffer)), byteLength: idx.byteLength, target: 34963 }) - 1;
+    const pa = accessors.push({ bufferView: pv, componentType: 5126, count: nv, type: 'VEC3', min: lo.map((v) => +v.toFixed(7)), max: hi.map((v) => +v.toFixed(7)) }) - 1;
+    const ia = accessors.push({ bufferView: iv, componentType: 5125, count: idx.length, type: 'SCALAR' }) - 1;
+    const c = hex(b.color); let mi = null;
+    if (c) {
+      if (!matOf.has(c)) { const v = parseInt(c.slice(1, 7), 16), lin = (s) => { const x = s / 255; return +(x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4).toFixed(5); }; matOf.set(c, materials.push({ name: `c${materials.length}`, pbrMetallicRoughness: { baseColorFactor: [lin((v >> 16) & 255), lin((v >> 8) & 255), lin(v & 255), 1], metallicFactor: 0, roughnessFactor: 0.6 } }) - 1); }
+      mi = matOf.get(c);
+    }
+    meshes.push({ name: safe(b.name || b.id), primitives: [{ attributes: { POSITION: pa }, indices: ia, mode: 4, ...(mi !== null ? { material: mi } : {}) }] });
+    nodes.push({ name: safe(b.name || b.id), mesh: n });
+  });
+  const json = { asset: { version: '2.0', generator: 'Sketchy' }, scene: 0, scenes: [{ name: safe(name), nodes: nodes.map((_, i) => i) }], nodes, meshes, ...(materials.length ? { materials } : {}), accessors, bufferViews: views, buffers: [{ byteLength: off }] };
+  let js = enc.encode(JSON.stringify(json)); const jpad = (4 - (js.length % 4)) % 4;
+  if (jpad) { const t = new Uint8Array(js.length + jpad).fill(0x20); t.set(js); js = t; }
+  const head = new DataView(new ArrayBuffer(12 + 8));
+  head.setUint32(0, 0x46546c67, true); head.setUint32(4, 2, true); head.setUint32(8, 12 + 8 + js.length + (off ? 8 + off : 0), true);
+  head.setUint32(12, js.length, true); head.setUint32(16, 0x4e4f534a, true);
+  const parts2 = [new Uint8Array(head.buffer), js];
+  if (off) { const bh = new DataView(new ArrayBuffer(8)); bh.setUint32(0, off, true); bh.setUint32(4, 0x004e4942, true); parts2.push(new Uint8Array(bh.buffer), ...bin); }
+  return new Blob(parts2, { type: 'model/gltf-binary' });
+}
+
+/**
  * Group the triangles of a closed mesh into flat faces (connected, coplanar) and trace each face's outline.
  * Returns [{ loops: [[vertexIndex...]] }] with the outer loop first; faces whose outline cannot be traced cleanly are
  * returned as their individual triangles instead, so the result always covers every triangle exactly once.

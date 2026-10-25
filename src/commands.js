@@ -66,9 +66,7 @@ export const CMD = {
   derive: C('Insert Design', 'derive'),
   // --- 3D print / utilities ---
   printer: C('Printer…', 'printer', { desc: 'Chooses the printer whose build volume is shown and checked against.' }),
-  printsetup: C('Print Setup…', 'printer', { desc: 'Your printer, nozzle size, layer height, material and how snug parts should fit. Print Check and the templates use them.' }),
-  templates: C('Templates…', 'box', { desc: 'Starts a new design from a ready-made part (box with lid, phone stand, cable clip, bracket) that you change with sliders.' }),
-  customize: C('Customize', 'params', { desc: 'Shows the sliders of this template design.' }),
+  printsetup: C('Print Setup…', 'printer', { desc: 'Your printer, nozzle size, layer height, material and how snug parts should fit. Print Check uses them.' }),
   connectai: C('Connect an AI assistant…', 'sketch', { desc: 'Steps to let Claude, ChatGPT or another assistant build and change designs in your account (MCP).' }),
   tour: C('Make my first part', 'sketch', { desc: 'A guided walk-through from a sketch to a file ready for your slicer.' }),
   printcheck: C('Print Check', 'properties', { desc: 'Checks the bodies for printing: will they fit the bed, where do they need supports, and are any walls too thin.' }),
@@ -176,7 +174,6 @@ export const TOOLBAR = {
     { label: 'EXPORT', show: ['export'], menu: [], big: true },
     { label: 'RENDER', show: ['render', 'saveimage'], menu: [] },
     { label: 'PRINTER', show: ['printsetup', 'printer', 'buildvol', 'printcheck'], menu: [] },
-    { label: 'LEARN', show: ['templates', 'tour', 'connectai'], menu: [] },
   ],
 };
 

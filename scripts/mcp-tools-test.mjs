@@ -133,7 +133,7 @@ r = json(await call('print_check', { design: 'T1' }));
 check('print_check returns a verdict with fit, overhangs and walls', r?.verdict && r.fit && r.overhangs && r.walls, JSON.stringify(r)?.slice(0, 200));
 r = json(await call('inspect_design', { design: 'T1', detail: true }));
 check('inspect_design with detail adds mass and face counts', r?.model?.bodies?.[0]?.mass_g > 0 && r.model.bodies[0].faces.planar >= 1, JSON.stringify(r?.model?.bodies?.[0]));
-for (const fmt of ['stl', '3mf', 'obj', 'step']) { const x = json(await call('export_model', { design: 'T1', format: fmt })); check(`export_model writes ${fmt}`, x?.bytes > 100 && x.filename.endsWith('.' + fmt), JSON.stringify(x)?.slice(0, 100)); }
+for (const fmt of ['stl', '3mf', 'obj', 'step', 'glb']) { const x = json(await call('export_model', { design: 'T1', format: fmt })); check(`export_model writes ${fmt}`, x?.bytes > 100 && x.filename.endsWith('.' + fmt), JSON.stringify(x)?.slice(0, 100)); }
 { const x = json(await call('export_model', { design: 'T1', format: 'step' })); const txt = x?.base64 ? Buffer.from(x.base64, 'base64').toString() : ''; check('STEP says whether it is exact, and is exact when the design allows', typeof x?.step_exact === 'boolean' && (x.step_exact ? /AP242/.test(txt) && !/FACETED_BREP/.test(txt) : /FACETED_BREP/.test(txt) && !!x.note), JSON.stringify({ ...x, base64: undefined })); }
 check('the old export_stl still works', json(await call('export_stl', { design: 'T1' }))?.filename === 'T1.stl');
 r = json(await call('describe_sketch'));

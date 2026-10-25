@@ -14,7 +14,7 @@ initTheme();
 const LOGO_MARK = '<svg viewBox="0 0 64 64" width="16" height="16"><rect x="4" y="4" width="56" height="56" rx="14" fill="#169b62"/><path d="M40 22C36 17 24 18 24 26C24 34 40 30 40 39C40 47 27 48 22 42" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"/></svg>';
 import { parseSVG, parseDXF, textShapes } from './import2d.js';
 import { repairSoup, describeRepair } from './meshrepair.js';
-import { writeOBJ, write3MF, writeSTEP } from './exporters.js';
+import { writeOBJ, write3MF, writeSTEP, writeGLB } from './exporters.js';
 import { readEmbeddedDesign } from './importers.js';
 import { Viewport } from './viewport.js';
 import { findEdgeChains, matchChain, roundPts, edgeRef, planarFace, norm as vnorm } from './edges.js';
@@ -30,7 +30,6 @@ import { bedFit, overhangs, wallThickness } from './printcheck.js';
 import { orientations, placement, findings, verdict, minWallFor, weightEstimate } from './printprofile.js';
 import { createBeginner, designProfile } from './beginner.js';
 import { createAssistant, toolPast } from './assistant.js';
-import { templateDoc, templateById } from './templates.js';
 import { withoutSkins } from './skins.js';
 import { MATERIALS, TEXTURES, textureById, look, appearanceOf, densityOf, materialNameOf } from './materials.js';
 import { resolveSketch } from './sketchdims.js';
@@ -541,7 +540,7 @@ const CUSTOM = {
   asbuilt: () => startAsBuilt(),
   export: () => exportDialog(),
   printer: () => printerMenu($('#ribbon')),
-  printsetup: () => BG.printSetup(), templates: () => BG.templatePicker(), customize: () => BG.customizer(), tour: () => BG.startTour(), connectai: () => connectAssistant(),
+  printsetup: () => BG.printSetup(), tour: () => BG.startTour(), connectai: () => connectAssistant(),
   buildvol: () => { vp.opts.bed = !vp.opts.bed; vp.refreshMaterials(); renderRibbon(); },
   select: (ev) => selectionMenu(ev?.currentTarget), finishsketch: () => finishSketch(), cancelpick: () => cancelSketch(),
 };
@@ -641,7 +640,7 @@ function renderTree() {
   R(0, doc.name === 'Untitled' ? '(Unsaved)' : doc.name, { key: 'root', kind: 'comp', twist: true, root: true, eye: result.bodies.length ? visBodies > 0 : true,
     onEye: () => { const hide = visBodies > 0; result.bodies.forEach((b) => (hide ? hiddenBodies.add(b.id) : hiddenBodies.delete(b.id))); refresh(); } });
   if (open('root')) {
-    folder(1, 'docset', 'Document Settings', 'gear', {}, () => { R(2, `Units: ${getUnits()}, g`, { kind: 'file', click: (ev) => unitsMenu(ev.currentTarget) }); R(2, 'Part Design', { kind: 'body', dim: true }); if (doc.template) R(2, 'Customize sliders', { kind: 'file', click: () => BG.customizer() }); R(2, 'Print setup…', { kind: 'file', click: () => BG.printSetup() }); });
+    folder(1, 'docset', 'Document Settings', 'gear', {}, () => { R(2, `Units: ${getUnits()}, g`, { kind: 'file', click: (ev) => unitsMenu(ev.currentTarget) }); R(2, 'Part Design', { kind: 'body', dim: true }); R(2, 'Print setup…', { kind: 'file', click: () => BG.printSetup() }); });
     folder(1, 'views', 'Named Views', 'folder', {}, () => R(2, 'Home', { kind: 'camera', click: () => vp.home(true) }));
     folder(1, 'origin', 'Origin', 'folder', { eye: originVis, onEye: () => { originVis = !originVis; vp.setOriginVisible(originVis); renderTree(); } }, () => {
       for (const n of ['XY', 'XZ', 'YZ']) R(2, n, { kind: 'plane', dim: true });
@@ -2505,20 +2504,20 @@ let pcReopen = false;
 function clearCheck() { pcancel && (pcancel.stop = true); checkGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); }); checkGroup.clear(); }
 function closePrintCheck() { clearCheck(); $('#props-wrap').classList.remove('open'); }
 
-// ---- beginner help: print setup, templates, sliders, the welcome card and the guided first model (src/beginner.js)
+// ---- beginner help: print setup, the welcome card and the guided first model (src/beginner.js)
 const BG = createBeginner({
   $, esc, modal, toast, doc: () => doc, snapshot: () => snapshot(), pushUndo: (s) => pushUndo(s), refresh: () => refresh(),
   designProfile: () => designProfile(doc),
   printers: () => [...Object.entries(PRINTERS).map(([name, size]) => ({ name, size })), ...customPrinters()],
   bedName: () => bedName, setPrinter: (name) => { const size = printerSize(name); if (size) setBed(name, size); }, addPrinter: () => customPrinterDialog(),
-  openTemplate: (id) => openTemplate(id), isEmpty: () => !doc.features.length, state: () => ({ sketch: !!sketch, dialog: !!dialog }),
+  isEmpty: () => !doc.features.length, state: () => ({ sketch: !!sketch, dialog: !!dialog }),
   tourState: () => {
     const sks = doc.features.filter((f) => f.type === 'sketch');
     return { sketch: !!sketch, picking: !!sketch?.picking, shapes: sketch && !sketch.picking ? (curSketch()?.params.shapes || []).length : 0, hasSketch: sks.length > 0, hasShapes: sks.some((f) => (f.params.shapes || []).length > 0), has: (t) => doc.features.some((f) => f.type === t && !result.errors[f.id]), dialog: !!dialog, exported: BG.exported() };
   },
   nameNow: () => nameNow(),
   canConnect: () => !!(acct.server && acct.user), connectAssistant: () => connectAssistant(),
-  run: (id) => runCommand(id), renderRibbon: () => renderRibbon(), afterSetup: () => { renderRibbon(); if (BG.customizerOpen()) BG.customizer(); },
+  run: (id) => runCommand(id), renderRibbon: () => renderRibbon(), afterSetup: () => { renderRibbon(); },
 });
 /** The AI assistants page of the Account window: the server address, the connected assistants and a step-by-step guide for each assistant. */
 function connectAssistant() {
@@ -2526,28 +2525,6 @@ function connectAssistant() {
   if (!acct.mcp) return toast('The administrator has turned assistant access off on this server.', true);
   showAccount('ai');
 }
-/** A new design from a template: named first when designs are kept on the server, in a new tab unless this one is untouched. */
-async function openTemplate(id) {
-  const t = templateById(id);
-  if (!t || busy()) return;
-  const td = templateDoc(id, designProfileForNew());
-  const apply = (name) => {
-    doc.name = name; doc.features = td.features; doc.marker = td.marker; doc.nextId = td.nextId; doc.params = td.params; doc.template = td.template; doc.units = 'mm';
-    setUnits('mm'); undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear(); vp.fitted = false;
-    $('#doc-name').textContent = name; markDirty(); refresh(); BG.customizer(); renderDocTabs();
-  };
-  if (acct.server && acct.user) {
-    if (namingNow) return;
-    namingNow = true;
-    try {
-      const pick = await askNewDesign('Name your design', 'Create', t.name);
-      if (!pick || !newTab({ reuseBlank: true })) return;
-      apply(pick.name);
-      await createOnServer(pick);
-    } finally { namingNow = false; }
-  } else if (newTab({ reuseBlank: true })) apply(t.name);
-}
-const designProfileForNew = () => designProfile({ params: [] });
 /** Turn the bodies so they lie the way that needs the least support: one Move feature each. */
 function layFlat(bodies, rot) {
   pushUndo(snapshot());
@@ -2649,6 +2626,7 @@ const EXPORT_FORMATS = [
   ['3mf', '3MF', 'Recommended for 3D printing. Keeps units and colours, and opens in every slicer. Can carry the editable design inside, so one file is all you need to keep.'],
   ['stl', 'STL', 'Works everywhere, but has no units or colours.'],
   ['obj', 'OBJ', ''],
+  ['glb', 'glTF (binary)', 'For 3D viewers, web pages, game engines and Blender. Keeps colours; sizes are in metres, with Y up.'],
   ['step', 'STEP', 'For other CAD programs. Flat faces are exact; curved surfaces are written as small flat facets.'],
   ['sketchy', 'Sketchy project', 'The whole design with its feature timeline. Reopens fully editable in Sketchy.'],
 ];
@@ -2656,7 +2634,7 @@ function exportFile(fmt, name, selectedOnly, split = false, embed = false) {
   if (fmt === 'sketchy') { download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`); toast(`Exported "${name}" as a Sketchy project`); return; }
   const bodies = result.bodies.filter((b) => !hiddenBodies.has(b.id) && (!selectedOnly || vp.selected.has(b.id))).map((b) => ({ ...b, color: look((doc.appearance || {})[b.id]).color }));
   if (!bodies.length) return toast('Nothing to export.', true);
-  const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ, step: writeSTEP }[fmt];
+  const w = { stl: writeSTL, '3mf': write3MF, obj: writeOBJ, step: writeSTEP, glb: writeGLB }[fmt];
   if (split && bodies.length > 1) { // one file per body: "Name_v3_Lid.stl", numbered if two bodies share a name
     const used = new Map();
     bodies.forEach((b, i) => {
@@ -2721,7 +2699,7 @@ function exportDialog() {
   };
   let checkRun = 0, cancelCheck = { stop: false };
   const runChecks = async () => {
-    const host = m.el.querySelector('#ex-check'), proj = fmtSel.value === 'sketchy' || fmtSel.value === 'step';
+    const host = m.el.querySelector('#ex-check'), proj = ['sketchy', 'step', 'glb'].includes(fmtSel.value);
     cancelCheck.stop = true; const mine = ++checkRun; cancelCheck = { stop: false };
     host.hidden = proj;
     if (proj) return;
@@ -2924,7 +2902,7 @@ const projectJSON = (name = doc.name, withThumb = false) => { const { rev, viewi
 function loadProject(txt, rev = 0, seq = rev) {
   const d = JSON.parse(txt);
   if (d.format !== 'sketchy') throw new Error('Not a Sketchy project');
-  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, template: d.template && typeof d.template === 'object' && Array.isArray(d.template.sliders) ? d.template : undefined, rev, seq };
+  doc = { name: d.name, features: d.features, marker: d.marker, nextId: d.nextId, params: d.params || [], saves: d.saves || 0, appearance: d.appearance || {}, faceAppearance: Array.isArray(d.faceAppearance) ? d.faceAppearance : [], units: UNIT_TABLE[d.units] ? d.units : 'mm', components: d.components || [], bodyComp: d.bodyComp || {}, configs: d.configs || [], activeConfig: d.activeConfig || null, canvases: d.canvases || [], lastEdit: d.lastEdit && typeof d.lastEdit === 'object' ? d.lastEdit : undefined, rev, seq };
   setUnits(doc.units);
   undoStack = []; redoStack = []; vp.selected.clear(); hiddenBodies.clear();
   dirty = false; $('#doc-dirty').classList.remove('on'); $('#doc-name').textContent = doc.name;
@@ -3358,7 +3336,7 @@ function bindViewport() {
     vp.controls.mouseButtons.MIDDLE = e.shiftKey ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
   }, true);
   cv.addEventListener('pointerdown', (e) => { if (e.button === 2) rdown = { x: e.clientX, y: e.clientY }; });
-  cv.addEventListener('pointerup', (e) => { if (e.button === 2 && rdown && Math.hypot(e.clientX - rdown.x, e.clientY - rdown.y) < 5 && !sketch?.pts) openMarking(e.clientX, e.clientY); rdown = null; });
+  cv.addEventListener('pointerup', (e) => { if (e.button === 2 && rdown && Math.hypot(e.clientX - rdown.x, e.clientY - rdown.y) < 5 && !sketch?.pts) openContextAt(e.clientX, e.clientY); rdown = null; });
   cv.addEventListener('pointerdown', (e) => { if (multi) return; if (sketch && !sketch.picking && e.button === 0) { SU.pointer(e, 'down'); return; } down = { x: e.clientX, y: e.clientY, b: e.button }; });
   cv.addEventListener('pointerup', (e) => {
     if (e.pointerType === 'touch' && (multi || fingers.size)) { down = null; return; }
@@ -3703,6 +3681,47 @@ function bindZoomWindow() {
 
 // ------------------------------------------------------------------ marking menu (right-click)
 function closeMarking() { const h = $('#marking'); h.hidden = true; h.innerHTML = ''; }
+/** Right-click in the model: a menu for the edge or face under the pointer, otherwise the marking menu. */
+function openContextAt(x, y) {
+  if (dialog || sketch || measure) return openMarking(x, y);
+  closeMarking();
+  const at = { clientX: x, clientY: y }, u = getUnits();
+  const item = (id, label, o = {}) => ({ ficon: CMD[id]?.icon, label, hint: CMD[id]?.key, run: () => runCommand(id), ...o });
+  const en = vp.pickEdge(at, edgeEntries(), 12); // a little more forgiving than hovering: you are aiming for a thin line
+  if (en) {
+    if (!selEdges.some((e) => e.body === en.body && matchChain([en.chain], e.pts))) { selFace = null; vp.showFaces([], null); toggleSelEdge(en, false); }
+    const chains = resolveSelEdges(), n = chains.length, total = chains.reduce((a, c) => a + chainLength(c), 0);
+    showMenu(x, y, [
+      { head: n === 1 ? `Edge · ${dispStr(total, 2)} ${u}` : `${n} edges · ${dispStr(total, 2)} ${u} in total` },
+      item('fillet', n === 1 ? 'Fillet' : `Fillet ${n} edges`),
+      item('chamfer', n === 1 ? 'Chamfer' : `Chamfer ${n} edges`),
+      { sep: true },
+      { uicon: 'close', label: 'Clear selection', hint: 'Esc', run: () => { selEdges = []; edgeHover = null; updateEdgeView(); renderRibbon(); } },
+    ]);
+    return;
+  }
+  const tg = vp.pickFace(at);
+  if (tg?.face) {
+    selEdges = []; updateEdgeView(); vp.selected.clear(); vp.refreshMaterials();
+    selFace = { id: tg.id, point: tg.point, normal: tg.normal, ...(tg.curved ? { curved: true } : {}) };
+    vp.showFaces(shownFaces(), null); renderTree(); renderRibbon();
+    const flat = !tg.curved;
+    showMenu(x, y, [
+      { head: flat ? 'Flat face' : 'Curved face' },
+      item('presspull', 'Press/Pull', { disabled: !flat }),
+      item('sketch', 'Sketch on face', { disabled: !flat, hint: '' }),
+      item('hole', 'Hole', { disabled: !flat }),
+      item('shell', 'Shell', { disabled: !flat }),
+      item('draft', 'Draft', { disabled: !flat }),
+      item('fillet', 'Fillet the face\'s edges'),
+      { sep: true },
+      { ficon: CMD.appearance?.icon, label: 'Appearance…', run: () => openAppearance() },
+      { uicon: 'close', label: 'Clear selection', hint: 'Esc', run: () => { selFace = null; vp.showFaces([], null); renderTree(); renderRibbon(); } },
+    ]);
+    return;
+  }
+  openMarking(x, y);
+}
 function openMarking(x, y) {
   closeMarking();
   if (!dialog && !sketch && !measure) {

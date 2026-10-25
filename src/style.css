@@ -1086,7 +1086,7 @@ body.touch .row { margin: 10px 0; }
 #ap-panel .title .grow { flex: 1; }
 .tree-row.drop { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft); }
 
-/* beginner help: print setup, templates, customizer, welcome card, tour */
+/* beginner help: print setup, welcome card, tour */
 .bg-body { display: grid; gap: 8px; max-height: 70vh; overflow: auto; }
 .bg-lead { margin: 0 0 4px; color: var(--muted); }
 .bg-h { font-weight: 600; margin-top: 6px; }
@@ -1097,23 +1097,9 @@ body.touch .row { margin: 10px 0; }
 .bg-fit span { color: var(--muted); } .bg-fit em { font-style: normal; font-size: var(--fs-xs); color: var(--muted); }
 .bg-check { display: flex; gap: 8px; align-items: flex-start; } .bg-check span { color: var(--muted); }
 .bg-body code, .hint-sm code { font-family: var(--font-mono); background: var(--chip); padding: 0 3px; border-radius: 3px; }
-.bg-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.bg-card { text-align: left; display: grid; gap: 4px; align-content: start; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--c-fbfbfb); }
-.bg-card:hover, .bg-card:focus-visible { border-color: var(--accent); background: var(--accent-soft); outline: none; }
-.bg-card span { color: var(--muted); font-size: var(--fs-sm); }
-.bg-thumb { height: 64px; display: grid; place-items: center; background: var(--chip); border-radius: 6px; }
-.bg-thumb svg { width: 88px; height: 56px; } .bg-thumb .a { fill: var(--c-aeb1b8); } .bg-thumb .b { fill: var(--panel); } .bg-thumb .c { fill: var(--accent); }
-.modal:has(.bg-cards) { width: min(560px, 94vw); }
 .modal:has(.bg-fits) { width: min(520px, 94vw); }
-@media (max-width: 520px) { .bg-cards, .bg-fits { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .bg-fits { grid-template-columns: 1fr; } }
 
-#cz-root .cz-row { margin-bottom: 12px; }
-#cz-root .cz-row label { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
-#cz-root .cz-val { display: flex; align-items: center; gap: 4px; }
-#cz-root .cz-num { width: 66px; }
-#cz-root .cz-range { width: 100%; accent-color: var(--accent); }
-#cz-root .cz-custom { color: var(--muted); font-style: normal; }
-#cz-root .foot { display: flex; gap: 8px; justify-content: flex-end; }
 
 .pc-verdict { font-size: var(--fs-lg); font-weight: 700; padding: 8px 10px; border-radius: 6px; margin-bottom: 8px; }
 .pc-verdict.ok { background: var(--accent-soft); color: var(--accent); }

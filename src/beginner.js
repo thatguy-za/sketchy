@@ -1,7 +1,6 @@
-// Help for people new to 3D printing: print setup (printer, nozzle, fit), a template gallery with sliders, a welcome card for an
+// Help for people new to 3D printing: print setup (printer, nozzle, fit), a welcome card for an
 // empty design and a guided first model. main.js passes in what it owns (the design, undo, the viewport).
 import { MATERIALS } from './materials.js';
-import { TEMPLATES, templateById } from './templates.js';
 import { DEFAULT_PROFILE, NOZZLES, FITS, cleanProfile, withProfileParams, profileOfParams } from './printprofile.js';
 
 const store = {
@@ -26,7 +25,7 @@ const TOUR = [
 
 export function createBeginner(ctx) {
   const { $, esc, modal, toast } = ctx;
-  let flow = false, tour = null, tourTimer = null, welcomeClosed = store.get('sketchy.welcomeOff') === '1', czDoc = null;
+  let flow = false, tour = null, tourTimer = null, welcomeClosed = store.get('sketchy.welcomeOff') === '1';
 
   // ------------------------------------------------------------ print setup
   function printSetup() {
@@ -34,7 +33,7 @@ export function createBeginner(ctx) {
     const mats = MATERIALS.filter((m) => m.group === 'Printing');
     const fitFor = (t) => FITS.find((f) => Math.abs(f[2] - t) < 1e-9)?.[0] || 'custom';
     const m = modal(`<div class="modal-title">Print setup</div><div class="modal-body bg-body">
-      <p class="bg-lead">Tell Sketchy about your printer once. Print Check and the templates use it.</p>
+      <p class="bg-lead">Tell Sketchy about your printer once. Print Check uses it.</p>
       <label class="set-row"><span>Printer</span><select id="ps-printer" aria-label="Printer">${printers.map((p) => `<option value="${esc(p.name)}"${p.name === bed ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}<option value="__add">Add another printer…</option></select></label>
       <label class="set-row"><span>Nozzle size <i class="set-note">(printed on the nozzle)</i></span><select id="ps-nozzle" aria-label="Nozzle size">${NOZZLES.map((n) => `<option value="${n}"${n === cur.nozzle ? ' selected' : ''}>${n} mm${n === 0.4 ? ' (most common)' : ''}</option>`).join('')}</select></label>
       <label class="set-row"><span>Layer height <i class="set-note">(0.2 is a good start)</i></span><input id="ps-layer" type="number" min="0.04" max="1.2" step="0.04" value="${cur.layer}" aria-label="Layer height in millimetres"></label>
@@ -59,64 +58,6 @@ export function createBeginner(ctx) {
       toast(q('#ps-apply').checked ? 'Print setup saved and added to this design.' : 'Print setup saved.');
     };
   }
-
-  // ------------------------------------------------------------ templates
-  function templatePicker() {
-    const m = modal(`<div class="modal-title">Start from a template</div><div class="modal-body bg-body">
-      <p class="bg-lead">Ready-made parts you can change with sliders. They use your printer's fit gap, so they print right the first time.</p>
-      <div class="bg-cards">${TEMPLATES.map((t) => `<button type="button" class="bg-card" data-id="${t.id}"><div class="bg-thumb">${thumb(t.id)}</div><b>${esc(t.name)}</b><span>${esc(t.blurb)}</span></button>`).join('')}</div>
-    </div>`);
-    m.el.querySelectorAll('.bg-card').forEach((b) => (b.onclick = async () => { m.close(); await ctx.openTemplate(b.dataset.id); }));
-  }
-  const thumb = (id) => ({
-    'box-lid': '<svg viewBox="0 0 80 56"><rect x="8" y="22" width="40" height="26" rx="4" class="a"/><rect x="12" y="26" width="32" height="18" rx="2" class="b"/><rect x="50" y="36" width="24" height="12" rx="3" class="c"/></svg>',
-    'phone-stand': '<svg viewBox="0 0 80 56"><path d="M10 46h60v-6H10z" class="a"/><path d="M14 40v-8h6v8z" class="a"/><path d="M34 40L52 8l6 3-14 29z" class="c"/></svg>',
-    'cable-clip': '<svg viewBox="0 0 80 56"><rect x="8" y="40" width="64" height="8" rx="2" class="a"/><circle cx="40" cy="28" r="15" class="c"/><circle cx="40" cy="28" r="8" class="b"/><rect x="34" y="10" width="12" height="14" class="b"/></svg>',
-    'wall-bracket': '<svg viewBox="0 0 80 56"><path d="M12 8h8v32h40v8H12z" class="a"/><circle cx="16" cy="18" r="2.2" class="b"/><circle cx="50" cy="44" r="2.2" class="b"/></svg>',
-  }[id] || '');
-
-  // ------------------------------------------------------------ customizer (sliders of a template)
-  const num = (e) => { const v = parseFloat(String(e)); return Number.isFinite(v) ? v : null; };
-  function customizer() {
-    const d = ctx.doc(), t = d.template;
-    if (!t) return;
-    czDoc = d;
-    const wrap = $('#props-wrap');
-    const rows = t.sliders.map((s) => {
-      const p = (d.params || []).find((x) => x.name === s.name), v = p ? num(p.expr) : null;
-      if (v === null) return `<div class="cz-row"><label><span>${esc(s.label)}</span><i class="cz-custom">${esc(p?.expr ?? '?')}</i></label><div class="hint-sm">Set by an expression in Parameters.</div></div>`;
-      return `<div class="cz-row"><label for="cz-${s.name}"><span>${esc(s.label)}</span><span class="cz-val"><input class="cz-num" type="number" data-n="${s.name}" min="${s.min}" max="${s.max * 3}" step="${s.step}" value="${+v.toFixed(3)}" aria-label="${esc(s.label)}"> ${s.unit}</span></label>
-        <input id="cz-${s.name}" class="cz-range" type="range" data-n="${s.name}" min="${s.min}" max="${s.max}" step="${s.step}" value="${Math.min(s.max, Math.max(s.min, v))}">${s.hint ? `<div class="hint-sm">${esc(s.hint)}</div>` : ''}</div>`;
-    }).join('');
-    const prof = ctx.designProfile();
-    wrap.innerHTML = `<div class="props" id="cz-root"><div class="title">CUSTOMIZE · ${esc(d.name || 'Design')}</div><div class="body">
-      ${rows}
-      <div class="sep"></div>
-      <div class="hint-sm">${esc(t.tip || '')}</div>
-      <div class="stat"><span>Printer fit gap</span><b>${prof.tol} mm per side</b></div>
-      <div class="stat"><span>Nozzle</span><b>${prof.nozzle} mm</b></div>
-      <button class="btn" id="cz-setup" type="button">Print setup…</button>
-    </div><div class="foot"><button class="btn" id="cz-check" type="button">Check for printing</button><button class="btn primary" id="cz-close" type="button">Done</button></div></div>`;
-    wrap.classList.add('open');
-    let gesture = false;
-    const set = (name, value, final) => {
-      if (!gesture) { ctx.pushUndo(ctx.snapshot()); gesture = true; }
-      const unit = (ctx.doc().params.find((x) => x.name === name)?.unit);
-      ctx.doc().params = ctx.doc().params.map((x) => (x.name === name ? { ...x, expr: unit === 'angle' || unit === 'number' ? String(value) : `${value} mm` } : x));
-      wrap.querySelectorAll(`[data-n="${name}"]`).forEach((el) => { if (+el.value !== value) el.value = value; });
-      ctx.refresh();
-      if (final) gesture = false;
-    };
-    wrap.querySelectorAll('input[data-n]').forEach((el) => {
-      el.addEventListener('input', () => { const v = +el.value; if (Number.isFinite(v) && v > 0) set(el.dataset.n, v, false); });
-      el.addEventListener('change', () => { gesture = false; });
-    });
-    $('#cz-close').onclick = closeCustomizer;
-    $('#cz-setup').onclick = printSetup;
-    $('#cz-check').onclick = () => ctx.run('printcheck');
-  }
-  function closeCustomizer() { if ($('#cz-root')) $('#props-wrap').classList.remove('open'); }
-  const customizerOpen = () => !!$('#cz-root');
 
   // ------------------------------------------------------------ welcome card (empty design)
   /** Wait until no window is open: the next step of a journey never opens on top of one. */
@@ -154,7 +95,7 @@ export function createBeginner(ctx) {
     el.querySelector('.welcome-x').onclick = async () => {
       welcomeClosed = true; store.set('sketchy.welcomeOff', '1'); el.remove();
       await ctx.nameNow();
-      toast('Templates and the guided tour are in the Utilities tab, or use the search button at the top.');
+      toast('The guided tour is on the welcome card, or use the search button at the top.');
     };
     el.querySelectorAll('.wbtn').forEach((b) => (b.onclick = () => choose(b.dataset.a)));
   }
@@ -185,8 +126,7 @@ export function createBeginner(ctx) {
     let el = $('#tour');
     if (!el) { el = document.createElement('div'); el.id = 'tour'; el.setAttribute('role', 'status'); $('#viewport').appendChild(el); }
     if (tour.step >= TOUR.length) {
-      el.innerHTML = `<div class="tour-t">That's your first part.</div><div class="tour-x">Check it with <b>Print Check</b>, or try a template next.</div><div class="tour-b"><button class="btn" id="tour-tpl" type="button">See templates</button><button class="btn primary" id="tour-done" type="button">Done</button></div>`;
-      el.querySelector('#tour-tpl').onclick = () => { endTour(true); templatePicker(); };
+      el.innerHTML = `<div class="tour-t">That's your first part.</div><div class="tour-x">Check it with <b>Print Check</b> before you slice it.</div><div class="tour-b"><button class="btn primary" id="tour-done" type="button">Done</button></div>`;
       el.querySelector('#tour-done').onclick = () => endTour(true);
       glow(null); return;
     }
@@ -204,18 +144,15 @@ export function createBeginner(ctx) {
   }
 
   return {
-    printSetup, templatePicker, welcomeWanted, customizer, closeCustomizer, customizerOpen, startTour, tour: () => tour,
+    printSetup, welcomeWanted, startTour, tour: () => tour,
     noteExport() { if (tour) tour.exported = true; },
     exported: () => !!tour?.exported,
     /** Called after the design or the toolbar changes. */
     update() {
       renderWelcome();
-      if (customizerOpen() && (czDoc !== ctx.doc() || !ctx.doc().template)) closeCustomizer();
-      else if (customizerOpen() && !document.activeElement?.closest?.('#cz-root')) customizer();
     },
-    hasTemplate: () => !!ctx.doc().template,
     firstRun: () => store.get('sketchy.tour') !== 'done' && store.get('sketchy.welcomed') !== '1',
     markWelcomed: () => store.set('sketchy.welcomed', '1'),
   };
 }
-export { templateById, DEFAULT_PROFILE };
+export { DEFAULT_PROFILE };

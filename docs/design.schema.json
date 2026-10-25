@@ -4,63 +4,179 @@
   "title": "Sketchy design",
   "description": "A Sketchy design: the recipe (an ordered list of features) the app replays to build the model. It is stored as plain JSON, as a .sketchy.json file, and inside a .3mf file as /Metadata/sketchy-design.json. The solid geometry is not stored; it is rebuilt from the features.",
   "type": "object",
-  "required": ["format", "version", "name", "features"],
+  "required": [
+    "format",
+    "version",
+    "name",
+    "features"
+  ],
   "properties": {
-    "format": { "const": "sketchy" },
-    "version": { "type": "integer", "minimum": 1, "description": "Version of this file format." },
-    "name": { "type": "string", "maxLength": 80 },
+    "format": {
+      "const": "sketchy"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version of this file format."
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 80
+    },
     "features": {
       "type": "array",
       "description": "The timeline, in order. Features after `marker` are rolled back.",
-      "items": { "$ref": "#/$defs/feature" }
-    },
-    "marker": { "type": "integer", "minimum": 0, "description": "How many features are applied (the rollback marker)." },
-    "nextId": { "type": "integer", "minimum": 1, "description": "Counter used to name the next feature." },
-    "params": { "type": "array", "items": { "$ref": "#/$defs/parameter" }, "description": "Named parameters that feature expressions can use." },
-    "units": { "type": "string", "description": "Display units. All geometry is stored in millimetres.", "examples": ["mm", "cm", "m", "in", "ft"] },
-    "saves": { "type": "integer", "minimum": 0 },
-    "appearance": { "type": "object", "description": "Colour and material per body id.", "additionalProperties": { "type": "object" } },
-    "faceAppearance": { "type": "array", "items": { "type": "object" } },
-    "components": { "type": "array", "items": { "type": "object" } },
-    "bodyComp": { "type": "object", "description": "Body id to component id.", "additionalProperties": { "type": "string" } },
-    "configs": { "type": "array", "items": { "type": "object" }, "description": "Named sets of parameter values." },
-    "activeConfig": { "type": ["string", "null"] },
-    "canvases": { "type": "array", "items": { "type": "object" } },
-    "template": {
-      "type": "object",
-      "description": "Present on designs made from a template: the sliders shown in the Customize panel.",
-      "required": ["sliders"],
-      "properties": {
-        "id": { "type": "string" },
-        "tip": { "type": "string" },
-        "sliders": { "type": "array", "items": { "type": "object", "required": ["name", "min", "max"], "properties": { "name": { "type": "string" }, "label": { "type": "string" }, "min": { "type": "number" }, "max": { "type": "number" }, "step": { "type": "number" }, "unit": { "type": "string" }, "hint": { "type": "string" } } } }
+      "items": {
+        "$ref": "#/$defs/feature"
       }
     },
-    "lastEdit": { "type": "object", "description": "Who changed the design last (a person or an assistant)." },
-    "printProfile": { "type": "object" },
-    "thumb": { "type": "string", "description": "A small preview image as a data URL." }
+    "marker": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many features are applied (the rollback marker)."
+    },
+    "nextId": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Counter used to name the next feature."
+    },
+    "params": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/parameter"
+      },
+      "description": "Named parameters that feature expressions can use."
+    },
+    "units": {
+      "type": "string",
+      "description": "Display units. All geometry is stored in millimetres.",
+      "examples": [
+        "mm",
+        "cm",
+        "m",
+        "in",
+        "ft"
+      ]
+    },
+    "saves": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "appearance": {
+      "type": "object",
+      "description": "Colour and material per body id.",
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "faceAppearance": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "bodyComp": {
+      "type": "object",
+      "description": "Body id to component id.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "configs": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Named sets of parameter values."
+    },
+    "activeConfig": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "canvases": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "lastEdit": {
+      "type": "object",
+      "description": "Who changed the design last (a person or an assistant)."
+    },
+    "printProfile": {
+      "type": "object"
+    },
+    "thumb": {
+      "type": "string",
+      "description": "A small preview image as a data URL."
+    }
   },
   "$defs": {
     "feature": {
       "type": "object",
-      "required": ["id", "type"],
+      "required": [
+        "id",
+        "type"
+      ],
       "properties": {
-        "id": { "type": "string", "maxLength": 64 },
-        "type": { "type": "string", "maxLength": 40, "description": "The kind of feature, for example sketch, extrude, fillet, combine, pattern, mirror, move." },
-        "name": { "type": "string" },
-        "params": { "type": "object", "description": "The feature's settings. Their names depend on the type. Lengths are in millimetres." },
-        "exprs": { "type": "object", "description": "Settings driven by an expression instead of a number, keyed by setting name (nested settings use a dotted path such as pos.2).", "additionalProperties": { "type": "string", "maxLength": 1000 } },
-        "suppressed": { "type": "boolean" }
+        "id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "The kind of feature, for example sketch, extrude, fillet, combine, pattern, mirror, move."
+        },
+        "name": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object",
+          "description": "The feature's settings. Their names depend on the type. Lengths are in millimetres."
+        },
+        "exprs": {
+          "type": "object",
+          "description": "Settings driven by an expression instead of a number, keyed by setting name (nested settings use a dotted path such as pos.2).",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "suppressed": {
+          "type": "boolean"
+        }
       }
     },
     "parameter": {
       "type": "object",
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "properties": {
-        "name": { "type": "string", "maxLength": 64 },
-        "expr": { "type": "string", "maxLength": 1000, "description": "For example \"60 mm\" or \"width / 2\"." },
-        "unit": { "type": "string" },
-        "comment": { "type": "string" }
+        "name": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "expr": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "For example \"60 mm\" or \"width / 2\"."
+        },
+        "unit": {
+          "type": "string"
+        },
+        "comment": {
+          "type": "string"
+        }
       }
     }
   }

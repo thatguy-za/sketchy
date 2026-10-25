@@ -203,12 +203,24 @@ const vdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const vscl = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
 
 // Cross-section ring (3D polygon) of the material to remove (convex edge) / add (concave edge).
-function edgeRing(E, fr, kind, size, arcSteps) {
+// opts: fillet { chord: true } reads `size` as the straight distance between the two tangent lines (so the radius follows the angle between the
+// faces); chamfer { mode: 'two' | 'angle', d2, angle, flip } cuts different distances along the two faces (face 1 gets `size`, or face 2 when flipped).
+function edgeRing(E, fr, kind, sizeIn, arcSteps, opts = {}) {
   const { n1, n2, u1, u2 } = fr;
   const convex = vdot(n1, u2) < 0;
   const alpha = Math.acos(Math.max(-1, Math.min(1, vdot(u1, u2))));
-  const t = kind === 'fillet' ? size / Math.tan(alpha / 2) : size;
-  const T1 = vadd(E, vscl(u1, t)), T2 = vadd(E, vscl(u2, t));
+  const size = kind === 'fillet' && opts.chord ? sizeIn / (2 * Math.max(0.05, Math.cos(alpha / 2))) : sizeIn; // fillet radius
+  let t1 = kind === 'fillet' ? size / Math.tan(alpha / 2) : size, t2 = t1;
+  if (kind === 'chamfer' && (opts.mode === 'two' || opts.mode === 'angle')) {
+    let d2 = opts.d2;
+    if (opts.mode === 'angle') {
+      const th = (Math.min(89, Math.max(1, opts.angle)) * Math.PI) / 180, s = Math.sin(alpha + th);
+      if (!(s > 1e-3)) throw new Error('This angle does not fit the edge. Try a smaller angle.');
+      d2 = (size * Math.sin(th)) / s;
+    }
+    [t1, t2] = opts.flip ? [d2, size] : [size, d2];
+  }
+  const T1 = vadd(E, vscl(u1, t1)), T2 = vadd(E, vscl(u2, t2));
   const sg = convex ? 1 : -1;
   const delta = Math.max(0.05 * size, 0.01);
   const A1 = vadd(T1, vscl(n1, sg * delta)), A2 = vadd(T2, vscl(n2, sg * delta));
@@ -267,11 +279,11 @@ function connectedChains(chains, ch, maxTurnDeg = 100) {
 }
 
 /** size: a number, or {r0, r1} to vary linearly along the chain (open chains only). */
-function edgeCutter(ch, kind, sizeIn, t) {
+function edgeCutter(ch, kind, sizeIn, t, opts = {}) {
   const steps = kind === 'fillet' ? 12 : 0;
   const varying = typeof sizeIn === 'object' && !ch.closed;
   const r0 = varying ? sizeIn.r0 : typeof sizeIn === 'object' ? sizeIn.r0 : sizeIn, r1 = varying ? sizeIn.r1 : r0;
-  const size = Math.max(r0, r1);
+  const size = Math.max(r0, r1, opts.mode === 'two' ? opts.d2 || 0 : 0);
   const delta = Math.max(0.05 * size, 0.01);
   let pts = ch.pts, frames = ch.frames;
   const cum = [0];
@@ -284,7 +296,7 @@ function edgeCutter(ch, kind, sizeIn, t) {
     frames = [frames[0], ...frames, frames[frames.length - 1]];
   }
   const convex = vdot(frames[0].n1, frames[0].u2) < 0;
-  const rings = pts.map((p, i) => edgeRing(p, frames[i], kind, sizes[i], steps).ring);
+  const rings = pts.map((p, i) => edgeRing(p, frames[i], kind, sizes[i], steps, opts).ring);
   const m = rings[0].length, fan = m - 2;
   const verts = rings.flat(2);
   const tris = [];
@@ -1126,10 +1138,13 @@ export function rebuild(features, count, opts = {}) {
         }
         case 'fillet':
         case 'chamfer': {
-          const size0 = f.type === 'fillet' ? p.radius : p.distance;
+          const chord = f.type === 'fillet' && p.mode === 'chord';
+          const size0 = f.type === 'fillet' ? (chord ? p.chord : p.radius) : p.distance;
+          const cutOpts = f.type === 'fillet' ? { chord } : { mode: p.mode || 'equal', d2: +p.distance2, angle: +p.angle, flip: !!p.flip };
+          if (f.type === 'chamfer' && cutOpts.mode === 'two' && !(cutOpts.d2 > 0)) throw new Error('Distance 2 must be positive');
           if (!p.edges?.length) throw new Error('Select at least one edge in the viewport');
           if (!(size0 > 0)) throw new Error('Size must be positive');
-          const size = f.type === 'fillet' && p.variable ? (() => { if (!(p.radiusEnd > 0)) throw new Error('End radius must be positive'); return p.reverse ? { r0: p.radiusEnd, r1: p.radius } : { r0: p.radius, r1: p.radiusEnd }; })() : size0;
+          const size = f.type === 'fillet' && p.variable && !chord ? (() => { if (!(p.radiusEnd > 0)) throw new Error('End radius must be positive'); return p.reverse ? { r0: p.radiusEnd, r1: p.radius } : { r0: p.radius, r1: p.radiusEnd }; })() : size0;
           const byBody = new Map();
           for (const e of p.edges) byBody.set(e.body, [...(byBody.get(e.body) || []), e]);
           for (const [bid, edges] of byBody) {
@@ -1143,7 +1158,7 @@ export function rebuild(features, count, opts = {}) {
               for (const c of p.tangent ? connectedChains(chains, ch) : [ch]) if (!todo.includes(c)) todo.push(c);
             }
             for (const ch of todo) {
-              const cut = edgeCutter(ch, f.type, size, t);
+              const cut = edgeCutter(ch, f.type, size, t, cutOpts);
               if (cut.m.isEmpty()) throw new Error('Size too large for this edge');
               b.m = t(cut.convex ? b.m.subtract(cut.m) : b.m.add(cut.m));
             }
@@ -1343,12 +1358,22 @@ export function rebuild(features, count, opts = {}) {
           const ang = ((p.angle || 0) * Math.PI) / 180;
           if (Math.abs(ang) < 1e-9) throw new Error('Enter a draft angle');
           if (Math.abs(ang) >= Math.PI / 4) throw new Error('Draft angle must be under 45 degrees');
-          const u = ({ '+X': [1, 0, 0], '-X': [-1, 0, 0], '+Y': [0, 1, 0], '-Y': [0, -1, 0], '+Z': [0, 0, 1], '-Z': [0, 0, -1] })[p.dir || '+Z'];
+          let u = ({ '+X': [1, 0, 0], '-X': [-1, 0, 0], '+Y': [0, 1, 0], '-Y': [0, -1, 0], '+Z': [0, 0, 1], '-Z': [0, 0, -1] })[p.dir || '+Z'], planeAt = null;
+          if (p.neutral === 'plane') { // the neutral plane is a chosen plane, and its normal is the pull direction
+            let n0, o0;
+            if (PLANES[p.plane]) { n0 = PLANES[p.plane].n; o0 = [0, 0, 0]; }
+            else {
+              const pf = features.find((x) => x.id === p.plane && x.type === 'plane');
+              if (!pf || pf.params.error || !pf.params.normal) throw new Error('The neutral plane no longer exists or could not be built');
+              n0 = pf.params.normal; o0 = pf.params.origin;
+            }
+            u = p.flip ? n0.map((c) => -c) : n0.slice(); planeAt = u[0] * o0[0] + u[1] * o0[1] + u[2] * o0[2];
+          }
           const me = b.m.getMesh(), np = me.numProp, V = new Float32Array((me.vertProperties.length / np) * 3), T = me.triVerts;
           for (let i = 0; i < V.length / 3; i++) { V[i * 3] = me.vertProperties[i * np]; V[i * 3 + 1] = me.vertProperties[i * np + 1]; V[i * 3 + 2] = me.vertProperties[i * np + 2]; }
           let lo = Infinity, hi = -Infinity;
           for (let i = 0; i < V.length / 3; i++) { const h = V[i * 3] * u[0] + V[i * 3 + 1] * u[1] + V[i * 3 + 2] * u[2]; lo = Math.min(lo, h); hi = Math.max(hi, h); }
-          const end = p.neutral === 'end', h0 = end ? hi : lo, hsign = end ? -1 : 1, tn = Math.tan(ang);
+          const end = p.neutral === 'end', h0 = planeAt ?? (end ? hi : lo), hsign = end ? -1 : 1, tn = Math.tan(ang);
           const bb = bboxOf(b.m), D = 2 * Math.hypot(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]) + 10;
           let m = b.m;
           for (const fc of p.faces) { // re-read the current mesh each time so a neighbour's wedge extends this face's outline (fills corners when drafting outward)

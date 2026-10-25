@@ -492,5 +492,49 @@ console.log('Move, pattern, combine and mirror options');
   check('mirror about an origin plane still works', close(bb(mi('YZ'), 'mi').min[0], -15));
 }
 
+scenario('Chamfer distances and fillet by chord', () => {
+  const base = doc([prim('box', 'box', { sx: 40, sy: 30, sz: 20, radius: 0 })]);
+  const r0 = evaluate(base);
+  const all = edgesWhere(r0, 'box', (q) => q.every((v) => Math.abs(v[2] - 20) < 1e-3));
+  const edge = all.find((e) => Math.abs(Math.max(...e.pts.map((v) => v[0])) - Math.min(...e.pts.map((v) => v[0]))) > 39); // one 40 mm edge along the top
+  check('picked one long top edge', !!edge);
+  const topArea = (b) => { const { V, T } = mesh(b); let a = 0; for (let i = 0; i < T.length; i += 3) { const P = [0, 1, 2].map((k) => [0, 1, 2].map((c) => V[T[i + k] * 3 + c])); const u = P[1].map((v, c) => v - P[0][c]), w = P[2].map((v, c) => v - P[0][c]); const nz = u[0] * w[1] - u[1] * w[0]; if (nz > 0 && P.every((q) => Math.abs(q[2] - 20) < 1e-3)) a += nz / 2; } return a; };
+  const run = (type, params) => { const r = evaluate(doc([...base.features, { id: 'op', type, name: type, params: { edges: [edge], tangent: false, ...params } }])); return { r, b: bodyOf(r, 'box') }; };
+  const full = 40 * 30 * 20, L = 40;
+  let x = run('chamfer', { distance: 3, mode: 'equal' });
+  check('equal chamfer removes d²/2 along the edge', !errs(x.r) && close(x.b.volume, full - 4.5 * L, 1), errs(x.r) || String(x.b.volume));
+  x = run('chamfer', { distance: 5, distance2: 2, mode: 'two' });
+  const a1 = topArea(x.b);
+  check('two distances remove d1·d2/2 along the edge', !errs(x.r) && close(x.b.volume, full - 5 * L, 1), errs(x.r) || String(x.b.volume));
+  const y = run('chamfer', { distance: 5, distance2: 2, mode: 'two', flip: true });
+  const a2 = topArea(y.b);
+  check('swapping sides moves the larger cut to the other face', close(x.b.volume, y.b.volume, 1) && Math.abs(a1 - a2) > 50 && close(a1 + a2, 2 * 30 * 40 - 7 * L, 1), `${a1} ${a2}`);
+  x = run('chamfer', { distance: 4, angle: 30, mode: 'angle' });
+  check('distance and angle remove d1·d1·tan(angle)/2 along the edge', !errs(x.r) && close(x.b.volume, full - (4 * 4 * Math.tan(Math.PI / 6) / 2) * L, 1), errs(x.r) || String(x.b.volume));
+  x = run('chamfer', { distance: 3 }); // a design saved before the options existed
+  check('a chamfer saved without a type is still equal-distance', !errs(x.r) && close(x.b.volume, full - 4.5 * L, 1));
+  const byRadius = run('fillet', { radius: 3 }).b.volume, byChord = run('fillet', { mode: 'chord', chord: 3 * Math.SQRT2, radius: 1 });
+  check('fillet by chord gives the radius that chord belongs to', !errs(byChord.r) && close(byChord.b.volume, byRadius, 1), errs(byChord.r) || `${byChord.b.volume} vs ${byRadius}`);
+  check('a fillet saved without a size type uses the radius', close(run('fillet', { radius: 3, mode: undefined }).b.volume, byRadius, 0.01));
+});
+
+scenario('Draft with a chosen neutral plane', () => {
+  const base = doc([prim('box', 'box', { sx: 20, sy: 20, sz: 20, radius: 0 })]);
+  const r0 = evaluate(base), face = faceRef(r0, 'box', [1, 0, 0], 'max');
+  const wedge = 0.5 * 20 * 20 * Math.tan((5 * Math.PI) / 180) * 20; // a face tilted 5° over 20 mm of height, 20 mm wide
+  const run = (params, extra = []) => { const r = evaluate(doc([...base.features, ...extra, { id: 'dr', type: 'draft', name: 'Draft', params: { body: 'box', faces: [face], angle: 5, ...params } }])); return { r, v: bodyOf(r, 'box').volume }; };
+  let x = run({ dir: '+Z', neutral: 'start' });
+  check('draft at the base leans the face inward by the wedge', !errs(x.r) && close(x.v, 8000 - wedge, 2), errs(x.r) || String(x.v));
+  x = run({ neutral: 'plane', plane: 'XY' });
+  check('the XY plane as neutral plane gives the same draft as the base', !errs(x.r) && close(x.v, 8000 - wedge, 2), errs(x.r) || String(x.v));
+  x = run({ neutral: 'plane', plane: 'XY', flip: true });
+  check('flipping the pull direction leans the face outward', !errs(x.r) && close(x.v, 8000 + wedge, 2), errs(x.r) || String(x.v));
+  const mid = { id: 'pl', type: 'plane', name: 'Mid', params: { mode: 'offset', base: 'XY', offset: 10 } };
+  x = run({ neutral: 'plane', plane: 'pl' }, [mid]);
+  check('a construction plane through the middle drafts both halves in opposite senses (little net volume)', !errs(x.r) && close(x.v, 8000, 4), errs(x.r) || String(x.v));
+  x = run({ neutral: 'plane', plane: 'gone' });
+  check('a neutral plane that no longer exists is reported', /neutral plane/.test(errs(x.r)), errs(x.r));
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

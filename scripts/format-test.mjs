@@ -1,9 +1,8 @@
 // The file formats: a design is plain JSON that follows docs/design.schema.json, and a 3MF written by Sketchy carries it inside so one
 // file prints in a slicer and reopens for editing. Run with `npm run test:formats`.
 import fs from 'node:fs';
-import { write3MF } from '../src/exporters.js';
+import { write3MF, writeGLB } from '../src/exporters.js';
 import { parse3MF, readEmbeddedDesign } from '../src/importers.js';
-import { TEMPLATES, templateDoc } from '../src/templates.js';
 
 let failed = 0, passed = 0;
 const check = (name, ok, detail = '') => { ok ? passed++ : failed++; console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${ok ? '' : ' — ' + detail}`); };
@@ -34,7 +33,6 @@ const body = { id: 'b', name: 'Block', color: '#336699', verts: Float32Array.fro
 
 console.log('The design schema');
 check('an ordinary design follows the schema', validate(design('Bracket'), schema).length === 0);
-check('every template follows the schema', TEMPLATES.every((t) => { const e = validate({ format: 'sketchy', version: 1, ...templateDoc(t.id, {}) }, schema); if (e.length) console.log(e.slice(0, 3)); return e.length === 0; }));
 check('a file that is not a design is refused', validate({ format: 'other', features: [] }, schema).length > 0);
 check('a feature without an id is refused', validate(design('X', [{ type: 'extrude' }]), schema).length > 0);
 
@@ -51,6 +49,22 @@ const text = Buffer.from(withD).toString('latin1');
 check('the design is declared as its own relationship and part', text.includes('/Metadata/sketchy-design.json') && text.includes('relationships/design') && text.includes('Extension="json"'));
 const notDesign = await write3MF([body], 'X', JSON.stringify({ format: 'other' })).arrayBuffer();
 check('a JSON part that is not a Sketchy design is ignored', (await readEmbeddedDesign(notDesign)) === null);
+
+console.log('glTF (.glb)');
+{
+  const buf = Buffer.from(await writeGLB([body, { ...body, id: 'c', name: 'Plain', color: undefined }], 'Two').arrayBuffer());
+  const jlen = buf.readUInt32LE(12), json = JSON.parse(buf.subarray(20, 20 + jlen).toString()), bstart = 20 + jlen + 8;
+  check('the header says glTF version 2 and the length matches the file', buf.toString('latin1', 0, 4) === 'glTF' && buf.readUInt32LE(4) === 2 && buf.readUInt32LE(8) === buf.length);
+  check('the JSON chunk and the binary chunk are 4-byte aligned', jlen % 4 === 0 && buf.readUInt32LE(bstart - 4) === 0x004e4942 && (buf.length - bstart) % 4 === 0);
+  check('one node and mesh per body', json.nodes.length === 2 && json.meshes.length === 2 && json.asset.version === '2.0');
+  const pos = json.accessors[0], idx = json.accessors[1];
+  check('positions are in metres with Y up (z of 10 mm is y of 0.01)', pos.count === 4 && Math.abs(pos.max[1] - 0.01) < 1e-9 && Math.abs(pos.min[2] + 0.01) < 1e-9, JSON.stringify([pos.min, pos.max]));
+  check('indices stay inside the vertex list', idx.count === 12 && new Uint32Array(buf.buffer.slice(buf.byteOffset + bstart + json.bufferViews[1].byteOffset, buf.byteOffset + bstart + json.bufferViews[1].byteOffset + 48)).every((i) => i < 4));
+  check('the colour becomes a material and a body without colour has none', json.materials?.length === 1 && json.meshes[0].primitives[0].material === 0 && json.meshes[1].primitives[0].material === undefined);
+  check('the buffer length in the JSON matches the binary chunk', json.buffers[0].byteLength === buf.readUInt32LE(bstart - 8));
+  const empty = Buffer.from(await writeGLB([], 'None').arrayBuffer());
+  check('a file with no bodies is still a valid glb', empty.toString('latin1', 0, 4) === 'glTF' && empty.readUInt32LE(8) === empty.length);
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

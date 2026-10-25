@@ -5,7 +5,7 @@ import { FEATURES, defOf, fieldKind } from './features.js';
 import { resolveParams, resolveFeature, applyConfig } from './params.js';
 import { resolveSketch } from './sketchdims.js';
 import { writeSTL } from './stl.js';
-import { write3MF, writeOBJ, writeSTEP } from './exporters.js';
+import { write3MF, writeOBJ, writeSTEP, writeGLB } from './exporters.js';
 import { hintFor } from './hints.js';
 import { look, densityOf, materialNameOf, MATERIALS } from './materials.js';
 import * as queries from './queries.js';
@@ -144,9 +144,9 @@ export function faceTrisOf(body, ref) {
  */
 export async function exportOf(format, bodies, name, doc = null) {
   const f = String(format || 'stl').toLowerCase();
-  const mime = { stl: 'model/stl', '3mf': 'model/3mf', obj: 'model/obj', step: 'model/step' };
-  const make = { stl: () => writeSTL(bodies, name), '3mf': () => write3MF(bodies, name), obj: () => writeOBJ(bodies, name), step: () => writeSTEP(bodies, name) }[f];
-  if (!make) throw new Error(`Unknown format "${format}". Use stl, 3mf, obj or step.`);
+  const mime = { stl: 'model/stl', '3mf': 'model/3mf', obj: 'model/obj', step: 'model/step', glb: 'model/gltf-binary' };
+  const make = { stl: () => writeSTL(bodies, name), '3mf': () => write3MF(bodies, name), obj: () => writeOBJ(bodies, name), step: () => writeSTEP(bodies, name), glb: () => writeGLB(bodies, name) }[f];
+  if (!make) throw new Error(`Unknown format "${format}". Use stl, 3mf, obj, step or glb.`);
   const blob = make();
   return { bytes: Buffer.from(await blob.arrayBuffer()), filename: `${name}.${f}`, mime: mime[f], ...(f === 'step' && doc ? { exact: false, note: 'STEP is written as flat faces: a curved surface is made of many small planes.' } : {}) };
 }

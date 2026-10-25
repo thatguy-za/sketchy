@@ -1,6 +1,6 @@
 {
   "name": "sketchy",
-  "version": "0.0.46",
+  "version": "0.0.47",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -8,7 +8,6 @@
     "dev": "node scripts/dev.mjs",
     "preview:watch": "node scripts/preview-watch.mjs",
     "test:robustness": "node scripts/robustness.mjs",
-    "test:templates": "node scripts/templates-test.mjs",
     "test:bin": "node scripts/bin-test.mjs",
     "test:formats": "node scripts/format-test.mjs",
     "test:docker-files": "node scripts/docker-files-test.mjs",
