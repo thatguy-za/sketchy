@@ -869,9 +869,11 @@ export function rebuild(features, count, opts = {}) {
       let hit = [], turned = false;
       const run = (tool) => {
         hit = [];
+        const toolVol = Math.max(tool.volume(), 1e-9);
         for (const id of ids) {
           const b = getBody(id), before = b.m.volume(), cutM = t(b.m.subtract(tool));
-          if (Math.abs(before - (cutM.isEmpty() ? 0 : cutM.volume())) > 1e-9 * Math.max(before, 1)) { b.m = cutM; hit.push(b); }
+          const gone = before - (cutM.isEmpty() ? 0 : cutM.volume());
+          if (gone > 1e-4 * toolVol) { b.m = cutM; hit.push(b); } // float noise on a big body can be ~1e-4 mm³, so judge it against the tool's own size
         }
       };
       run(solid);
