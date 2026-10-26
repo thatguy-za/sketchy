@@ -3037,6 +3037,8 @@ async function saveVersion() {
 async function save(as, note = '', milestone = '', asVersion = true) {
   let name = doc.name, folder = doc.folder || '';
   if (acct.server && !(await requireLogin())) return;
+  if (as || name === 'Untitled' || !doc.rev) asVersion = true; // a first save, or a save under a new name, always starts a version
+  for (let i = 0; asBusy && i < 100; i++) await new Promise((r) => setTimeout(r, 50)); // an autosave still in flight would advance the design's revision under us and look like another browser's edit
   if (acct.server && (as || name === 'Untitled')) { // in-app Save dialog: name + folder
     const pick = await saveDialog({ name: name === 'Untitled' ? 'My design' : name, folder, title: as ? 'Save design as' : 'Save design' });
     if (!pick) return;
@@ -3062,7 +3064,7 @@ async function save(as, note = '', milestone = '', asVersion = true) {
       else return;
     }
     if (!r.ok) return toast('Save failed: ' + (r.data?.error || r.status), true);
-    doc.rev = r.data.rev; doc.seq = r.data.seq; doc.conflict = false; delete doc.viewingRev; renderDocTabs(); bannerRev = doc.seq; hideBanner(); doc.folder = folder; rememberLast(name);
+    ownSeq.set(name, r.data.seq); doc.rev = r.data.rev; doc.seq = r.data.seq; doc.conflict = false; delete doc.viewingRev; renderDocTabs(); bannerRev = doc.seq; hideBanner(); doc.folder = folder; rememberLast(name);
     toast(`Saved "${name}"${asVersion ? ` as V${doc.rev}` : ''}${folder ? ` in ${folder}` : ''}`);
     if ($('#data-panel').classList.contains('open')) renderDataPanel();
   } else download(new Blob([projectJSON(name)], { type: 'application/json' }), `${name}.sketchy.json`);
@@ -3071,7 +3073,7 @@ async function save(as, note = '', milestone = '', asVersion = true) {
 }
 
 // ---- cross-device: drafts, remote-change banner
-let draftT = null, bannerRev = 0;
+let draftT = null, bannerRev = 0, ownSeq = new Map(); // ownSeq: the newest revision this tab wrote itself, per design, so the poll never mistakes it for someone else's
 const draftKey = () => (doc.name === 'Untitled' ? '__untitled' : safeName(doc.name));
 function scheduleServerDraft() {
   if (!acct.user || doc.name !== 'Untitled') return; // named designs autosave to the server itself
@@ -3126,7 +3128,8 @@ function startRemotePolling() {
   setInterval(async () => {
     if (document.hidden || !acct.user || !doc.rev || doc.name === 'Untitled' || asBusy) return;
     const r = await call('GET', '/projects/' + encodeURIComponent(doc.name) + '/meta');
-    if (r.ok && r.data.seq > doc.seq && r.data.seq !== bannerRev) { bannerRev = r.data.seq; showBanner(r.data); }
+    if (asBusy || !r.ok) return; // an autosave started while we asked: the answer may already include it
+    if (r.data.seq > doc.seq && r.data.seq > (ownSeq.get(doc.name) || 0) && r.data.seq !== bannerRev) { bannerRev = r.data.seq; showBanner(r.data); }
   }, 20000);
   addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
   addEventListener('pagehide', () => { if (dirty) { try { localStorage.setItem('sketchy.autosave', projectJSON()); localStorage.setItem('sketchy.autosave.t', String(Date.now())); } catch { /* too large */ } } }); // keep a change made just before closing; the next start restores it
@@ -3284,7 +3287,7 @@ async function serverAutosave() {
   let r;
   try { r = await putDesign(d.name, d.seq || 0, d.folder || '', true); } finally { asBusy = false; }
   if (r.ok) {
-    d.rev = r.data.rev; d.seq = r.data.seq; bannerRev = d.seq;
+    ownSeq.set(d.name, r.data.seq); d.rev = r.data.rev; d.seq = r.data.seq; bannerRev = d.seq;
     if (doc === d && changeSeq === sent) { dirty = false; setSaveState('saved'); } else if (doc === d) asAgain = true; // edited while saving
   } else if (r.status === 409) {
     d.conflict = true;
@@ -4241,7 +4244,7 @@ function bindKeys() {
     const key = e.key.toLowerCase();
     if (!$('#marking').hidden) { if (e.key === 'Escape') closeMarking(); return; }
     if (e.key === 'Escape' && !$('#menu').hidden) { e.preventDefault(); $('#menu').hidden = true; return; } // an open menu takes Esc first, before it cancels a sketch or dialog
-    if (mod && key === 's') { e.preventDefault(); save(e.shiftKey); return; }
+    if (mod && key === 's') { e.preventDefault(); save(e.shiftKey, '', '', false); return; } // Ctrl/Cmd+S saves in place; the Save button (or Save as) makes a numbered version
     if (mod && key === 'n') { e.preventDefault(); newDoc(); return; }
     if (typing) {
       if (e.key === 'Enter' && !document.activeElement.closest('.modal')) {

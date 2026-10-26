@@ -783,22 +783,20 @@ export class Viewport {
     this.noteGroup = g; this.scene.add(g);
   }
 
-  // Selected (red) and hovered (orange) model edges outside of commands. chains: [{pts, closed}]
+  // Selected (orange) and hovered (blue) model edges outside of commands. chains: [{pts, closed}]
   showEdges(selected, hover) {
     for (const c of [...this.edgeSelGroup.children]) { c.geometry.dispose(); this.edgeSelGroup.remove(c); }
-    const sz = this.bounds().getSize(new THREE.Vector3()).length();
-    const draw = (chain, color, k) => {
+    const mats = (this.edgeMats ||= { sel: this.fatMat(0xff8a00, 3, false), hover: this.fatMat(0x1d8cf8, 2.5, false) }); // thin screen-space lines, whatever the model size
+    for (const m of Object.values(mats)) m.resolution.set(this.canvas.clientWidth, this.canvas.clientHeight);
+    const draw = (chain, mat) => {
       const pts = chain.pts.map((p) => new THREE.Vector3(...p));
-      if (chain.closed) pts.push(pts[0].clone());
       if (pts.length < 2) return;
-      const path = new THREE.CurvePath();
-      for (let i = 0; i < pts.length - 1; i++) path.add(new THREE.LineCurve3(pts[i], pts[i + 1]));
-      const tube = new THREE.Mesh(new THREE.TubeGeometry(path, Math.max(2, pts.length * 2), Math.max(sz * 0.004 * k, 0.15 * k), 6, false), new THREE.MeshBasicMaterial({ color, depthTest: false }));
-      tube.raycast = () => {}; tube.renderOrder = 11;
-      this.edgeSelGroup.add(tube);
+      const l = this.fatLine(pts, mat, !!chain.closed);
+      l.raycast = () => {}; l.renderOrder = 11;
+      this.edgeSelGroup.add(l);
     };
-    for (const c of selected || []) draw(c, 0xe0453a, 1.15);
-    if (hover) draw(hover, 0x1d8cf8, 1);
+    for (const c of selected || []) draw(c, mats.sel);
+    if (hover) draw(hover, mats.hover);
   }
 
   // ---- feature preview (translucent tool solid) ----
