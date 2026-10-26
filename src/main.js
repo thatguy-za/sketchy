@@ -970,13 +970,14 @@ function treeMenu(ev, c) {
     selectBody(c.id, false);
     showMenu(ev.clientX, ev.clientY, [
       { label: 'Rename', hint: 'F2', run: () => renameBodyOrFeature(c.id) },
-      { label: hidden ? 'Show' : 'Hide', uicon: hidden ? 'eye' : 'eyeOff', run: () => { hidden ? hiddenBodies.delete(c.id) : hiddenBodies.add(c.id); refresh(); } },
+      { label: hidden ? 'Show' : 'Hide', run: () => { hidden ? hiddenBodies.delete(c.id) : hiddenBodies.add(c.id); refresh(); } },
+      { label: 'Move / Copy…', hint: 'M', run: () => runCommand('move') },
       { label: isolated ? 'Unisolate' : 'Isolate', run: () => { if (isolated) hiddenBodies.clear(); else bodies.forEach((x) => (x.id === c.id ? hiddenBodies.delete(x.id) : hiddenBodies.add(x.id))); refresh(); } },
       ...((doc.components || []).length || true ? [{ sep: true }, { head: 'COMPONENT' }, ...(doc.components || []).map((cp) => ({ label: cp.name, check: doc.bodyComp?.[c.id] === cp.id, run: () => moveToComponent(vp.selected.size > 1 ? [...vp.selected] : [c.id], cp.id) })), { label: 'New component with this body', run: () => newComponent() }, ...(doc.bodyComp?.[c.id] ? [{ label: 'Remove from component', run: () => moveToComponent([c.id], null) }] : [])] : []),
       { sep: true },
-      { label: 'Appearance…', ficon: 'insertmesh', run: () => { if (!vp.selected.has(c.id)) { selFace = null; vp.showFaces([], null); vp.selected.clear(); vp.selected.add(c.id); vp.refreshMaterials(); renderTree(); } openAppearance(); } },
+      { label: 'Appearance…', run: () => { if (!vp.selected.has(c.id)) { selFace = null; vp.showFaces([], null); vp.selected.clear(); vp.selected.add(c.id); vp.refreshMaterials(); renderTree(); } openAppearance(); } },
       { sep: true },
-      { label: 'Properties', uicon: 'help', run: showInfo },
+      { label: 'Properties', run: showInfo },
       { label: 'Delete', hint: 'Del', run: deleteSelection },
     ]);
   } else {
@@ -1144,6 +1145,7 @@ function moveToComponent(bodyIds, compId) {
 function showMenu(x, y, items) {
   const m = $('#menu');
   m.innerHTML = '';
+  const anyCheck = items.some((x) => x.check !== undefined); // text only: the one thing that lines up the labels is the tick column
   for (const it of items) {
     if (it.sep) { m.insertAdjacentHTML('beforeend', '<div class="msep"></div>'); continue; }
     if (it.head) { m.insertAdjacentHTML('beforeend', `<div class="mh">${esc(it.head)}</div>`); continue; }
@@ -1152,7 +1154,7 @@ function showMenu(x, y, items) {
     if (it.disabled) e.setAttribute('aria-disabled', 'true');
     e.setAttribute('role', 'menuitem'); e.tabIndex = -1;
     if (it.dim) e.style.opacity = '.55';
-    const ic = it.swatch ? '<span class="swatch"></span>' : it.ficon ? ficon(it.ficon, 22) : it.uicon ? uicon(it.uicon, 16) : it.icon ? icon(it.icon, 16) : it.check === undefined ? '<span class="ph"></span>' : '';
+    const ic = it.swatch ? '<span class="swatch"></span>' : it.check === undefined && anyCheck ? '<span class="ph"></span>' : '';
     e.innerHTML = ic + `<span>${esc(it.label)}</span>` + (it.hint ? `<small>${it.hint}</small>` : '');
     if (it.swatch) e.querySelector('.swatch').style.background = it.swatch;
     e.onclick = () => { m.hidden = true; it.run(); };
@@ -1372,6 +1374,7 @@ function renderDialog() {
   for (const fld of def.fields) {
     if (fld.show && !fld.show(f.params)) continue;
     if (fld.key === 'sketch' && 'profiles' in f.params && sketchesBefore(idx).length < 2) continue; // no sketch row: the profile pick chooses it
+    if ((fld.type === 'vec3' || fld.type === 'point') && !body.querySelector('.axhead')) body.insertAdjacentHTML('beforeend', '<div class="row axhead" aria-hidden="true"><label></label><div class="v3"><span>X</span><span>Y</span><span>Z</span></div></div>'); // one X Y Z heading over the rows of three boxes
     const row = document.createElement('div');
     row.className = 'row';
     row.innerHTML = `<label>${fld.label}</label><div class="ctl"></div>`;
@@ -1431,7 +1434,7 @@ function renderDialog() {
     };
     const vec3 = () => {
       const g = document.createElement('div'); g.className = 'v3';
-      [0, 1, 2].forEach((k) => g.appendChild(numIn(`${fld.key}.${k}`, val[k])));
+      [0, 1, 2].forEach((k) => { const inp = numIn(`${fld.key}.${k}`, val[k]); inp.querySelector('input')?.setAttribute('aria-label', `${fld.label} ${'XYZ'[k]}`); g.appendChild(inp); });
       return g;
     };
     if (fld.type === 'edges') {
@@ -1530,7 +1533,7 @@ function renderDialog() {
       s.onfocus = () => { dialog.focusKey = fld.key; };
       s.onchange = () => { if (fld.boolSelect) { set(s.value === 'true'); return; } if (fld.key === 'sketch' && 'profiles' in f.params) { patchParams(idx, { sketch: s.value, profiles: null }); rerender(); return; } set(s.value); if (['op', 'kind', 'extent', 'by', 'mode', 'jtype', 'direction', 'start', 'extent2'].includes(fld.key)) rerender(); else if (def.gizmo) setupGizmo(); };
       ctl.appendChild(s);
-      if (fld.type === 'body') ctl.insertAdjacentHTML('beforeend', '<div class="note">…or click a body in the viewport.</div>');
+      if (fld.type === 'body' && !fld.noPick) ctl.insertAdjacentHTML('beforeend', '<div class="note">…or click a body in the viewport.</div>');
     }
     if (fld.adv) adv.push(row); else body.appendChild(row);
   }
@@ -1624,7 +1627,7 @@ function bodyFieldPick(e) {
   }
   const bfld = defOf(f).fields.find((x) => x.type === 'bodies');
   if (bfld && h) { const cur = [].concat(f.params[bfld.key] || []); updateParam(dialog.index, bfld.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); renderDialog(); return; }
-  const flds = defOf(f).fields.filter((x) => x.type === 'body' && (!x.show || x.show(f.params)));
+  const flds = defOf(f).fields.filter((x) => x.type === 'body' && !x.noPick && (!x.show || x.show(f.params)));
   if (!flds.length) return;
   if (!h) return;
   const key = (flds.find((x) => x.key === dialog.focusKey) || flds.find((x) => !f.params[x.key]) || flds[0]).key;

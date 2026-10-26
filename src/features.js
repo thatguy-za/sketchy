@@ -130,7 +130,7 @@ export const FEATURES = {
     label: 'Move / Copy', icon: 'move', type: 'move', gizmo: true,
     make: (ctx) => ({ body: ctx.selected || '', t: [0, 0, 0], r: [0, 0, 0], s: [1, 1, 1], copy: false, mode: 'free', from: [0, 0, 0], to: [0, 0, 0] }),
     fields: [
-      { key: 'body', label: 'Body', type: 'body' },
+      { key: 'body', label: 'Body', type: 'body', noPick: true }, // one body at a time: a stray click in the viewport must not swap it
       { key: 'mode', label: 'Move by', type: 'select', options: [['free', 'Distance in X, Y, Z'], ['points', 'Point to point']] },
       { key: 't', label: 'Move', type: 'vec3', show: (p) => p.mode !== 'points' },
       { key: 'from', label: 'From point', type: 'point', show: (p) => p.mode === 'points' },
