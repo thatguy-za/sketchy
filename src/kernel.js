@@ -1061,15 +1061,19 @@ export function rebuild(features, count, opts = {}) {
           break;
         }
         case 'move': {
-          const b = getBody(p.body);
-          const bb = bboxOf(b.m);
-          const c = bb.min.map((v, k) => (v + bb.max[k]) / 2);
-          let m = t(b.m.translate(c.map((v) => -v)));
-          m = t(m.scale(p.s));
-          m = t(m.rotate(p.r));
+          const ids = [...new Set(p.bodies?.length ? p.bodies : [p.body])].filter(Boolean); // `body` is how older designs and assistants name a single body
+          if (!ids.length) throw new Error('Choose a body to move');
+          const group = ids.map((id) => getBody(id)), bbs = group.map((b) => bboxOf(b.m));
+          const lo = [0, 1, 2].map((k) => Math.min(...bbs.map((q) => q.min[k]))), hi = [0, 1, 2].map((k) => Math.max(...bbs.map((q) => q.max[k])));
+          const c = lo.map((v, k) => (v + hi[k]) / 2); // turn and scale about the middle of everything chosen, so they keep their places relative to one another
           const d = p.mode === 'points' ? [0, 1, 2].map((k) => (+p.to?.[k] || 0) - (+p.from?.[k] || 0)) : p.t;
-          m = t(m.translate(c.map((v, k) => v + d[k])));
-          if (p.copy) addBody(f.id, m, f.name); else b.m = m;
+          group.forEach((b, gi) => {
+            let m = t(b.m.translate(c.map((v) => -v)));
+            m = t(m.scale(p.s));
+            m = t(m.rotate(p.r));
+            m = t(m.translate(c.map((v, k) => v + d[k])));
+            if (p.copy) addBody(gi ? `${f.id}~${gi + 1}` : f.id, m, group.length > 1 ? b.name : f.name); else b.m = m;
+          });
           break;
         }
         case 'combine': {

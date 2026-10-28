@@ -1228,6 +1228,10 @@ function startFeature(key, overrides = {}) {
   const pre = snapshot();
   const params = { ...def.make(c), ...overrides };
   if (['extrude', 'revolve', 'emboss', 'sextrude', 'srevolve'].includes(key) && c.selSketch) { params.sketch = c.selSketch; params.profiles = c.selProfiles; profSel.clear(); }
+  if (key === 'move') { // the bodies already selected (several from the browser, or one) are what moves
+    const picked = [...vp.selected].filter((id) => result.bodies.some((b) => b.id === id));
+    if (picked.length) params.bodies = picked;
+  }
   if (key === 'combine') { // bodies already selected: the first is the target and the rest are the tools; otherwise the next body is offered as the tool
     const picked = [...vp.selected].filter((id) => result.bodies.some((b) => b.id === id));
     if (picked.length >= 2) { params.target = picked[0]; params.tool = picked.slice(1); }
@@ -1355,6 +1359,8 @@ const OP_ORDER = ['join', 'cut', 'intersect', 'new', 'auto'];
 
 function renderDialog() {
   if (!dialog) return;
+  const f0 = doc.features[dialog.index];
+  if (f0.type === 'move' && !Array.isArray(f0.params.bodies)) doc.features[dialog.index] = { ...f0, params: { ...f0.params, bodies: f0.params.body ? [f0.params.body] : [] } }; // a Move saved before several bodies could be chosen
   const f = doc.features[dialog.index];
   const def = defOf(f);
   const wrap = $('#props-wrap');
@@ -1476,7 +1482,7 @@ function renderDialog() {
       ctl.querySelector('.xclear').onclick = () => { patchParams(idx, { profiles: null }); renderDialog(); };
     } else if (fld.type === 'bodies') {
       const avail = bodiesBefore(idx), chosen = [].concat(val || []);
-      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${chosen.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + '<div class="note">…or click bodies in the viewport.</div>' : '<div class="note">No bodies yet.</div>';
+      ctl.innerHTML = avail.length ? avail.map((q) => `<label class="chk plain"><input type="checkbox" data-s="${esc(q.id)}" ${chosen.includes(q.id) ? 'checked' : ''}> ${esc(q.name)}</label>`).join('') + (fld.noPick ? '' : '<div class="note">…or click bodies in the viewport.</div>') : '<div class="note">No bodies yet.</div>';
       ctl.querySelectorAll('input[data-s]').forEach((c) => (c.onchange = () => { set([...ctl.querySelectorAll('input[data-s]:checked')].map((x) => x.dataset.s)); }));
     } else if (fld.type === 'surfaces') {
       const avail = result.surfSnaps?.[idx] || result.surfaces.map((q) => ({ id: q.id, name: q.name }));
@@ -1625,7 +1631,7 @@ function bodyFieldPick(e) {
     else { const cur = f.params[sf.key] || []; updateParam(dialog.index, sf.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); }
     renderDialog(); return;
   }
-  const bfld = defOf(f).fields.find((x) => x.type === 'bodies');
+  const bfld = defOf(f).fields.find((x) => x.type === 'bodies' && !x.noPick);
   if (bfld && h) { const cur = [].concat(f.params[bfld.key] || []); updateParam(dialog.index, bfld.key, cur.includes(h.id) ? cur.filter((x) => x !== h.id) : [...cur, h.id]); renderDialog(); return; }
   const flds = defOf(f).fields.filter((x) => x.type === 'body' && !x.noPick && (!x.show || x.show(f.params)));
   if (!flds.length) return;
@@ -1729,9 +1735,10 @@ function setupGizmo() {
   if (!dialog) return;
   const f = doc.features[dialog.index];
   if (!defOf(f).gizmo) return;
-  const b = bodiesBefore(dialog.index).find((x) => x.id === f.params.body);
-  if (!b) return;
-  const c = b.bbox.min.map((v, k) => (v + b.bbox.max[k]) / 2);
+  const ids = f.params.bodies?.length ? f.params.bodies : f.params.body ? [f.params.body] : [];
+  const bs = bodiesBefore(dialog.index).filter((x) => ids.includes(x.id));
+  if (!bs.length) return;
+  const c = [0, 1, 2].map((k) => (Math.min(...bs.map((x) => x.bbox.min[k])) + Math.max(...bs.map((x) => x.bbox.max[k]))) / 2); // the middle of everything being moved
   const t = f.params.t;
   vp.showGizmo(c.map((v, k) => v + t[k]), f.params.r, dialog.mode, (pos, rot) => {
     const cur = doc.features[dialog.index];
