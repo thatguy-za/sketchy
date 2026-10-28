@@ -4,6 +4,20 @@
 
 Sketchy is focused on 3D design and 3D printing: sketches with constraints, a parametric timeline, named parameters, patterns, sweeps and lofts, version history, and an MCP server so AI assistants can build for you. It runs in your browser, saves to a machine you control, and is free and open source. It leaves out simulation, CAM, rendering and the rest of a full CAD suite to stay small and fast.
 
+## Screenshots
+
+![A mounting bracket in Sketchy: the browser tree, the model and the timeline along the bottom](docs/images/overview.jpg)
+
+The browser tree on the left lists bodies and sketches. The timeline along the bottom is the history of the design: click any step to edit it and everything after it rebuilds.
+
+![The Extrude dialog with a live preview of the boss being added](docs/images/extrude.jpg)
+
+Tools open a small dialog with a live preview in the model. Extrude can join, cut, intersect or make a new body.
+
+![The Move / Copy dialog with X, Y and Z columns](docs/images/move.jpg)
+
+Move, rotate and scale one or several bodies at once, or drag the gizmo in the model.
+
 ## Self hosting
 
 You only need [Docker](https://docs.docker.com/get-started/get-docker/).
